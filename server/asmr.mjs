@@ -73,7 +73,7 @@ export function baseNameOf(fileName) {
  * 普通路径：archive = null，members = 各目录段。
  * 虚拟路径：archive = 压缩包路径，members = 包内成员段（NUL 之后）。
  */
-function pathLayers(filePath) {
+export function pathLayers(filePath) {
   const s = String(filePath);
   const i = s.indexOf('\u0000');
   const archive = i >= 0 ? s.slice(0, i) : null;

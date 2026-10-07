@@ -15,7 +15,7 @@ import {
   DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -252,6 +252,29 @@ function createV6Tables() {
   `);
 }
 
+/**
+ * V7 表：压缩包成员的缓存登记（P2 按需解码）。
+ * 用途有二：设置界面统计缓存占用；LRU 回收时按 last_used_at 挑选牺牲者。
+ * 缓存文件本身是纯派生数据，整表清空后按需重建即可。
+ */
+function createV7Tables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cache_entries (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      archive_id   INTEGER,
+      member_path  TEXT NOT NULL,
+      track_id     INTEGER,
+      file_path    TEXT NOT NULL,
+      bytes        INTEGER NOT NULL DEFAULT 0,
+      created_at   INTEGER NOT NULL,
+      last_used_at INTEGER NOT NULL,
+      UNIQUE(archive_id, member_path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_cache_entries_lru    ON cache_entries(last_used_at);
+    CREATE INDEX IF NOT EXISTS idx_cache_entries_track  ON cache_entries(track_id);
+  `);
+}
+
 function addV2Columns() {
   const wanted = {
     libraries: [['display_name', 'TEXT']],
@@ -444,6 +467,7 @@ function migrate() {
   addV2Columns();
   createV6Tables();
   addV6Columns();
+  createV7Tables();
 
   let version;
   if (hadMeta) {
@@ -463,9 +487,9 @@ function migrate() {
     migrationReport.albums = result.groups;
     migrationReport.backup = result.backup;
   } else if (version < SCHEMA_VERSION) {
-    // v2/v3/v4/v5 → v6：只补新表与新列，无需重建专辑
+    // v2..v6 → v7：只补新表与新列，无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表`;
+    migrationReport.note = `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表`;
   }
   setMeta('schema_version', String(SCHEMA_VERSION));
   return migrationReport;
@@ -1122,6 +1146,66 @@ export function archiveStats() {
     archiveTracks: Number(t.tracks),
     archivedTracks: Number(t.archived),
   };
+}
+
+/* ========================================================== 压缩包缓存登记 */
+
+/** 登记（或刷新）一个已解码到缓存的成员 */
+export function upsertCacheEntry({
+  archiveId, memberPath, trackId = null, filePath, bytes = 0,
+}) {
+  const t = now();
+  db.prepare(`
+    INSERT INTO cache_entries (archive_id, member_path, track_id, file_path, bytes, created_at, last_used_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(archive_id, member_path) DO UPDATE SET
+      track_id = excluded.track_id, file_path = excluded.file_path,
+      bytes = excluded.bytes, last_used_at = excluded.last_used_at
+  `).run(Number(archiveId), String(memberPath), trackId == null ? null : Number(trackId),
+    String(filePath), Number(bytes) || 0, t, t);
+}
+
+export function getCacheEntry(archiveId, memberPath) {
+  return db.prepare('SELECT * FROM cache_entries WHERE archive_id = ? AND member_path = ?')
+    .get(Number(archiveId), String(memberPath)) ?? null;
+}
+
+/** 播放时刷新 last_used_at（LRU 依赖它，不能省） */
+export function touchCacheEntry(archiveId, memberPath) {
+  db.prepare('UPDATE cache_entries SET last_used_at = ? WHERE archive_id = ? AND member_path = ?')
+    .run(now(), Number(archiveId), String(memberPath));
+}
+
+export function deleteCacheEntry(archiveId, memberPath) {
+  db.prepare('DELETE FROM cache_entries WHERE archive_id = ? AND member_path = ?')
+    .run(Number(archiveId), String(memberPath));
+}
+
+export function listCacheEntries({ archiveId = null } = {}) {
+  return archiveId == null
+    ? db.prepare('SELECT * FROM cache_entries ORDER BY last_used_at').all()
+    : db.prepare('SELECT * FROM cache_entries WHERE archive_id = ? ORDER BY last_used_at')
+      .all(Number(archiveId));
+}
+
+/** 缓存登记汇总（供设置界面显示，与磁盘实测取小值更稳妥，这里给登记值） */
+export function cacheEntryStats() {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS files, COALESCE(SUM(bytes), 0) AS bytes FROM cache_entries
+  `).get();
+  return { files: Number(row.files), bytes: Number(row.bytes) };
+}
+
+/** 某个压缩包内已缓存成员的 member_path 集合（界面判断是否需要预读取） */
+export function cachedMemberPaths(archiveId) {
+  return new Set(db.prepare('SELECT member_path FROM cache_entries WHERE archive_id = ?')
+    .all(Number(archiveId)).map((r) => r.member_path));
+}
+
+/** 记录某压缩包已缓存多少成员（供压缩包视图显示） */
+export function countCachedMembers(archiveId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM cache_entries WHERE archive_id = ?')
+    .get(Number(archiveId)).n;
 }
 
 /* =================================================================== covers */

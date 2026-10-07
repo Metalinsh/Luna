@@ -15,6 +15,7 @@ import * as completeness from './completeness.mjs';
 import * as assets from './assets.mjs';
 import * as lyricsApi from './lyrics.mjs';
 import * as maintenance from './maintenance.mjs';
+import * as collection from './collection.mjs';
 import { analyzeRelease } from './asmr.mjs';
 
 /** 视频轨要用 video/* 才能被浏览器的 <video> 播放 */
@@ -133,7 +134,7 @@ app.post('/api/dialog/folder', asyncRoute(async (req, res) => {
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
     '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
-    "$d.Description = '选择音乐库目录'",
+    "$d.Description = '选择目录'",
     '$d.ShowNewFolderButton = $true',
     "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }",
   ].join('; ');
@@ -156,6 +157,62 @@ app.post('/api/dialog/folder', asyncRoute(async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: `无法打开目录选择框：${err.message}` });
   }
+}));
+
+/**
+ * 选择图片文件（设置里的自定义背景图用）。
+ * 与选目录分开：这里用 OpenFileDialog 并限定图片扩展名。
+ */
+app.post('/api/dialog/image', asyncRoute(async (req, res) => {
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+    '$d = New-Object System.Windows.Forms.OpenFileDialog',
+    "$d.Title = '选择背景图片'",
+    "$d.Filter = '图片文件|*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp|所有文件|*.*'",
+    '$d.CheckFileExists = $true',
+    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }",
+  ].join('; ');
+
+  const run = (exe) => new Promise((resolve, reject) => {
+    execFile(exe, ['-NoProfile', '-STA', '-Command', script], { timeout: 180000 }, (err, stdout) => {
+      if (err) reject(err); else resolve(String(stdout ?? '').trim());
+    });
+  });
+
+  try {
+    let picked;
+    try {
+      picked = await run('powershell.exe');
+    } catch {
+      picked = await run('pwsh.exe');
+    }
+    if (!picked) return res.json({ ok: false, cancelled: true });
+    res.json({ ok: true, path: picked });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: `无法打开图片选择框：${err.message}` });
+  }
+}));
+
+/**
+ * 直接按绝对路径提供图片字节（设置里的自定义背景图）。
+ *
+ * 仅服务本机 127.0.0.1 的自家界面，且只允许图片扩展名；
+ * 不做目录白名单是因为用户本来就可以把背景图放在任意位置。
+ */
+app.get('/api/local-image', asyncRoute(async (req, res) => {
+  const p = String(req.query.path ?? '');
+  if (!p || !path.isAbsolute(p)) return badRequest(res, '需要一个绝对路径');
+  if (!/\.(jpe?g|png|webp|gif|bmp)$/i.test(p)) return badRequest(res, '只支持图片文件');
+  let st;
+  try {
+    st = await fsp.stat(p);
+  } catch {
+    return res.status(404).json({ error: '图片不存在或不可访问' });
+  }
+  if (!st.isFile()) return badRequest(res, '不是一个文件');
+  res.setHeader('Content-Type', MIME_BY_EXT[path.extname(p).toLowerCase()] ?? 'application/octet-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  return res.sendFile(path.resolve(p));
 }));
 
 app.post('/api/reveal', (req, res) => {
@@ -282,6 +339,16 @@ app.get('/api/albums/:id', (req, res) => {
   /* 音声发行：按「版本 + 轨号」合并成轨道行 */
   const versions = store.listAlbumVersions(id);
   const detailed = store.listVoiceTracks(id);
+
+  // 该专辑涉及的压缩包里，哪些成员已经解码进缓存 —— 已缓存的不再弹预读取询问
+  const cachedByArchive = new Map();
+  for (const t of detailed) {
+    if (t.source_kind !== 'archive_member' || !t.archive_id) continue;
+    if (!cachedByArchive.has(t.archive_id)) {
+      cachedByArchive.set(t.archive_id, store.cachedMemberPaths(t.archive_id));
+    }
+  }
+
   const rows = new Map();
   for (const t of detailed) {
     const key = `${t.is_bonus ? 'bonus:' : ''}${t.track_key}`;
@@ -309,12 +376,19 @@ app.get('/api/albums/:id', (req, res) => {
       ext: t.ext,
       size: t.size,
       duration: t.duration,
-      // 压缩包状态：界面据此显示「包内」并禁用播放（P1 只读挂载）
+      // 压缩包状态：界面据此显示来源、并在未缓存时弹出预读取询问
       source_kind: t.source_kind ?? 'file',
       materialized_state: t.materialized_state ?? 'ready',
       archive_id: t.archive_id ?? null,
       member_path: t.member_path ?? null,
-      playable: !(t.source_kind === 'archive_member' && t.materialized_state !== 'ready'),
+      /** 是否已在缓存中（已缓存则直接播放，不再询问） */
+      cached: t.source_kind === 'archive_member'
+        ? (cachedByArchive.get(t.archive_id)?.has(t.member_path) ?? false)
+        : true,
+      /** 仍需先预读取才能播放 */
+      needs_prefetch: t.source_kind === 'archive_member'
+        && t.materialized_state !== 'ready'
+        && !(cachedByArchive.get(t.archive_id)?.has(t.member_path) ?? false),
       stream_url: `/api/stream/${t.id}`,
     });
   }
@@ -742,24 +816,27 @@ app.get('/api/stream/:id', asyncRoute(async (req, res) => {
   if (!track) return res.status(404).json({ error: '曲目不存在' });
 
   /**
-   * 压缩包内的曲目尚未落盘（P1 只读挂载）：**明确拒绝**，不假装能播。
-   * 必须在 fsp.stat 之前判断 —— 虚拟路径不是真实文件，stat 必然失败，
-   * 会退化成误导性的 410「文件已被移动或删除」。
-   * 按需解码与流播见 docs/压缩包支持设计.md §7 的 P2。
+   * 压缩包内的曲目：先确保已解码到缓存，再对缓存文件做正常的 Range 流。
+   * 容量不足 / 成员过大 / 源包不可达时**明确拒绝**并给出可读原因，
+   * 绝不假装能播（设计文档 §5.4 的诚实降级原则）。
    */
+  let filePath = track.path;
   if (track.source_kind === 'archive_member' && track.materialized_state !== 'ready') {
-    return res.status(409).json({
-      error: '该曲目位于压缩包内，尚未实现直接播放（规划中的 P2：按需解码到缓存）',
-      code: 'ARCHIVE_NOT_MATERIALIZED',
-      archiveId: track.archive_id ?? null,
-      memberPath: track.member_path ?? null,
-      materializedState: track.materialized_state,
-    });
+    const resolved = await collection.resolvePlayableFile(track);
+    if (!resolved.ok) {
+      return res.status(409).json({
+        error: resolved.reason,
+        code: resolved.code,
+        archiveId: track.archive_id ?? null,
+        memberPath: track.member_path ?? null,
+      });
+    }
+    filePath = resolved.file;
   }
 
   let stat;
   try {
-    stat = await fsp.stat(track.path);
+    stat = await fsp.stat(filePath);
   } catch {
     return res.status(410).json({ error: '文件已被移动或删除' });
   }
@@ -779,7 +856,7 @@ app.get('/api/stream/:id', asyncRoute(async (req, res) => {
   if (!range) {
     res.setHeader('Content-Length', stat.size);
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(track.path).pipe(res);
+    return fs.createReadStream(filePath).pipe(res);
   }
 
   const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
@@ -808,7 +885,7 @@ app.get('/api/stream/:id', asyncRoute(async (req, res) => {
   res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
   res.setHeader('Content-Length', end - start + 1);
   if (req.method === 'HEAD') return res.end();
-  return fs.createReadStream(track.path, { start, end }).pipe(res);
+  return fs.createReadStream(filePath, { start, end }).pipe(res);
 }));
 
 /* ------------------------------------------------------------------- backup */
@@ -1104,8 +1181,105 @@ app.post('/api/config', (req, res) => {
   if (req.body?.host != null) patch.host = String(req.body.host);
   if (req.body?.coverSize != null) patch.coverSize = String(req.body.coverSize);
   if (req.body?.playMode != null) patch.playMode = String(req.body.playMode);
+  // 压缩包（P2）：预取策略与缓存上限/目录
+  if (req.body?.archive && typeof req.body.archive === 'object') {
+    const a = req.body.archive;
+    const next = {};
+    if (a.prefetch != null) next.prefetch = String(a.prefetch);
+    if (a.cacheDir != null) next.cacheDir = String(a.cacheDir);
+    if (a.maxBytes != null) next.maxBytes = Number(a.maxBytes);
+    if (Object.keys(next).length) patch.archive = next;
+  }
+  // 外观：配色 / 背景透明 / 背景图
+  if (req.body?.appearance && typeof req.body.appearance === 'object') {
+    const a = req.body.appearance;
+    const next = {};
+    if (a.theme != null) next.theme = String(a.theme);
+    if (a.bgOpacity != null) next.bgOpacity = Number(a.bgOpacity);
+    if (a.bgImage !== undefined) next.bgImage = a.bgImage ? String(a.bgImage) : null;
+    if (Object.keys(next).length) patch.appearance = next;
+  }
   res.json({ config: writeConfig(patch) });
 });
+
+/* ------------------------------------------------------- 压缩包缓存管理（P2） */
+
+app.get('/api/archive/cache', asyncRoute(async (req, res) => {
+  res.json({ cache: await collection.cacheStatus() });
+}));
+
+app.post('/api/archive/cache/clear', asyncRoute(async (req, res) => {
+  const result = await collection.clearCache({ force: Boolean(req.body?.force) });
+  if (!result.ok && result.error) return res.status(409).json({ result, cache: await collection.cacheStatus() });
+  res.json({ result, cache: await collection.cacheStatus() });
+}));
+
+/**
+ * 预读取：把曲目按需解码到缓存。
+ *
+ * body: { trackId } 或 { albumId, mode: 'album' }
+ * 返回逐条结果与汇总；容量不足 / 成员过大时逐条给出 code 与原因，
+ * 前端据此提示用户（用户要求「超过缓存容量则放弃读取并提示文件过大」）。
+ */
+app.post('/api/archive/prefetch', asyncRoute(async (req, res) => {
+  const body = req.body ?? {};
+  const t0 = Date.now();
+
+  let tracks = [];
+  let label = '';
+  if (body.albumId != null) {
+    const albumId = parseId(body.albumId);
+    if (!albumId) return badRequest(res, '无效的专辑 ID');
+    const album = store.getAlbumById(albumId);
+    if (!album) return res.status(404).json({ error: '专辑不存在' });
+    // 带上 bonus：预读取整张时特典也该一起就绪
+    tracks = store.listVoiceTracks(albumId)
+      .filter((t) => t.source_kind === 'archive_member')
+      .filter((t) => t.file_kind !== 'video');   // 视频不参与音频队列
+    label = album.title ?? '';
+  } else {
+    const trackId = parseId(body.trackId);
+    if (!trackId) return badRequest(res, '需要 trackId 或 albumId');
+    const t = store.getTrack(trackId);
+    if (!t) return res.status(404).json({ error: '曲目不存在' });
+    tracks = [t];
+    label = t.title ?? t.filename ?? '';
+  }
+
+  if (!tracks.length) {
+    return res.json({ result: { ok: true, total: 0, done: 0, failed: 0, bytes: 0, ms: 0, label, items: [] } });
+  }
+
+  // 正在播放的文件不能成为 LRU 牺牲者
+  const protect = new Set();
+  for (const t of tracks) {
+    const e = t.archive_id && t.member_path ? store.getCacheEntry(t.archive_id, t.member_path) : null;
+    if (e) protect.add(e.file_path);
+  }
+
+  const items = [];
+  let done = 0;
+  let failed = 0;
+  let bytes = 0;
+  for (const t of tracks) {
+    const r = await collection.ensureMemberCached(t, { protect });
+    if (r.ok) {
+      done += 1;
+      bytes += r.bytes;
+      items.push({ trackId: t.id, ok: true, cached: r.cached, bytes: r.bytes });
+    } else {
+      failed += 1;
+      items.push({ trackId: t.id, ok: false, code: r.code, reason: r.reason });
+    }
+  }
+
+  res.json({
+    result: {
+      ok: failed === 0, total: tracks.length, done, failed, bytes,
+      ms: Date.now() - t0, label, items,
+    },
+  });
+}));
 
 /* -------------------------------------------------------------- spa fallback */
 

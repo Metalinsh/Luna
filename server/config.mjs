@@ -28,6 +28,25 @@ export const UNDO_DIR = path.join(DATA_DIR, 'undo');
 export const DB_FILE = path.join(DATA_DIR, 'library.db');
 export const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 
+/**
+ * 应用根目录：开发时是项目目录，打包后是 exe 所在目录。
+ * 与 DATA_DIR 区分：DATA_DIR 是「数据库与封面」，本值是「程序自身所在」。
+ * 便携版运行时会被解压到临时目录，真正的 exe 位置由 PORTABLE_EXECUTABLE_DIR 给出。
+ */
+export const APP_ROOT = process.env.PORTABLE_EXECUTABLE_DIR
+  ? path.resolve(process.env.PORTABLE_EXECUTABLE_DIR)
+  : ROOT;
+
+/** 压缩包按需解码的缓存目录名（默认在应用根目录下） */
+export const CACHE_DIR_NAME = 'luna_cache';
+
+/**
+ * 缓存目录默认值：**应用根目录**下的 luna_cache/。
+ * 与 DATA_DIR 的区别：缓存可能很大（几十 GB），跟 exe 走才不会污染系统盘。
+ * 用户可在设置界面改成任意目录。
+ */
+export const DEFAULT_CACHE_DIR = path.join(APP_ROOT, CACHE_DIR_NAME);
+
 const DEFAULT_CONFIG = {
   port: 8787,
   host: '127.0.0.1',
@@ -35,7 +54,50 @@ const DEFAULT_CONFIG = {
   playMode: 'list-loop',
   search: { ftsThreshold: 20000 },
   backup: { location: 'near-library', keepJobs: 3, maxSizeGb: 30 },
+  /** 压缩包（P2）：预取策略与缓存上限 */
+  archive: {
+    /** off = 不预读取；next = 仅预读取下一首；album = 预读取专辑 */
+    prefetch: 'next',
+    cacheDir: DEFAULT_CACHE_DIR,
+    /** 允许占用的缓存上限（字节），默认 20 GiB */
+    maxBytes: 20 * 1024 ** 3,
+  },
+  /** 外观：配色方案、背景透明、自定义背景图 */
+  appearance: {
+    theme: 'midnight',
+    /** 0–100：数值越大，界面底色越不透明 */
+    bgOpacity: 100,
+    /** 自定义背景图（绝对路径），null 表示无 */
+    bgImage: null,
+  },
 };
+
+const PREFETCH_MODES = new Set(['off', 'next', 'album']);
+const THEMES = new Set(['midnight', 'nebula', 'graphite']);
+
+/** 配置值归一化：越界或非法的输入一律退回默认，避免坏配置把界面弄坏 */
+function sanitize(cfg) {
+  const d = DEFAULT_CONFIG;
+  const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+  const archive = { ...d.archive, ...(cfg.archive ?? {}) };
+  if (!PREFETCH_MODES.has(archive.prefetch)) archive.prefetch = d.archive.prefetch;
+  archive.cacheDir = String(archive.cacheDir ?? '').trim() || d.archive.cacheDir;
+  // 上限：不小于 512 MiB，避免用户填个极小值让功能完全不可用
+  archive.maxBytes = Math.max(512 * 1024 ** 2, num(archive.maxBytes, d.archive.maxBytes));
+
+  const appearance = { ...d.appearance, ...(cfg.appearance ?? {}) };
+  if (!THEMES.has(appearance.theme)) appearance.theme = d.appearance.theme;
+  appearance.bgOpacity = Math.min(100, Math.max(0, num(appearance.bgOpacity, 100)));
+  appearance.bgImage = appearance.bgImage ? String(appearance.bgImage) : null;
+
+  return {
+    ...d, ...cfg, search: { ...d.search, ...(cfg.search ?? {}) },
+    backup: { ...d.backup, ...(cfg.backup ?? {}) }, archive, appearance,
+  };
+}
+
+export { PREFETCH_MODES, THEMES };
 
 /** 写操作备份目录名（放在音乐库根目录下，保证与源文件同卷，rename 零拷贝） */
 export const UNDO_DIR_NAME = '.lam-undo';
@@ -54,14 +116,36 @@ export function readConfig() {
   ensureDirs();
   try {
     const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    return sanitize({ ...DEFAULT_CONFIG, ...JSON.parse(raw) });
   } catch {
-    return { ...DEFAULT_CONFIG };
+    return sanitize({ ...DEFAULT_CONFIG });
   }
 }
 
-export function writeConfig(patch) {
-  const next = { ...readConfig(), ...patch };
+/** 实际生效的缓存目录（校验用户填的值，非法则回退默认） */
+export function resolveCacheDir(cfg = readConfig()) {
+  const raw = String(cfg?.archive?.cacheDir ?? '').trim();
+  if (!raw) return DEFAULT_CACHE_DIR;
+  try {
+    return path.resolve(raw);
+  } catch {
+    return DEFAULT_CACHE_DIR;
+  }
+}
+
+/**
+ * 写入配置（**嵌套对象按段合并**，避免只传一个子字段就把整段覆盖掉）。
+ * 写入前统一 sanitize，因此磁盘上不会出现越界或非法的值。
+ */
+export function writeConfig(patch = {}) {
+  const current = readConfig();
+  const merged = { ...current, ...patch };
+  for (const key of ['search', 'backup', 'archive', 'appearance']) {
+    if (patch[key] && typeof patch[key] === 'object') {
+      merged[key] = { ...current[key], ...patch[key] };
+    }
+  }
+  const next = sanitize(merged);
   ensureDirs();
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2), 'utf8');
   return next;

@@ -1,7 +1,19 @@
 :root {
-  --bg: #0b0b0f;
-  --bg-elev: #131319;
-  --bg-elev-2: #1b1b24;
+  /*
+   * 配色分层（外观设置的作用面**只限「大块面」**）：
+   *   --bg-surface  ← 主内容区 / 侧栏 / 底部播放条：**受背景透明度影响**
+   *   --bg-elev     ← 卡片、面板、输入框、弹窗：**始终不透明**
+   * 这样调透明度时，变化发生在占面积最大的主区域，
+   * 而设置抽屉之类的浮层不会跟着一起变透明（那会看不清内容）。
+   */
+  --bg-l0: #0b0b0f;
+  --bg-l1: #131319;
+  --bg-l2: #1b1b24;
+  --bg-alpha-pct: 100%;
+  --bg-surface: color-mix(in srgb, var(--bg-l0) var(--bg-alpha-pct), transparent);
+  --bg: var(--bg-surface);
+  --bg-elev: var(--bg-l1);
+  --bg-elev-2: var(--bg-l2);
   --line: rgba(255, 255, 255, 0.08);
   --line-strong: rgba(255, 255, 255, 0.16);
   --fg: #ececf1;
@@ -17,6 +29,48 @@
   --player-h: 88px;
   --sidebar-w: 260px;
   color-scheme: dark;
+}
+
+/*
+ * 自定义背景图（外观设置写入 --bg-image）。
+ * 铺在 .app 上并用 ::before 做一层，使主内容区（.main 透明）能透出图片；
+ * 卡片、抽屉等浮层仍走不透明的 --bg-elev，不受影响。
+ */
+.app { position: relative; }
+.app::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background-image: var(--bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+.main, .sidebar { position: relative; z-index: 1; }
+
+/* ---------------------------------------------------------- 配色方案（外观） */
+/* 午夜紫（默认，:root 已是该方案，这里只为显式选择时保持可读） */
+:root[data-theme="midnight"] {
+  --bg-l0: #0b0b0f; --bg-l1: #131319; --bg-l2: #1b1b24;
+  --accent: #7d6cf5; --accent-soft: rgba(125, 108, 245, 0.16); --accent-2: #43dfb8;
+}
+/* 星际青：冷色、高对比 */
+:root[data-theme="nebula"] {
+  --bg-l0: #061418; --bg-l1: #0b2028; --bg-l2: #102b34;
+  --line: rgba(255, 255, 255, 0.09); --line-strong: rgba(255, 255, 255, 0.18);
+  --fg: #e6f5f8; --fg-dim: #8fb3bd; --fg-faint: #5d7f8a;
+  --accent: #2fd4e0; --accent-soft: rgba(47, 212, 224, 0.16); --accent-2: #7be8a8;
+  --warn: #f2c46a;
+}
+/* 石墨橙：低饱和、暖色点缀 */
+:root[data-theme="graphite"] {
+  --bg-l0: #121212; --bg-l1: #1a1a1a; --bg-l2: #232323;
+  --line: rgba(255, 255, 255, 0.09); --line-strong: rgba(255, 255, 255, 0.17);
+  --fg: #f2f0ec; --fg-dim: #a5a09a; --fg-faint: #726d67;
+  --accent: #ff8a3d; --accent-soft: rgba(255, 138, 61, 0.16); --accent-2: #ffd166;
+  --warn: #ffb454;
 }
 
 * { box-sizing: border-box; }
@@ -57,7 +111,8 @@ input, select { font: inherit; }
 }
 
 .sidebar {
-  background: linear-gradient(180deg, #101017 0%, #0c0c11 100%);
+  background: var(--sidebar-bg, var(--bg-surface));
+  position: relative; z-index: 1;
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
@@ -67,6 +122,16 @@ input, select { font: inherit; }
 }
 
 .brand { display: flex; align-items: center; gap: 11px; padding: 0 4px; }
+/* 设置按钮：与品牌图标同排，靠右，垂直居中对齐 */
+.brand-settings {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--fg-dim); transition: all .15s ease;
+}
+.brand-settings:hover { color: var(--fg); background: rgba(255, 255, 255, .07); }
+.brand-settings:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.brand-settings.is-active { color: var(--accent); background: var(--accent-soft); }
 .brand-mark {
   width: 32px; height: 32px; border-radius: 50%; flex: none; display: block;
   box-shadow: 0 0 20px rgba(169, 195, 194, .3);
@@ -154,7 +219,7 @@ input, select { font: inherit; }
 
 /* --------------------------------------------------------------------- main */
 
-.main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; position: relative; z-index: 1; background: var(--bg-surface); }
 
 .topbar {
   display: flex; align-items: center; gap: 12px;
@@ -310,12 +375,13 @@ body.is-col-resizing * { cursor: col-resize !important; }
   font-size: 10px; color: var(--fg-faint); border: 1px solid var(--line);
   padding: 1px 5px; border-radius: 5px; text-transform: uppercase; letter-spacing: .06em;
 }
-/* 压缩包内曲目：不适用 uppercase，且用暖色区分 */
-.t-badge.is-arch {
-  text-transform: none; letter-spacing: 0; cursor: help;
-  color: #ffd08a; border-color: rgba(240,184,102,.45); background: rgba(240,184,102,.1);
+/* 专辑墙角标：来源提示（不是禁播标记） */
+.badge.is-archive { color: #ffd08a; border-color: rgba(240,184,102,.45); }
+.archive-note {
+  margin-top: 8px; padding: 7px 9px; border-radius: 6px;
+  background: rgba(240,184,102,.08); border: 1px solid rgba(240,184,102,.25);
+  color: var(--fg-dim); line-height: 1.55;
 }
-.track-row[data-archived="1"] .t-title { cursor: help; }
 
 /* -------------------------------------------------------------------- stats */
 
@@ -819,24 +885,6 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 }
 .ver-chip.is-video { color: #ff9ed8; border-color: rgba(240,120,190,.35); }
 .ver-chip.is-video.is-active { background: rgba(240,120,190,.2); border-color: #ff9ed8; }
-/* 压缩包内曲目（P1 只读挂载）：可点但会明确告知暂不能播放，视觉上退到背景层 */
-.ver-chip.is-archived {
-  cursor: help; color: var(--fg-dim);
-  border-style: dashed; border-color: rgba(255,255,255,.18);
-  background: repeating-linear-gradient(135deg,
-    rgba(255,255,255,.03) 0 5px, rgba(255,255,255,.06) 5px 10px);
-}
-.ver-chip.is-archived:hover { color: var(--fg); border-color: rgba(240,184,102,.45); }
-.chip-arch {
-  margin-left: 5px; padding: 0 4px; border-radius: 4px; font-size: 9px;
-  background: rgba(240,184,102,.18); color: #ffd08a; vertical-align: 1px;
-}
-.badge.is-archive { color: #ffd08a; border-color: rgba(240,184,102,.45); }
-.archive-note {
-  margin-top: 8px; padding: 7px 9px; border-radius: 6px;
-  background: rgba(240,184,102,.08); border: 1px solid rgba(240,184,102,.25);
-  color: var(--fg-dim); line-height: 1.55;
-}
 .row-warn { color: var(--warn); margin-left: 6px; cursor: help; }
 
 /* 特典分组 */
@@ -978,3 +1026,104 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
   border-color: rgba(90,200,240,.8);
   color: #d5f6ff;
 }
+
+/* ==================================================================== 设置 */
+
+.drawer-settings { width: min(560px, 94vw); }
+
+/* 分段：每段一个标题 + 若干行控件 */
+.set-sec { display: flex; flex-direction: column; gap: 12px; }
+.set-sec + .set-sec { border-top: 1px solid var(--line); padding-top: 18px; }
+.set-sec > h4 {
+  margin: 0; font-size: 13px; letter-spacing: .04em; color: var(--fg-dim);
+  text-transform: none; display: flex; align-items: center; gap: 7px;
+}
+.set-sec > h4 .set-sec-tag {
+  font-size: 10.5px; padding: 1px 6px; border-radius: 99px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid transparent;
+}
+.set-row { display: flex; align-items: flex-start; gap: 12px; }
+.set-row > .set-label { flex: 0 0 116px; padding-top: 7px; font-size: 12.5px; color: var(--fg-dim); }
+.set-row > .set-control { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.set-note { font-size: 11.5px; color: var(--fg-faint); line-height: 1.6; }
+.set-note.is-warn { color: var(--warn); }
+.set-note.is-error { color: #ff9a9a; }
+.set-inline { display: flex; align-items: center; gap: 8px; }
+.set-inline > input[type="text"] { flex: 1; min-width: 0; }
+
+.set-input, .set-select {
+  background: var(--bg-elev-2); border: 1px solid var(--line); color: var(--fg);
+  border-radius: 9px; padding: 7px 10px; font-size: 13px; width: 100%;
+}
+.set-input:focus, .set-select:focus { outline: none; border-color: var(--accent); }
+.set-input[readonly] { color: var(--fg-dim); }
+
+/* 缓存用量条 */
+.set-bar {
+  height: 7px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden;
+}
+.set-bar > i {
+  display: block; height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .3s ease;
+}
+.set-bar.is-warn > i { background: linear-gradient(90deg, var(--warn), #ff8f6b); }
+
+/* 外观：配色方案卡片 */
+.theme-list { display: flex; gap: 10px; }
+.theme-card {
+  flex: 1; cursor: pointer; border-radius: 11px; padding: 10px 11px;
+  background: var(--bg-elev-2); border: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 8px; transition: all .14s ease;
+}
+.theme-card:hover { border-color: var(--line-strong); }
+.theme-card.is-active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.theme-card .theme-name { font-size: 12.5px; color: var(--fg); }
+.theme-card .theme-dots { display: flex; gap: 5px; }
+.theme-card .theme-dots i {
+  width: 15px; height: 15px; border-radius: 50%; display: block;
+  border: 1px solid rgba(255,255,255,.18);
+}
+
+/* 背景透明度滑块 */
+.set-slider { display: flex; align-items: center; gap: 10px; }
+.set-slider input[type="range"] { flex: 1; accent-color: var(--accent); }
+.set-slider .set-slider-val {
+  font-size: 12px; color: var(--fg-dim); min-width: 38px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 背景图预览 */
+.bg-preview {
+  height: 74px; border-radius: 10px; border: 1px solid var(--line);
+  background-size: cover; background-position: center;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--fg-faint); font-size: 12px;
+}
+
+/* --------------------------------------------------- 压缩包预读取（P2 界面） */
+
+/* 预读取询问框：三个按钮，窄屏允许换行 */
+.dlg-actions-wrap { flex-wrap: wrap; gap: 6px; }
+
+/* 解码进度浮层：只在等待时出现，不阻塞其它操作 */
+.pf-progress {
+  position: fixed; left: 50%; top: 18px; transform: translateX(-50%);
+  z-index: 90; pointer-events: none;
+}
+.pf-progress-inner {
+  display: flex; align-items: center; gap: 11px;
+  padding: 10px 16px; border-radius: 12px;
+  background: var(--bg-elev); border: 1px solid var(--line-strong);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+.pf-spin {
+  width: 16px; height: 16px; flex: none; border-radius: 50%;
+  border: 2px solid var(--accent-soft); border-top-color: var(--accent);
+  animation: pf-rotate .8s linear infinite;
+}
+@keyframes pf-rotate { to { transform: rotate(360deg); } }
+.pf-progress-text { display: flex; flex-direction: column; gap: 2px; }
+.pf-progress-text b { font-size: 12.5px; font-weight: 600; }
+.pf-progress-text span { font-size: 11px; color: var(--fg-faint); }
+

@@ -19,6 +19,13 @@
         <div class="brand-title">Luna</div>
         <div class="brand-sub" id="brandSub">未连接</div>
       </div>
+      <!-- 设置：与 brand 同排（垂直方向与品牌图标居中对齐），靠右 -->
+      <button class="icon-btn brand-settings" id="settingsBtn" title="设置" aria-label="设置">
+        <svg viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="3.2"/>
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 8a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V8a1.7 1.7 0 0 0 1.5 1H22a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>
+        </svg>
+      </button>
     </div>
 
     <nav class="nav">
@@ -280,6 +287,31 @@
   </form>
 </dialog>
 
+<!-- 压缩包预读取询问（P2）：让用户选择预读取范围，或放弃 -->
+<dialog class="dlg dlg-narrow" id="prefetchDialog">
+  <form method="dialog">
+    <h3 id="pfTitle">该发行来自压缩包，播放需预读取</h3>
+    <p class="hint" id="pfText"></p>
+    <div class="dlg-actions dlg-actions-wrap">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" id="pfCancel">暂不</button>
+      <button class="btn btn-ghost" type="button" id="pfTrack">仅此单曲</button>
+      <button class="btn btn-primary" type="button" id="pfAlbum">整张专辑</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 预读取进度（只在解码期间显示） -->
+<div class="pf-progress" id="pfProgress" hidden>
+  <div class="pf-progress-inner">
+    <div class="pf-spin" aria-hidden="true"></div>
+    <div class="pf-progress-text">
+      <b id="pfProgressTitle">正在预读取…</b>
+      <span id="pfProgressNote">首次播放需要把包内文件解码到缓存</span>
+    </div>
+  </div>
+</div>
+
 <!-- 通用确认框（替代 Electron 不支持的 window.confirm） -->
 <dialog class="dlg dlg-narrow" id="confirmDialog">
   <form method="dialog">
@@ -304,6 +336,24 @@
   </div>
 </div>
 
+<div class="drawer-backdrop" id="settingsBackdrop" hidden></div>
+<aside class="drawer drawer-settings" id="settingsDrawer" hidden>
+  <div class="drawer-head">
+    <h3>设置</h3>
+    <button class="icon-btn" id="settingsCloseBtn" title="关闭 (ESC)">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body" id="settingsBody"></div>
+  <div class="drawer-foot">
+    <div class="drawer-impact" id="settingsHint">设置保存在 data/config.json，随软件一起走。</div>
+    <div class="drawer-actions">
+      <button class="btn btn-ghost" id="settingsResetBtn">恢复默认</button>
+      <button class="btn btn-primary" id="settingsSaveBtn">保存设置</button>
+    </div>
+  </div>
+</aside>
+
 <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
 <aside class="drawer" id="editDrawer" hidden>
   <div class="drawer-head">
@@ -323,6 +373,8 @@
 </aside>
 
 <input type="file" id="coverFileInput" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" hidden />
+<!-- 纯浏览器模式下没有原生选图对话框，用文件选择兜底 -->
+<input type="file" id="settingsBgFileInput" accept="image/*" hidden />
 
 <div class="toast" id="toast" hidden></div>
 

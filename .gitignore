@@ -10,6 +10,8 @@ data/
 # 把源码目录 tools/release/（发布脚本）一并忽略掉，
 # 导致发布流程从未进入版本历史。
 /Release/
+# 压缩包按需解码的缓存（P2）：纯派生数据，可随时清空重建
+luna_cache/
 dist/
 *.db
 *.db-shm

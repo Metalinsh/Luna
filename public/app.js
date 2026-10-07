@@ -294,10 +294,10 @@ function badgesFor(album) {
     if (album.has_bonus) parts.push('<span class="badge is-bonus" title="包含特典轨道">含特典</span>');
     if (album.has_video) parts.push('<span class="badge is-video" title="部分轨道有视频版">含视频版</span>');
   }
-  // 压缩包只读挂载（P1）：曲目仍在包内未落盘
+  // 压缩包只读挂载：来源提示（专辑墙保留「包内」角标）
   const arch = album.archive;
   if (arch?.archives > 0) {
-    parts.push(`<span class="badge is-archive" title="该发行来自压缩包：${arch.tracks} 条曲目仍在包内，暂不能播放（P2 将支持按需解码）">`
+    parts.push(`<span class="badge is-archive" title="该发行来自压缩包：${arch.tracks} 条曲目在包内，播放时会按需解码">`
       + `🗜 包内 ${arch.tracks}</span>`);
   }
   const c = album.completeness;
@@ -464,19 +464,20 @@ function voiceTrackRowMarkup(row, index) {
       ? `视频版${v.variant_label ? `·${esc(v.variant_label)}` : ''}`
       : esc(baseName);
     const active = v.track_id === row.preferred_track_id ? ' is-active' : '';
-    // 压缩包内曲目：标「包内」并禁用（P1 只读挂载，播放要等 P2）
-    const inArchive = v.playable === false;
+    // 压缩包来源只留数据标记，**不在单曲 chip 上显示「包内」**（用户要求：
+    // 来源信息统一由专辑墙角标与详情页说明条承担，曲目行保持干净）
+    const fromArchive = v.source_kind === 'archive_member';
+    // 仍需先解码的才弹预读取询问；已缓存的直接播
+    const needPrefetch = v.needs_prefetch === true;
     const tip = isVideo
       ? `${esc(v.version_name)}${v.variant_label ? ` · ${esc(v.variant_label)}` : ''}`
       : `${esc(v.version_name)}${v.variant_label ? ` · ${esc(v.variant_label)}` : ''}`;
-    const tipFull = inArchive
-      ? `位于压缩包内：${esc(v.member_path ?? '')}\nP1 只做清单与分类，播放将在 P2（按需解码到缓存）支持`
-      : `${tip} (${esc(v.ext ?? '')})`;
-    return `<button type="button" class="ver-chip${active}${isVideo ? ' is-video' : ''}${inArchive ? ' is-archived' : ''}"
+    return `<button type="button" class="ver-chip${active}${isVideo ? ' is-video' : ''}"
         data-track="${v.track_id}" data-kind="${v.file_kind}" data-label="${label}"
-        ${inArchive ? 'data-archived="1" aria-disabled="true"' : ''}
-        title="${tipFull}">
-        ${isVideo ? '▶ ' : ''}${label}${inArchive ? '<span class="chip-arch">包内</span>' : ''}
+        ${fromArchive ? ' data-from-archive="1"' : ''}
+        ${needPrefetch ? ' data-need-prefetch="1"' : ''}
+        title="${tip} (${esc(v.ext ?? '')})">
+        ${isVideo ? '▶ ' : ''}${label}
       </button>`;
   }).join('');
 
@@ -553,8 +554,8 @@ function voiceDetailMarkup(album, data) {
         </div>
         <div class="voice-notes">音声专辑的名称取自文件夹，艺术家只记录在软件内，<b>不会写回音频文件</b>。</div>
         ${album.archive?.archives > 0 ? `<div class="voice-notes archive-note">
-          🗜 该发行来自压缩包：<b>${album.archive.tracks} 条曲目仍在包内</b>（已按包内目录结构解析版本与轨号）。
-          包内文件不会被修改；<b>播放支持（按需解码到缓存）在规划中的 P2</b>。
+          🗜 该发行来自压缩包：<b>${album.archive.tracks} 条曲目在包内</b>（已按包内目录结构解析版本与轨号）。
+          包内文件不会被修改，播放时会按需解码到缓存。
         </div>` : ''}
       </div>
     </div>
@@ -763,21 +764,32 @@ async function openVoiceAlbum(data, { push = true } = {}) {
     const row = btn.closest('.voice-row');
     const rowData = [...(data.tracks ?? []), ...(data.bonus_tracks ?? [])]
       .find((r) => r.key === row?.dataset.row);
+    const variant = rowData?.variants?.find((v) => v.track_id === Number(btn.dataset.track));
 
-    // 压缩包内曲目尚未落盘：明确告知，不做无效播放尝试（P1 只读挂载）
-    if (btn.dataset.archived === '1') {
-      const member = rowData?.variants?.find((v) => v.track_id === Number(btn.dataset.track))?.member_path;
-      toast(`该曲目仍在压缩包内，暂不能播放${member ? `：${member}` : ''}。播放支持（按需解码到缓存）在规划中的 P2。`, true);
+    const startPlayback = () => {
+      if (btn.dataset.kind === 'video') {
+        openVideoModal(btn.dataset.track, rowData?.title ?? '', btn.dataset.label);
+        return true;
+      }
+      $$('.ver-chip', row).forEach((b) => b.classList.toggle('is-active', b === btn));
+      const q = queueFromRows([{ ...rowData, preferred_track_id: Number(btn.dataset.track) }]);
+      playQueue(q, 0, { cover: album.cover_url, label: `音声《${album.album}》` });
+      return true;
+    };
+
+    // 压缩包来源：未缓存时先让用户决定是否预读取，已缓存直接播放
+    if (btn.dataset.needPrefetch === '1') {
+      pendingMemberBytes = variant?.size ?? null;
+      playArchiveTrack({
+        trackId: btn.dataset.track,
+        label: variant?.title ?? rowData?.title ?? btn.dataset.label,
+        albumId: album.id,
+        trackCount: archivedTrackCount(album),
+        play: async () => startPlayback(),
+      });
       return;
     }
-
-    if (btn.dataset.kind === 'video') {
-      openVideoModal(btn.dataset.track, rowData?.title ?? '', btn.dataset.label);
-      return;
-    }
-    $$('.ver-chip', row).forEach((b) => b.classList.toggle('is-active', b === btn));
-    const q = queueFromRows([{ ...rowData, preferred_track_id: Number(btn.dataset.track) }]);
-    playQueue(q, 0, { cover: album.cover_url, label: `音声《${album.album}》` });
+    startPlayback();
   }));
 
   showView('albumDetail');
@@ -961,14 +973,14 @@ function trackRowMarkup(track, index, { showAlbum = true } = {}) {
   const flags = [];
   if (track.parse_error) flags.push('<span class="t-badge" style="color:#ff9a9a">解析失败</span>');
   if (track.meta_source === 'db-override') flags.push('<span class="t-badge" style="color:var(--warn)">未写回</span>');
-  // 压缩包内曲目（P1 只读挂载）：标注来源并禁用播放
-  const inArchive = track.source_kind === 'archive_member' && track.materialized_state !== 'ready';
-  if (inArchive) flags.push('<span class="t-badge is-arch" title="位于压缩包内，暂不能播放">🗜 包内</span>');
+  // 压缩包来源只在列表数据里保留标记，不在曲目行上显示「包内」（来源信息由专辑角标承担）
+  const needPrefetch = track.source_kind === 'archive_member' && track.needs_prefetch === true;
   return `
     <div class="track-row" data-track-index="${index}" data-track-id="${track.id}"
-         ${inArchive ? 'data-archived="1"' : ''}>
+         ${track.source_kind === 'archive_member' ? 'data-from-archive="1"' : ''}
+         ${needPrefetch ? 'data-need-prefetch="1"' : ''}>
       <div class="t-num">${track.track_no ?? index + 1}</div>
-      <div class="t-title" title="${inArchive ? '该曲目仍在压缩包内，暂不能播放' : '双击播放'}">
+      <div class="t-title" title="双击播放">
         <span>${esc(track.title)}</span>
         ${badge ? `<em class="t-badge">${esc(badge)}</em>` : ''}
         ${flags.join('')}
@@ -2467,23 +2479,44 @@ function bindEvents() {
     const titleCell = e.target.closest('.track-row:not(.is-head) .t-title');
     if (!titleCell) return;
     const row = titleCell.closest('.track-row');
-    // 压缩包内曲目尚未落盘：明确告知而不是发起必然失败的播放（P1 只读挂载）
-    if (row?.dataset.archived === '1') {
-      e.preventDefault();
-      toast('该曲目仍在压缩包内，暂不能播放。播放支持（按需解码到缓存）在规划中的 P2。', true);
-      return;
-    }
     const index = Number(row?.dataset.trackIndex);
     if (!Number.isInteger(index)) return;
     e.preventDefault();
-    if (state.view === 'albumDetail' && state.currentAlbum) {
-      playQueue(state.currentAlbum.tracks, index, {
-        cover: state.currentAlbum.album.cover_url,
-        label: `专辑《${state.currentAlbum.album.album}》`,
+
+    const pickQueue = () => {
+      if (state.view === 'albumDetail' && state.currentAlbum) {
+        return {
+          q: state.currentAlbum.tracks,
+          opts: {
+            cover: state.currentAlbum.album.cover_url,
+            label: `专辑《${state.currentAlbum.album.album}》`,
+          },
+        };
+      }
+      if (state.view === 'tracks' && state.trackList) {
+        return { q: state.trackList, opts: { label: '当前列表' } };
+      }
+      return null;
+    };
+
+    // 压缩包来源：先确定性预读取范围，再播放
+    if (row?.dataset.fromArchive === '1' && row?.dataset.needPrefetch === '1') {
+      const src = pickQueue();
+      const track = src?.q?.[index];
+      if (!track) return;
+      pendingMemberBytes = track.size ?? null;
+      playArchiveTrack({
+        trackId: track.id,
+        label: track.title ?? track.filename,
+        albumId: state.currentAlbum?.album?.id ?? track.album_id ?? null,
+        trackCount: src.q.filter((t) => t.source_kind === 'archive_member').length,
+        play: async () => { playQueue(src.q, index, src.opts); return true; },
       });
-    } else if (state.view === 'tracks' && state.trackList) {
-      playQueue(state.trackList, index, { label: '当前列表' });
+      return;
     }
+
+    const src = pickQueue();
+    if (src) playQueue(src.q, index, src.opts);
   });
 
   $('#backBtn').addEventListener('click', () => history.back());
@@ -2869,7 +2902,8 @@ function bindEvents() {
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !$('#editDrawer').hidden) { closeEditDrawer(); return; }
+    if (e.key === 'Escape' && settingsOpen()) { closeSettings(); return; }
+  if (e.key === 'Escape' && !$('#editDrawer').hidden) { closeEditDrawer(); return; }
     if (e.key === 'Escape' && !$('#nowPlaying').hidden) { setNowPlaying(false); return; }
     const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
     if (typing) return;
@@ -2904,6 +2938,507 @@ async function route() {
 
 /* ================================================================ 启动 */
 
+/* ==================================================== 压缩包预读取（P2 播放） */
+
+/** 详情页打开时记录的候选成员体积，供询问框显示（声明在前，避免 TDZ） */
+let pendingMemberBytes = null;
+
+/**
+ * 压缩包曲目的播放流程（用户要求）：
+ *   点击 → 提示「该发行来自压缩包，播放需预读取」→ 用户选范围（单曲 / 整张）或暂不
+ *   → 选是则开始解码到缓存，解码完成后正常播放；选否直接放弃。
+ *
+ * 预取策略设置决定默认倾向：
+ *   off   → 仍然询问（否则用户点了没反应），但默认按钮落在「仅此单曲」
+ *   next  → 询问，默认「仅此单曲」
+ *   album → 询问，默认「整张专辑」
+ */
+function prefetchDefaults() {
+  const mode = settingsState.config?.archive?.prefetch ?? 'next';
+  return { mode, preferAlbum: mode === 'album' };
+}
+
+function showPrefetchProgress(title, note) {
+  const el = $('#pfProgress');
+  if (!el) return;
+  $('#pfProgressTitle').textContent = title;
+  $('#pfProgressNote').textContent = note ?? '';
+  el.hidden = false;
+}
+
+function hidePrefetchProgress() {
+  const el = $('#pfProgress');
+  if (el) el.hidden = true;
+}
+
+function fmtMB(bytes) {
+  const mb = (Number(bytes) || 0) / 1048576;
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+/** 弹出预读取询问；resolve 为 'track' | 'album' | null（暂不） */
+function askPrefetch({ label, memberBytes, trackCount }) {
+  return new Promise((resolve) => {
+    const dlg = $('#prefetchDialog');
+    if (!dlg) { resolve(null); return; }
+    const { preferAlbum } = prefetchDefaults();
+
+    $('#pfText').innerHTML = [
+      label ? `曲目：<b>${esc(label)}</b>` : '',
+      memberBytes ? `单曲解压后约 <b>${fmtMB(memberBytes)}</b>` : '',
+      trackCount > 1 ? `整张共 <b>${trackCount}</b> 条` : '',
+      settingsState.cache
+        ? `缓存上限 ${fmtMB(settingsState.cache.maxBytes)}，已用 ${fmtMB(settingsState.cache.bytes)}`
+        : '',
+    ].filter(Boolean).join(' · ');
+
+    // 按预取策略调整默认按钮的视觉权重
+    $('#pfAlbum').classList.toggle('btn-primary', preferAlbum);
+    $('#pfAlbum').classList.toggle('btn-ghost', !preferAlbum);
+    $('#pfTrack').classList.toggle('btn-primary', !preferAlbum);
+    $('#pfTrack').classList.toggle('btn-ghost', preferAlbum);
+
+    const done = (v) => {
+      dlg.close();
+      resolve(v);
+    };
+    $('#pfTrack').onclick = () => done('track');
+    $('#pfAlbum').onclick = () => done('album');
+    $('#pfCancel').onclick = () => done(null);
+    dlg.oncancel = () => { resolve(null); };   // ESC
+    dlg.showModal();
+  });
+}
+
+/**
+ * 按需解码后再播放。
+ * @returns {Promise<boolean>} 是否已进入播放（false 表示用户放弃或失败）
+ */
+async function playArchiveTrack({ trackId, label, albumId, trackCount, play }) {
+  const answer = await askPrefetch({
+    label,
+    memberBytes: pendingMemberBytes,
+    trackCount,
+  });
+  if (!answer) return false;   // 用户选择暂不
+
+  const wholeAlbum = answer === 'album' && albumId;
+  showPrefetchProgress(
+    wholeAlbum ? '正在预读取整张专辑…' : '正在预读取…',
+    wholeAlbum ? '首次播放需要把包内文件解码到缓存，可能需要一会儿' : '正在把包内文件解码到缓存',
+  );
+
+  try {
+    const body = wholeAlbum
+      ? { albumId, mode: 'album' }
+      : { trackId };
+    const { result } = await api('/api/archive/prefetch', { method: 'POST', body });
+
+    // 整张模式下若有失败项，把首个原因说清楚（多半是文件过大）
+    const firstFail = result.items?.find((i) => !i.ok);
+    if (wholeAlbum && firstFail) {
+      toast(`部分曲目未能预读取：${firstFail.reason ?? firstFail.code}`, true);
+    }
+    if (!wholeAlbum && !result.ok) {
+      toast(result.items?.[0]?.reason ?? '预读取失败', true);
+      return false;
+    }
+    if (!wholeAlbum && result.done === 0) {
+      toast('预读取未能完成，无法播放', true);
+      return false;
+    }
+    await refreshCacheBadge();
+    return await play();
+  } catch (err) {
+    toast(`预读取失败：${err.message}`, true);
+    return false;
+  } finally {
+    hidePrefetchProgress();
+  }
+}
+
+/** 刷新缓存用量（设置面板若开着，顺手更新，省得数字过时） */
+async function refreshCacheBadge() {
+  await loadCacheStatus();
+  if (settingsOpen()) renderSettings();
+}
+
+/** 该专辑里还有多少条曲目仍需先预读取（供询问框显示「整张共 N 条」） */
+function archivedTrackCount(album) {
+  const all = [...(album?.tracks ?? []), ...(album?.bonus_tracks ?? [])];
+  return all.flatMap((r) => r.variants ?? []).filter((v) => v.needs_prefetch === true).length;
+}
+
+/* ================================================================== 设置面板 */
+
+/**
+ * 设置面板（⚙）。
+ *
+ * 两类项目的保存方式刻意不同：
+ *   - 外观（配色 / 背景透明 / 背景图）**即时生效并自动保存** —— 所见即所得；
+ *   - 压缩包（预取策略 / 缓存上限 / 缓存目录）**点「保存设置」才提交** ——
+ *     这些值影响后端行为，不适合边拖边存。
+ */
+const SETTINGS_THEMES = [
+  { id: 'midnight', name: '午夜紫', dots: ['#0b0b0f', '#7d6cf5', '#43dfb8'] },
+  { id: 'nebula', name: '星际青', dots: ['#061418', '#2fd4e0', '#7be8a8'] },
+  { id: 'graphite', name: '石墨橙', dots: ['#121212', '#ff8a3d', '#ffd166'] },
+];
+const PREFETCH_LABELS = [
+  { id: 'off', name: '不预读取', note: '播放时才解码。最省磁盘，首次播放等待最久。' },
+  { id: 'next', name: '仅预读取下一首', note: '队列里提前解码下一轨，减少切曲停顿。' },
+  { id: 'album', name: '预读取专辑', note: '进入详情页就解码整张。音声整张连听最顺，但占缓存最多。' },
+];
+const GIB = 1024 ** 3;
+
+const settingsState = { config: null, cache: null };
+
+const bgImageUrl = (p) => (p ? `/api/local-image?path=${encodeURIComponent(p)}` : '');
+
+/**
+ * 外观即时套用：只写 CSS 变量，不重启动、不刷新。
+ * 底色用 color-mix 与 transparent 混合，从而支持背景透明度。
+ */
+function applyAppearance(appearance) {
+  const a = appearance ?? { theme: 'midnight', bgOpacity: 100, bgImage: null };
+  const root = document.documentElement;
+  root.dataset.theme = a.theme || 'midnight';
+  const pct = Math.min(100, Math.max(0, Number(a.bgOpacity)));
+  root.style.setProperty('--bg-alpha-pct', `${Number.isFinite(pct) ? pct : 100}%`);
+
+  if (a.bgImage) {
+    root.style.setProperty('--bg-image', `url("${bgImageUrl(a.bgImage)}")`);
+    // 有背景图时侧栏也跟随透明；否则「中间透、两边实」会很割裂
+    root.style.setProperty('--sidebar-bg',
+      'color-mix(in srgb, var(--bg-l0) var(--bg-alpha-pct), transparent)');
+  } else {
+    root.style.removeProperty('--bg-image');
+    root.style.removeProperty('--sidebar-bg');
+  }
+}
+
+/** 保存外观（只提交 appearance 段；后端按段合并，不会动其它设置） */
+async function saveAppearance(patch) {
+  settingsState.config = {
+    ...settingsState.config,
+    appearance: { ...(settingsState.config?.appearance ?? {}), ...patch },
+  };
+  applyAppearance(settingsState.config.appearance);
+  try {
+    const { config } = await api('/api/config', { method: 'POST', body: { appearance: patch } });
+    settingsState.config = config;
+  } catch (err) {
+    toast(`外观设置保存失败：${err.message}`, true);
+  }
+}
+
+/** 可读体积统一用本文件既有的 fmtBytes()（函数声明提升，此处可直接调用） */
+
+async function loadSettingsConfig() {
+  try {
+    const { config } = await api('/api/config');
+    settingsState.config = config;
+    applyAppearance(config.appearance);
+  } catch { /* 取不到配置不阻塞启动，外观保持默认 */ }
+  return settingsState.config;
+}
+
+async function loadCacheStatus() {
+  try {
+    const { cache } = await api('/api/archive/cache');
+    settingsState.cache = cache;
+  } catch (err) {
+    settingsState.cache = { error: err.message };
+  }
+  return settingsState.cache;
+}
+
+function settingsMarkup() {
+  const cfg = settingsState.config ?? {};
+  const arch = cfg.archive ?? { prefetch: 'next', cacheDir: '', maxBytes: 20 * GIB };
+  const app = cfg.appearance ?? { theme: 'midnight', bgOpacity: 100, bgImage: null };
+  const cache = settingsState.cache ?? {};
+
+  const used = Number(cache.bytes ?? 0);
+  const max = Number(cache.maxBytes ?? arch.maxBytes ?? 0);
+  const pct = max > 0 ? Math.min(100, (used / max) * 100) : 0;
+  const warn = pct >= 85;
+  const crossVolume = cache.sameVolumeAsData === false;
+  const unwritable = cache.writable === false;
+  const prefetchNote = PREFETCH_LABELS.find((p) => p.id === arch.prefetch)?.note ?? '';
+
+  return `
+    <section class="set-sec">
+      <h4>压缩包 <span class="set-sec-tag">P2</span></h4>
+      <div class="set-row">
+        <div class="set-label">预取策略</div>
+        <div class="set-control">
+          <select class="set-select" id="setPrefetch">
+            ${PREFETCH_LABELS.map((p) => `<option value="${p.id}"${arch.prefetch === p.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <div class="set-note" id="setPrefetchNote">${esc(prefetchNote)}</div>
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="set-label">缓存上限</div>
+        <div class="set-control">
+          <div class="set-inline">
+            <input class="set-input" id="setMaxGb" type="number" min="0.5" step="0.5"
+                   value="${(Number(arch.maxBytes ?? 20 * GIB) / GIB).toFixed(1)}" />
+            <span class="set-note">GB</span>
+          </div>
+          <div class="set-bar${warn ? ' is-warn' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div>
+          <div class="set-note">
+            已用 <b>${fmtBytes(used)}</b> / ${fmtBytes(max)}（${pct.toFixed(1)}%）
+            ${cache.freeBytes != null ? ` · 磁盘剩余 ${fmtBytes(cache.freeBytes)}` : ''}
+            ${cache.files ? ` · ${cache.files} 个文件` : ''}
+          </div>
+          <div class="set-note">需要解码的文件若大于该上限，会放弃读取并提示文件过大。最小 0.5 GB。</div>
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="set-label">缓存目录</div>
+        <div class="set-control">
+          <div class="set-inline">
+            <input class="set-input" id="setCacheDir" type="text" value="${esc(arch.cacheDir ?? '')}" placeholder="留空使用默认目录" />
+            <button class="btn btn-ghost" id="setCacheDirPick">浏览…</button>
+          </div>
+          <div class="set-note${unwritable ? ' is-error' : ''}">
+            ${unwritable
+    ? `该目录不可写：${esc(cache.error ?? '权限不足')}`
+    : `默认 luna_cache（应用根目录下）。${cache.exists ? '' : '目录尚未创建，首次播放时才生成。'}`}
+          </div>
+          ${crossVolume ? '<div class="set-note is-warn">⚠ 缓存目录与数据目录不在同一个盘：跨盘拷贝会明显削弱缓存加速效果。</div>' : ''}
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="set-label">清理</div>
+        <div class="set-control">
+          <div class="set-inline">
+            <button class="btn btn-ghost" id="setClearCache">清空缓存</button>
+            <span class="set-note">只删除缓存内容，不影响音乐库与压缩包。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="set-sec">
+      <h4>外观</h4>
+      <div class="set-row">
+        <div class="set-label">配色方案</div>
+        <div class="set-control">
+          <div class="theme-list">
+            ${SETTINGS_THEMES.map((t) => `
+              <div class="theme-card${app.theme === t.id ? ' is-active' : ''}" data-theme-pick="${t.id}" role="button" tabindex="0">
+                <div class="theme-dots">${t.dots.map((c) => `<i style="background:${c}"></i>`).join('')}</div>
+                <div class="theme-name">${esc(t.name)}</div>
+              </div>`).join('')}
+          </div>
+          <div class="set-note">切换后立即生效并自动保存。</div>
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="set-label">背景透明度</div>
+        <div class="set-control">
+          <div class="set-slider">
+            <input type="range" id="setBgOpacity" min="0" max="100" step="1" value="${Number(app.bgOpacity ?? 100)}" />
+            <span class="set-slider-val" id="setBgOpacityVal">${Number(app.bgOpacity ?? 100)}%</span>
+          </div>
+          <div class="set-note">数值越小，界面底色越透明；配自定义背景图时观感最明显。</div>
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="set-label">背景图片</div>
+        <div class="set-control">
+          <div class="bg-preview" id="setBgPreview"
+               style="${app.bgImage ? `background-image:url('${esc(bgImageUrl(app.bgImage))}')` : ''}">
+            ${app.bgImage ? '' : '未设置背景图'}
+          </div>
+          <div class="set-inline">
+            <button class="btn btn-ghost" id="setBgPick">选择图片…</button>
+            <button class="btn btn-ghost" id="setBgClear">移除背景</button>
+          </div>
+          <div class="set-note" id="setBgPath">${app.bgImage ? esc(app.bgImage) : '支持 jpg / png / webp / gif / bmp。'}</div>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettings() {
+  const body = $('#settingsBody');
+  if (!body) return;
+  body.innerHTML = settingsMarkup();
+  bindSettingsBody();
+}
+
+async function refreshSettings({ reloadConfig = true } = {}) {
+  if (reloadConfig || !settingsState.config) await loadSettingsConfig();
+  await loadCacheStatus();
+  renderSettings();
+}
+
+function settingsOpen() { return !$('#settingsDrawer')?.hidden; }
+
+function openSettings() {
+  $('#settingsDrawer').hidden = false;
+  $('#settingsBackdrop').hidden = false;
+  $('#settingsBtn').classList.add('is-active');
+  renderSettings();
+  refreshSettings();
+}
+
+function closeSettings() {
+  $('#settingsDrawer').hidden = true;
+  $('#settingsBackdrop').hidden = true;
+  $('#settingsBtn')?.classList.remove('is-active');
+}
+
+/** 提交压缩包设置（预取 / 上限 / 目录） */
+async function saveArchiveSettings() {
+  const prefetch = $('#setPrefetch')?.value ?? 'next';
+  const gb = Number($('#setMaxGb')?.value ?? 20);
+  const cacheDir = $('#setCacheDir')?.value?.trim() ?? '';
+  if (!Number.isFinite(gb) || gb <= 0) { toast('缓存上限需要是正数（GB）', true); return; }
+
+  const prevDir = settingsState.cache?.dir ?? '';
+  try {
+    const { config } = await api('/api/config', {
+      method: 'POST', body: { archive: { prefetch, maxBytes: Math.round(gb * GIB), cacheDir } },
+    });
+    settingsState.config = config;
+    const label = PREFETCH_LABELS.find((p) => p.id === config.archive.prefetch)?.name ?? '';
+    if (config.archive.cacheDir !== prevDir) {
+      // 换目录不会自动搬旧缓存，必须说清楚，否则用户会以为空间没释放
+      toast(`设置已保存。缓存目录改为 ${config.archive.cacheDir}，原有缓存不会自动迁移。`);
+    } else {
+      toast(`设置已保存：${label} · 上限 ${(config.archive.maxBytes / GIB).toFixed(1)} GB`);
+    }
+    await refreshSettings();
+  } catch (err) {
+    toast(`保存失败：${err.message}`, true);
+  }
+}
+
+/** 设置抽屉内控件的事件（每次重绘都要重新绑） */
+function bindSettingsBody() {
+  $('#setPrefetch')?.addEventListener('change', (e) => {
+    const note = PREFETCH_LABELS.find((p) => p.id === e.target.value)?.note ?? '';
+    const el = $('#setPrefetchNote');
+    if (el) el.textContent = note;
+  });
+
+  $$('#settingsBody [data-theme-pick]').forEach((card) => {
+    const pick = () => {
+      // 先把高亮切过去再发请求：refreshSettings 是异步的，否则会看到「高亮没跟上」
+      $$('#settingsBody [data-theme-pick]').forEach((c) => c.classList.toggle('is-active', c === card));
+      saveAppearance({ theme: card.dataset.themePick }).then(() => refreshSettings());
+    };
+    card.addEventListener('click', pick);
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+    });
+  });
+
+  const opacity = $('#setBgOpacity');
+  opacity?.addEventListener('input', () => {
+    const v = Number(opacity.value);
+    $('#setBgOpacityVal').textContent = `${v}%`;
+    // 拖动时只改预览不写盘；松手才保存
+    document.documentElement.style.setProperty('--bg-alpha-pct', `${v}%`);
+  });
+  opacity?.addEventListener('change', () => saveAppearance({ bgOpacity: Number(opacity.value) }));
+
+  $('#setBgPick')?.addEventListener('click', async () => {
+    // 优先用系统原生选图框；不可用时退回浏览器文件选择
+    try {
+      const r = await api('/api/dialog/image', { method: 'POST', body: {} });
+      if (r.cancelled) return;
+      if (r.ok && r.path) { await saveAppearance({ bgImage: r.path }); await refreshSettings(); return; }
+      throw new Error(r.error ?? '未取到图片路径');
+    } catch {
+      $('#settingsBgFileInput').click();
+    }
+  });
+
+  $('#setBgClear')?.addEventListener('click', async () => {
+    await saveAppearance({ bgImage: null });
+    await refreshSettings();
+  });
+
+  $('#setCacheDirPick')?.addEventListener('click', async () => {
+    try {
+      const r = await api('/api/dialog/folder', { method: 'POST', body: {} });
+      if (r.cancelled) return;
+      if (r.ok && r.path) $('#setCacheDir').value = r.path;
+      else toast(r.error ?? '未能选择目录', true);
+    } catch (err) {
+      toast(`打开目录选择框失败：${err.message}`, true);
+    }
+  });
+
+  $('#setClearCache')?.addEventListener('click', async () => {
+    const used = fmtBytes(settingsState.cache?.bytes ?? 0);
+    try {
+      const r = await api('/api/archive/cache/clear', { method: 'POST', body: {} });
+      if (r.result?.ok) toast(`缓存已清空：释放 ${fmtBytes(r.result.bytes)}（原有 ${used}）`);
+      else toast(r.result?.error ?? '清空失败', true);
+    } catch (err) {
+      toast(`清空缓存失败：${err.message}`, true);
+    }
+    await refreshSettings({ reloadConfig: false });
+  });
+}
+
+/** 纯浏览器模式的兜底：把图片转成 data URL 存进配置 */
+function bindSettingsBgFile() {
+  $('#settingsBgFileInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > 8 * 1024 * 1024) {
+      toast('背景图请控制在 8 MB 以内（过大会拖慢界面加载）', true);
+      return;
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(new Error('读取图片失败'));
+      fr.readAsDataURL(file);
+    }).catch((err) => { toast(err.message, true); return null; });
+    if (!dataUrl) return;
+    await saveAppearance({ bgImage: dataUrl });
+    await refreshSettings();
+  });
+}
+
+function bindSettingsEvents() {
+  $('#settingsBtn')?.addEventListener('click', () => (settingsOpen() ? closeSettings() : openSettings()));
+  $('#settingsCloseBtn')?.addEventListener('click', closeSettings);
+  $('#settingsBackdrop')?.addEventListener('click', closeSettings);
+  $('#settingsSaveBtn')?.addEventListener('click', saveArchiveSettings);
+  $('#settingsResetBtn')?.addEventListener('click', async () => {
+    try {
+      const { config } = await api('/api/config', {
+        method: 'POST',
+        body: {
+          archive: { prefetch: 'next', maxBytes: 20 * GIB, cacheDir: '' },
+          appearance: { theme: 'midnight', bgOpacity: 100, bgImage: null },
+        },
+      });
+      settingsState.config = config;
+      applyAppearance(config.appearance);
+      toast('已恢复默认设置');
+    } catch (err) {
+      toast(`恢复默认失败：${err.message}`, true);
+    }
+    await refreshSettings();
+  });
+  bindSettingsBgFile();
+}
+
+/* ==================================================================== 启动 */
+
 (async function main() {
   try {
     bindEvents();
@@ -2913,6 +3448,11 @@ async function route() {
       界面初始化失败：${esc(err.message)}<br />请刷新页面；若持续出现，请查看浏览器控制台。</div>`;
     return;
   }
+  // 设置：先绑事件再拉配置，保证外观在整个界面画出来之前就位（避免主题闪一下）
+  bindSettingsEvents();
+  await loadSettingsConfig();
+  // 缓存额度也要在启动时拿到：预读取询问框要显示「缓存上限/已用」
+  await loadCacheStatus();
   setPlayMode(state.playMode);
   bindColumnResize();
   applyColWidths(currentColWidths());
