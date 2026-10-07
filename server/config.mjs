@@ -4,6 +4,19 @@ import { fileURLToPath } from 'node:url';
 
 export const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const PUBLIC_DIR = path.join(ROOT, 'public');
+
+/**
+ * 应用版本：**唯一来源是 package.json**。
+ * 启动日志、/api/health、打包产物名都从这里取，避免多处硬编码互相漂移。
+ */
+export const APP_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    return String(pkg.version ?? '0.0.0');
+  } catch {
+    return '0.0.0';
+  }
+})();
 /** 数据目录：测试可通过 LAM_DATA_DIR 重定向到临时目录 */
 export const DATA_DIR = process.env.LAM_DATA_DIR
   ? path.resolve(process.env.LAM_DATA_DIR)
