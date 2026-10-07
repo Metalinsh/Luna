@@ -28,6 +28,15 @@
    */
   --overlay-rgb: 16, 16, 22;
   --overlay-blur: 18px;
+  /*
+   * 专辑详情页的曲目列表：**固定 50% 半透明**（不跟背景透明度设置走）。
+   * 单独用一组变量，是为了不牵连设置抽屉/面板/输入框 —— 它们共用 --bg-elev，
+   * 一旦在那里改透明度，抽屉会跟着变透，之前已经踩过这个坑。
+   */
+  --track-list-bg-pct: 50%;
+  --track-bg: color-mix(in srgb, var(--bg-l1) var(--track-list-bg-pct), transparent);
+  --track-head-bg: color-mix(in srgb, var(--bg-l0) var(--track-list-bg-pct), transparent);
+  --track-hover-bg: color-mix(in srgb, #2b2b3a var(--track-list-bg-pct), transparent);
   --cover-grad: linear-gradient(140deg, #232332, #17171f);
   --cover-ph: linear-gradient(140deg, #2a2a3c, #16161e);
   --cover-ph-fg: rgba(var(--mix-fg), .22);
@@ -391,15 +400,15 @@ select {
   grid-template-columns: 44px minmax(120px, 1fr) var(--w-artist, 190px) var(--w-time, 78px);
   align-items: center; gap: 12px; padding: 9px 132px 9px 14px;
   border-bottom: 1px solid rgba(var(--mix-fg),.045);
-  background: var(--bg-elev); transition: background .12s;
+  background: var(--track-bg); transition: background .12s;
   position: relative;
 }
 .track-row:last-child { border-bottom: 0; }
 .track-row.is-head {
-  background: #101017; color: var(--fg-faint); font-size: 11.5px;
+  background: var(--track-head-bg); color: var(--fg-faint); font-size: 11.5px;
   letter-spacing: .1em; text-transform: uppercase; position: sticky; top: -22px;
 }
-.track-row:not(.is-head):hover { background: #1a1a23; }
+.track-row:not(.is-head):hover { background: var(--track-hover-bg); }
 .track-row.is-playing { background: var(--accent-soft); }
 .track-row.is-playing .t-title { color: #cdc6ff; }
 .t-num { color: var(--fg-faint); font-variant-numeric: tabular-nums; text-align: right; font-size: 12.5px; }
