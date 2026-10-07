@@ -223,6 +223,59 @@ try {
     cfg1.appearance.theme === 'nebula' && Number(cfg1.appearance.bgOpacity) === 35,
     JSON.stringify(cfg1.appearance));
 
+  console.log('\n— 深/浅色模式 —');
+  const modeSegs = await cdp.eval(`[...document.querySelectorAll('[data-mode-pick]')].map((b) => b.dataset.modePick)`);
+  ok('提供深色/浅色两个选项', modeSegs.join(',') === 'dark,light', modeSegs.join(','));
+  ok('默认高亮当前模式', await cdp.eval(`document.querySelector('[data-mode-pick].is-active')?.dataset.modePick`) === 'dark',
+    String(await cdp.eval(`document.querySelector('[data-mode-pick].is-active')?.dataset.modePick`)));
+
+  const darkProbe = await cdp.eval(`(() => {
+    const cs = getComputedStyle(document.documentElement);
+    return { mode: document.documentElement.dataset.mode, fg: cs.getPropertyValue('--fg').trim(), mix: cs.getPropertyValue('--mix-fg').trim() };
+  })()`);
+  await cdp.eval(`document.querySelector('[data-mode-pick="light"]').click()`);
+  await sleep(900);
+  const lightProbe = await cdp.eval(`(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const t = document.querySelector('.album-name');
+    return {
+      mode: document.documentElement.dataset.mode,
+      fg: cs.getPropertyValue('--fg').trim(),
+      mix: cs.getPropertyValue('--mix-fg').trim(),
+      scheme: cs.colorScheme,
+      active: document.querySelector('[data-mode-pick].is-active')?.dataset.modePick,
+      textColor: t ? getComputedStyle(t).color : null,
+      playerBg: getComputedStyle(document.querySelector('.player')).backgroundColor,
+    };
+  })()`);
+  ok('切到浅色后 data-mode=light', lightProbe.mode === 'light', lightProbe.mode);
+  ok('文字色由亮转暗（底色翻转）',
+    darkProbe.fg !== lightProbe.fg && /rgb\(27/.test(lightProbe.textColor ?? ''),
+    `${darkProbe.fg} → ${lightProbe.fg}，正文 ${lightProbe.textColor}`);
+  ok('半透明叠加基色翻转为黑', lightProbe.mix.replace(/\s/g, '') === '0,0,0', lightProbe.mix);
+  ok('color-scheme 变为 light（原生控件跟随）', lightProbe.scheme === 'light', lightProbe.scheme);
+  ok('底部播放条不再是深色（跟随模式）',
+    !/rgb\(1[0-9],\s*1[0-9],\s*2[0-9]\)/.test(lightProbe.playerBg), lightProbe.playerBg);
+  ok('模式高亮跟随', lightProbe.active === 'light', lightProbe.active);
+  ok('浅色模式已自动持久化',
+    (await (await fetch(`${BASE}/api/config`)).json()).config.appearance.mode === 'light');
+
+  console.log('\n— 顶部条跟随背景（不再是不透明黑条）—');
+  const topbar = await cdp.eval(`(() => {
+    const t = document.querySelector('.topbar');
+    const m = document.querySelector('.main');
+    const alphaOf = (c) => { const x = c.match(/\\/\\s*([\\d.]+)\\s*\\)/); return x ? Number(x[1]) : 1; };
+    return {
+      bg: getComputedStyle(t).backgroundColor,
+      mainBg: getComputedStyle(m).backgroundColor,
+      alpha: alphaOf(getComputedStyle(t).backgroundColor),
+      sameAsMain: getComputedStyle(t).backgroundColor === getComputedStyle(m).backgroundColor,
+    };
+  })()`);
+  ok('顶部条与主内容区同一层背景', topbar.sameAsMain === true, `${topbar.bg} vs ${topbar.mainBg}`);
+
+  await cdp.shot('v11-settings-light.png');
+
   console.log('\n— 恢复默认 —');
   await cdp.eval(`document.querySelector('#settingsResetBtn').click()`);
   await sleep(1500);
@@ -232,6 +285,7 @@ try {
     `${(cfg2.archive.maxBytes / 1024 ** 3).toFixed(1)} GB`);
   ok('缓存目录回到应用根 luna_cache', /luna_cache$/i.test(cfg2.archive.cacheDir), cfg2.archive.cacheDir);
   ok('配色回到 midnight', cfg2.appearance.theme === 'midnight', cfg2.appearance.theme);
+  ok('深浅模式回到 dark', cfg2.appearance.mode === 'dark', String(cfg2.appearance.mode));
   ok('透明度回到 100', Number(cfg2.appearance.bgOpacity) === 100, String(cfg2.appearance.bgOpacity));
   ok('背景图已清空', cfg2.appearance.bgImage === null, String(cfg2.appearance.bgImage));
 

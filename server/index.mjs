@@ -1190,11 +1190,12 @@ app.post('/api/config', (req, res) => {
     if (a.maxBytes != null) next.maxBytes = Number(a.maxBytes);
     if (Object.keys(next).length) patch.archive = next;
   }
-  // 外观：配色 / 背景透明 / 背景图
+  // 外观：配色 / 深浅模式 / 背景透明 / 背景图
   if (req.body?.appearance && typeof req.body.appearance === 'object') {
     const a = req.body.appearance;
     const next = {};
     if (a.theme != null) next.theme = String(a.theme);
+    if (a.mode != null) next.mode = String(a.mode);
     if (a.bgOpacity != null) next.bgOpacity = Number(a.bgOpacity);
     if (a.bgImage !== undefined) next.bgImage = a.bgImage ? String(a.bgImage) : null;
     if (Object.keys(next).length) patch.appearance = next;

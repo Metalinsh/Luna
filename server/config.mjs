@@ -62,23 +62,35 @@ const DEFAULT_CONFIG = {
     /** 允许占用的缓存上限（字节），默认 20 GiB */
     maxBytes: 20 * 1024 ** 3,
   },
-  /** 外观：配色方案、背景透明、自定义背景图 */
+  /** 外观：配色方案、深浅模式、背景透明、自定义背景图 */
   appearance: {
     theme: 'midnight',
+    /** dark | light —— 浅色模式会整体翻转底色与文字色 */
+    mode: 'dark',
     /** 0–100：数值越大，界面底色越不透明 */
     bgOpacity: 100,
-    /** 自定义背景图（绝对路径），null 表示无 */
+    /** 自定义背景图（绝对路径或 data URL），null 表示无 */
     bgImage: null,
   },
 };
 
 const PREFETCH_MODES = new Set(['off', 'next', 'album']);
 const THEMES = new Set(['midnight', 'nebula', 'graphite']);
+const MODES = new Set(['dark', 'light']);
 
 /** 配置值归一化：越界或非法的输入一律退回默认，避免坏配置把界面弄坏 */
 function sanitize(cfg) {
   const d = DEFAULT_CONFIG;
   const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+  /** 背景图路径：data URL 原样保留；本地路径去掉重复的反斜杠 */
+  const cleanImagePath = (v) => {
+    if (!v) return null;
+    const s = String(v).trim();
+    if (!s) return null;
+    if (/^data:/i.test(s)) return s;
+    return s.replace(/\\{2,}/g, '\\');
+  };
 
   const archive = { ...d.archive, ...(cfg.archive ?? {}) };
   if (!PREFETCH_MODES.has(archive.prefetch)) archive.prefetch = d.archive.prefetch;
@@ -88,8 +100,9 @@ function sanitize(cfg) {
 
   const appearance = { ...d.appearance, ...(cfg.appearance ?? {}) };
   if (!THEMES.has(appearance.theme)) appearance.theme = d.appearance.theme;
+  if (!MODES.has(appearance.mode)) appearance.mode = d.appearance.mode;
   appearance.bgOpacity = Math.min(100, Math.max(0, num(appearance.bgOpacity, 100)));
-  appearance.bgImage = appearance.bgImage ? String(appearance.bgImage) : null;
+  appearance.bgImage = cleanImagePath(appearance.bgImage);
 
   return {
     ...d, ...cfg, search: { ...d.search, ...(cfg.search ?? {}) },
@@ -97,7 +110,7 @@ function sanitize(cfg) {
   };
 }
 
-export { PREFETCH_MODES, THEMES };
+export { PREFETCH_MODES, THEMES, MODES };
 
 /** 写操作备份目录名（放在音乐库根目录下，保证与源文件同卷，rename 零拷贝） */
 export const UNDO_DIR_NAME = '.lam-undo';

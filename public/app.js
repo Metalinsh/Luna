@@ -3047,6 +3047,14 @@ async function playArchiveTrack({ trackId, label, albumId, trackCount, play }) {
       toast('预读取未能完成，无法播放', true);
       return false;
     }
+
+    /**
+     * 整张预读取成功后必须**就地刷新详情页**。
+     * 否则界面拿的还是进页面时那份数据（needs_prefetch 仍为 true），
+     * 点下一首会再弹一次询问 —— 用户实测反馈的就是这个。
+     */
+    if (wholeAlbum && !firstFail) markAlbumCached();
+
     await refreshCacheBadge();
     return await play();
   } catch (err) {
@@ -3061,6 +3069,18 @@ async function playArchiveTrack({ trackId, label, albumId, trackCount, play }) {
 async function refreshCacheBadge() {
   await loadCacheStatus();
   if (settingsOpen()) renderSettings();
+}
+
+/**
+ * 整张预读取成功后：**就地重新加载详情页**。
+ *
+ * 必须重新拉一次数据 —— 否则界面拿的还是进页面时那份（needs_prefetch 仍为 true），
+ * 点下一首会再弹一次询问。这正是用户实测反馈的问题。
+ * push:false 保证不污染浏览器历史。
+ */
+function markAlbumCached() {
+  const albumId = state.currentAlbum?.album?.id;
+  if (albumId) openAlbum(albumId, { push: false });
 }
 
 /** 该专辑里还有多少条曲目仍需先预读取（供询问框显示「整张共 N 条」） */
@@ -3096,21 +3116,24 @@ const settingsState = { config: null, cache: null };
 const bgImageUrl = (p) => (p ? `/api/local-image?path=${encodeURIComponent(p)}` : '');
 
 /**
- * 外观即时套用：只写 CSS 变量，不重启动、不刷新。
+ * 外观即时套用：只写 CSS 变量与 data-* 属性，不重启动、不刷新。
  * 底色用 color-mix 与 transparent 混合，从而支持背景透明度。
  */
 function applyAppearance(appearance) {
-  const a = appearance ?? { theme: 'midnight', bgOpacity: 100, bgImage: null };
+  const a = appearance ?? {
+    theme: 'midnight', mode: 'dark', bgOpacity: 100, bgImage: null,
+  };
   const root = document.documentElement;
   root.dataset.theme = a.theme || 'midnight';
+  root.dataset.mode = a.mode === 'light' ? 'light' : 'dark';
   const pct = Math.min(100, Math.max(0, Number(a.bgOpacity)));
   root.style.setProperty('--bg-alpha-pct', `${Number.isFinite(pct) ? pct : 100}%`);
 
   if (a.bgImage) {
     root.style.setProperty('--bg-image', `url("${bgImageUrl(a.bgImage)}")`);
-    // 有背景图时侧栏也跟随透明；否则「中间透、两边实」会很割裂
-    root.style.setProperty('--sidebar-bg',
-      'color-mix(in srgb, var(--bg-l0) var(--bg-alpha-pct), transparent)');
+    // 有背景图时侧栏改用覆盖式半透明底（否则「中间透、两边实」很割裂）。
+    // 基色走 --overlay-rgb，浅色模式下才不会变成一块黑。
+    root.style.setProperty('--sidebar-bg', 'rgba(var(--overlay-rgb), .9)');
   } else {
     root.style.removeProperty('--bg-image');
     root.style.removeProperty('--sidebar-bg');
@@ -3156,7 +3179,9 @@ async function loadCacheStatus() {
 function settingsMarkup() {
   const cfg = settingsState.config ?? {};
   const arch = cfg.archive ?? { prefetch: 'next', cacheDir: '', maxBytes: 20 * GIB };
-  const app = cfg.appearance ?? { theme: 'midnight', bgOpacity: 100, bgImage: null };
+  const app = cfg.appearance ?? {
+    theme: 'midnight', mode: 'dark', bgOpacity: 100, bgImage: null,
+  };
   const cache = settingsState.cache ?? {};
 
   const used = Number(cache.bytes ?? 0);
@@ -3224,6 +3249,16 @@ function settingsMarkup() {
 
     <section class="set-sec">
       <h4>外观</h4>
+      <div class="set-row">
+        <div class="set-label">深浅模式</div>
+        <div class="set-control">
+          <div class="seg-list">
+            <button type="button" class="seg${app.mode !== 'light' ? ' is-active' : ''}" data-mode-pick="dark">深色</button>
+            <button type="button" class="seg${app.mode === 'light' ? ' is-active' : ''}" data-mode-pick="light">浅色</button>
+          </div>
+          <div class="set-note">浅色模式会翻转底色与文字颜色，适合搭配浅色背景图。</div>
+        </div>
+      </div>
       <div class="set-row">
         <div class="set-label">配色方案</div>
         <div class="set-control">
@@ -3328,6 +3363,15 @@ function bindSettingsBody() {
     if (el) el.textContent = note;
   });
 
+  // 深浅模式：点了立刻切换（先切高亮再发请求，避免异步造成的高亮滞后）
+  $$('#settingsBody [data-mode-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.modePick;
+      $$('#settingsBody [data-mode-pick]').forEach((b) => b.classList.toggle('is-active', b === btn));
+      saveAppearance({ mode }).then(() => refreshSettings());
+    });
+  });
+
   $$('#settingsBody [data-theme-pick]').forEach((card) => {
     const pick = () => {
       // 先把高亮切过去再发请求：refreshSettings 是异步的，否则会看到「高亮没跟上」
@@ -3423,7 +3467,9 @@ function bindSettingsEvents() {
         method: 'POST',
         body: {
           archive: { prefetch: 'next', maxBytes: 20 * GIB, cacheDir: '' },
-          appearance: { theme: 'midnight', bgOpacity: 100, bgImage: null },
+          appearance: {
+            theme: 'midnight', mode: 'dark', bgOpacity: 100, bgImage: null,
+          },
         },
       });
       settingsState.config = config;
