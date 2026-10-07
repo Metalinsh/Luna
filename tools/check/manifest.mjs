@@ -112,6 +112,19 @@ export const AREAS = [
     covers: ['server/writers.mjs', 'server/write-jobs.mjs', 'server/index.mjs'],
   },
   {
+    id: 'archive',
+    title: '压缩包只读挂载',
+    desc: 'ZIP 清单解析与编码嗅探、压缩包入库与角标、包内曲目禁播告知',
+    // 单元测试已覆盖 zip-reader；界面检查只验「扫出来的包在界面上表现正确」
+    unit: ['test/zip-reader.test.mjs'],
+    ui: ['check/archive.mjs'],
+    app: true,
+    covers: [
+      'server/zip-reader.mjs', 'server/scanner.mjs', 'server/asmr.mjs',
+      'server/db.mjs', 'server/index.mjs', 'public/app.js', 'public/styles.css',
+    ],
+  },
+  {
     id: 'icon',
     title: '图标资源',
     desc: 'ICO/PNG 生成与接入、界面品牌标与网页图标',

@@ -106,8 +106,8 @@ test('迁移：自动生成 V1 数据库备份', () => {
   assert.ok(fs.existsSync(backup), '备份文件存在');
 });
 
-test('迁移：schema_version 写入 5，重复加载不重复迁移', async () => {
-  assert.equal(store.getMeta('schema_version'), '5');
+test('迁移：schema_version 写入当前版本，重复加载不重复迁移', async () => {
+  assert.equal(store.getMeta('schema_version'), String(store.SCHEMA_VERSION));
   assert.equal(store.migrationReport.migrated, true);
 });
 
