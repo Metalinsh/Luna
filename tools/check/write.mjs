@@ -40,12 +40,25 @@ try {
   /* ----------------------------------------------------- 准备隔离的临时库 */
 
   const userLibs = (await api('/api/libraries')).body.libraries;
-  // 写回测试只针对普通音乐专辑（音声发行不参与写回流程）
-  const allAlbums = (await api('/api/albums?limit=100')).body.albums;
-  const musicAlbum = allAlbums.find((a) => !a.is_voice && a.track_count > 0);
-  if (!musicAlbum) throw new Error('库里没有可用于写入测试的普通音乐专辑');
+  /**
+   * 写回测试只针对**真实磁盘上的**普通音乐专辑：
+   *   - 音声发行不参与写回流程；
+   *   - 压缩包内的曲目是虚拟路径（`<包路径>\0<成员路径>`），没有可复制的实体文件，
+   *     也不能写回（包永远只读），必须排除，否则会复制出一个 .zip 当音频用。
+   */
+  const WRITEABLE_EXT = new Set(['.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wma', '.aiff', '.aif']);
+  const allAlbums = (await api('/api/albums?limit=200')).body.albums;
+  let musicAlbum = null;
+  let source = null;
+  for (const a of allAlbums) {
+    if (a.is_voice || !a.track_count) continue;
+    if (a.archive?.archives) continue;              // 整张都在包里
+    const d = (await api(`/api/albums/${a.id}`)).body;
+    const t = (d.tracks ?? []).find((x) => x.path && WRITEABLE_EXT.has(String(x.ext ?? '').toLowerCase()));
+    if (t) { musicAlbum = a; source = t.path; break; }
+  }
+  if (!musicAlbum) throw new Error('库里没有可用于写入测试的普通音乐专辑（需真实磁盘文件）');
   const detail = (await api(`/api/albums/${musicAlbum.id}`)).body;
-  const source = detail.tracks[0]?.path;
   if (!source) throw new Error('该专辑没有可用的曲目文件');
 
   const albumDir = path.join(tempRoot, 'Write API Album');

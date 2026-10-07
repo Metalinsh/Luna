@@ -11,7 +11,7 @@ import * as store from './db.mjs';
 import * as tagsApi from './tags.mjs';
 import { collectOrphanCovers, albumsWithMissingCoverFiles, detectImageMime, pruneEmptyAlbums } from './maintenance.mjs';
 import { isWriting, cleanupTempFiles } from './write-jobs.mjs';
-import { analyzeRelease, locateRelease, VIDEO_EXT } from './asmr.mjs';
+import { analyzeRelease, locateRelease, VIDEO_EXT, baseNameOf, extractTrackNo, displayTitleOf } from './asmr.mjs';
 import {
   isArchiveName, looksLikeZip, probeZip, summarizeArchive,
   virtualPath, splitVirtualPath, isVirtualPath, readEntryData, findEntry,
@@ -22,6 +22,45 @@ const SCAN_EXTENSIONS = new Set([...AUDIO_EXTENSIONS, ...VIDEO_EXT]);
 
 /** 音声发行自动打上的标签名 */
 const ASMR_TAG_NAME = 'ASMR';
+
+/** 被认定为「ASMR 音乐库」的目录名（不区分大小写） */
+const ASMR_FOLDER = 'asmr';
+
+/**
+ * 判断某个路径是否位于名为 ASMR 的目录之下。
+ *
+ * 规则（用户指定）：**音乐库文件夹名称为 ASMR 的，其中的专辑统一视为 ASMR；
+ * 不在其中的专辑均非 ASMR。** 与是否带 RJ 号、是否压缩包都无关。
+ *
+ * 路径段一律按 `\`、`/` 以及压缩包虚拟路径分隔符（NUL）切开，
+ * 因此 E:\Music\ASMR\[RJ…]\x.mp3 与 D:\ASMR\专辑.zip␀曲.mp3 都能命中。
+ */
+export function isUnderAsmrFolder(p) {
+  return String(p ?? '')
+    .split(/[\\/\u0000]+/)
+    .some((seg) => seg.toLowerCase() === ASMR_FOLDER);
+}
+
+/**
+ * 自动维护「ASMR」标签。
+ *
+ * 非 ASMR 目录下的专辑会被**移除**该标签：否则用户把专辑移出 ASMR 目录后，
+ * 旧标签会一直留着，而本功能的意义正是让标签跟随目录。
+ */
+function syncAsmrTag(albumId, samplePath) {
+  if (!albumId) return;
+  try {
+    const asmrTag = tagsApi.ensureTag(ASMR_TAG_NAME);
+    if (!asmrTag?.id) return;
+    const shouldTag = isUnderAsmrFolder(samplePath);
+    tagsApi.applyAlbumTags([albumId], {
+      add: shouldTag ? [asmrTag.id] : [],
+      remove: shouldTag ? [] : [asmrTag.id],
+    });
+  } catch (err) {
+    pushError(`自动维护 ASMR 标签失败：${err.message}`);
+  }
+}
 
 const SKIP_DIRS = new Set([
   'system volume information', '$recycle.bin', 'node_modules', '.git', '.svn',
@@ -287,6 +326,64 @@ async function readVirtualMember(vpath, known) {
 }
 
 /**
+ * 普通音乐压缩包：由虚拟路径**推导**元数据，不解压任何数据。
+ *
+ * 为什么必须推导而不是读包内标签：P1 的硬约束是「扫描阶段零解压」。
+ * 一个几百 MB 的包里若装着一张专辑，逐条解压读标签会让扫描慢几个数量级。
+ * 因此这里只根据文件/目录名给出发行信息 —— 这也是发行路径同一口径的做法。
+ *
+ * 目录名作专辑名（多数压缩包会把专辑放在同名子目录里，与磁盘专辑一致），
+ * 根目录平铺时退化为压缩包文件名。
+ */
+function albumRootOfVirtual(vpath) {
+  const split = splitVirtualPath(vpath);
+  if (!split) return vpath;
+  const segs = split.memberPath.split('/').filter(Boolean);
+  segs.pop();
+  return virtualPath(split.archivePath, segs.join('/'));
+}
+
+/** 无「唱片集」标签时按目录归组，虚拟路径同样适用（见 config.mjs albumKeyOf） */
+function readArchiveTags(vpath, file) {
+  const split = splitVirtualPath(vpath);
+  // file.name 是压缩包内的完整成员路径（如 `专辑/01 曲目.mp3`），先取到真正的文件名
+  const fileName = path.posix.basename(String(file.name ?? ''));
+  const base = baseNameOf(fileName);
+  const folder = (() => {
+    const segs = (split?.memberPath ?? '').split('/').filter(Boolean);
+    segs.pop();
+    return segs[segs.length - 1] ?? '';
+  })();
+  // 目录名作专辑名；根目录平铺时退化为压缩包文件名（注意压缩包路径是 Windows 路径）
+  const album = folder || path.basename(split?.archivePath ?? '').replace(/\.zip$/i, '');
+  // `艺术家 - 标题` 是这类包最常见的命名，拆开比整串塞进标题更有用
+  const dash = base.match(/^(.+?)\s+-\s+(.+)$/);
+  return {
+    dir: albumRootOfVirtual(vpath),
+    filename: fileName,
+    ext: file.ext,
+    title: dash ? dash[2].trim() : displayTitleOf(fileName),
+    titleSource: 'filename',
+    /** 曲目演唱者（来自 `艺术家 - 标题` 命名），仅用于显示 */
+    artist: dash ? dash[1].trim() : null,
+    /** 刻意留空：albumKeyOf 会因此按 dir 归组，避免多艺人原声被拆成多张专辑 */
+    albumArtist: null,
+    album: album || null,
+    trackNo: extractTrackNo(fileName).no,
+    discNo: null,
+    year: null,
+    genre: null,
+    composer: null,
+    duration: null,
+    bitrate: null,
+    sampleRate: null,
+    channels: null,
+    codec: null,
+    container: null,
+  };
+}
+
+/**
  * 解析（或重新解析）一个压缩包发行，并把三层模型写入数据库。
  *
  * P1 关键约束：**全程零解压写入**
@@ -362,11 +459,116 @@ async function ingestArchive({ archivePath, libraryId, seen, known }) {
     return { archiveId, tracks: 0, skippedReason: 'no_audio' };
   }
 
-  const result = await ingestRelease({
-    root: archivePath, libraryId, seen, files: virtualFiles, readTags: false, known,
-  });
+  /**
+   * 关键分流：压缩包必须和磁盘文件走**同一条**判定规则。
+   *
+   * 曾经这里无条件调用 ingestRelease()，而 ingestRelease 会给每个发行打上
+   * 「ASMR」标签 —— 于是任何放普通音乐（游戏原声、OST）的压缩包都会被误标为
+   * 音声并挂上 ASMR 标签。磁盘文件有 locateRelease() 兜底，压缩包却漏了。
+   *
+   * 现在：包内有 RJ 号的成员才进音声三层模型；其余按普通音乐专辑处理。
+   */
+  const rjMembers = audioFiles.filter((f) => locateRelease(f.path));
+  const plainMembers = audioFiles.filter((f) => !locateRelease(f.path));
+
+  const result = { tracks: 0 };
+  if (rjMembers.length) {
+    const r = await ingestRelease({
+      root: archivePath, libraryId, seen, files: virtualFiles, readTags: false, known,
+    });
+    result.tracks = (result.tracks ?? 0) + (r.tracks ?? 0);
+  }
+  if (plainMembers.length) {
+    result.tracks = (result.tracks ?? 0) + await ingestMusicArchiveMembers({
+      archivePath, archiveId, members: plainMembers, libraryId, seen,
+    });
+  }
   scanState.archiveTracks = (scanState.archiveTracks ?? 0) + (result.tracks ?? 0);
   return { archiveId, ...result };
+}
+
+/**
+ * 把「不含 RJ 号」的包内成员按普通音乐专辑入库（零解压）。
+ * 与磁盘音乐分支共用 resolveAlbumForTrack + upsertTrack 的落库口径。
+ */
+async function ingestMusicArchiveMembers({ archivePath, archiveId, members, libraryId, seen }) {
+  let n = 0;
+  for (const file of members) {
+    const vpath = file.path;
+    try {
+      const existing = store.findTrackByPath(vpath);
+      if (existing && existing.size === file.size && existing.mtime === file.mtime) {
+        seen.add(vpath);
+        scanState.skipped += 1;
+        continue;
+      }
+      const tags = readArchiveTags(vpath, file);
+      /**
+       * albumArtist / artist 一律传 null：albumKeyOf 会退回「按 dir 归组」，
+       * 于是同一目录下的包内曲目必然落进同一张专辑。
+       * 曲目演唱者只用于显示（tags.artist），不参与分组。
+       */
+      const resolved = store.resolveAlbumForTrack({
+        id: existing?.id,
+        album: tags.album,
+        albumArtist: null,
+        artist: null,
+        dir: tags.dir,
+        year: tags.year,
+        genre: tags.genre,
+      });
+      if (resolved.action === 'created') scanState.albumsCreated += 1;
+      if (resolved.action === 'merged') scanState.albumsMerged += 1;
+
+      // 按目录判定 ASMR 标签（压缩包成员同样看虚拟路径里的目录名）
+      syncAsmrTag(resolved.albumId, vpath);
+
+      store.upsertTrack({
+        path: vpath,
+        dir: tags.dir,
+        libraryId,
+        filename: tags.filename,
+        ext: tags.ext,
+        size: file.size,
+        mtime: file.mtime,
+        title: tags.title,
+        artist: tags.artist,
+        albumArtist: tags.albumArtist,
+        album: tags.album,
+        albumKey: resolved.albumKey,
+        albumId: resolved.albumId,
+        trackNo: tags.trackNo,
+        discNo: tags.discNo,
+        year: tags.year,
+        genre: tags.genre,
+        composer: tags.composer,
+        duration: null,
+        bitrate: null,
+        sampleRate: null,
+        channels: null,
+        codec: null,
+        container: null,
+        titleSource: tags.titleSource,
+        hasCover: false,
+        parseError: null,
+        addedAt: existing ? undefined : Date.now(),
+        // 包内成员登记为「归档态」，播放时按需解码（P2）
+        sourceKind: 'archive_member',
+        archiveId: archiveId ?? null,
+        memberPath: splitVirtualPath(vpath)?.memberPath ?? null,
+        materializedState: 'archived',
+      });
+      seen.add(vpath);
+      if (existing) scanState.updated += 1;
+      else scanState.added += 1;
+      n += 1;
+    } catch (err) {
+      pushError(`包内曲目入库失败：${vpath}（${err.code ?? err.message}）`);
+    } finally {
+      scanState.processed += 1;
+    }
+  }
+  return n;
 }
 
 /**
@@ -529,13 +731,12 @@ async function ingestRelease({ root, libraryId, seen, files = null, readTags = t
   scanState.albumsCreated += existingAlbum ? 0 : 1;
   scanState.added += trackCount;
 
-  // 音声发行自动打上「ASMR」标签，便于在专辑墙按类别检索
-  try {
-    const asmrTag = tagsApi.ensureTag(ASMR_TAG_NAME);
-    if (asmrTag?.id) tagsApi.applyAlbumTags([albumId], { add: [asmrTag.id], remove: [] });
-  } catch (err) {
-    pushError(`自动添加 ASMR 标签失败：${err.message}`);
-  }
+  /**
+   * 自动维护「ASMR」标签：**只按目录名判定**（见 isUnderAsmrFolder）。
+   * 曾经这里无条件给每个音声发行打上 ASMR 标签，导致放在普通音乐目录里的
+   * 游戏原声（带 RJ 号或压缩包）也被误标成 ASMR。
+   */
+  syncAsmrTag(albumId, root);
 
   return { albumId, versions: analysis.versions.length, tracks: trackCount };
 }
@@ -813,6 +1014,9 @@ async function runScan({ libraryIds }) {
           });
           if (resolved.action === 'created') scanState.albumsCreated += 1;
           if (resolved.action === 'merged') scanState.albumsMerged += 1;
+
+          // 按目录判定 ASMR 标签（同一专辑会重复调用，但结果是幂等的）
+          syncAsmrTag(resolved.albumId, file);
 
           store.upsertTrack({
             path: file,

@@ -62,11 +62,17 @@ if (!arch.archives) {
 
 const albums = (await (await fetch(`${BASE}/api/albums?limit=200&kind=voice`)).json()).albums;
 const withArchive = albums.filter((a) => a.archive?.archives > 0);
+/**
+ * 专辑墙的「包内」角标对**所有**来源为压缩包的专辑显示（音声与普通音乐都算），
+ * 所以对照口径要取全部专辑，不能只用音声那一份。
+ */
+const allAlbums = (await (await fetch(`${BASE}/api/albums?limit=200`)).json()).albums;
+const withArchiveAll = allAlbums.filter((a) => a.archive?.archives > 0);
 ok('专辑列表接口给出压缩包专辑', withArchive.length > 0,
-  `${withArchive.length}/${albums.length} 张音声发行来自压缩包`);
+  `${withArchive.length}/${albums.length} 张音声发行来自压缩包（全库 ${withArchiveAll.length} 张含包）`);
 ok('非压缩包专辑不带 archive 角标数据',
-  albums.filter((a) => a.archive?.archives > 0).length < albums.length,
-  `共 ${albums.length} 张，其中 ${withArchive.length} 张含包`);
+  allAlbums.filter((a) => a.archive?.archives > 0).length < allAlbums.length,
+  `共 ${allAlbums.length} 张，其中 ${withArchiveAll.length} 张含包`);
 
 const target = withArchive[0];
 const detail = await (await fetch(`${BASE}/api/albums/${target.id}`)).json();
@@ -234,8 +240,8 @@ try {
     return out;
   })()`);
   const archivedCards = cards.filter((c) => c.badges.some((b) => b.includes('包内')));
-  ok('专辑墙出现「包内」角标', archivedCards.length === withArchive.length,
-    `界面上 ${archivedCards.length} 张（接口 ${withArchive.length} 张）`);
+  ok('专辑墙出现「包内」角标', archivedCards.length === withArchiveAll.length,
+    `界面上 ${archivedCards.length} 张（接口 ${withArchiveAll.length} 张）`);
   const only = archivedCards.every((c) => cards.filter((x) => x.id === c.id).length === 1);
   ok('角标只出现在压缩包专辑上', only && archivedCards.length < cards.length,
     `全部 ${cards.length} 张卡片中 ${archivedCards.length} 张带角标`);

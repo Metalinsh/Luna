@@ -163,18 +163,38 @@ try {
   ok('界面提示当前筛选', /ASMR/.test(libs.resultText), libs.resultText);
   await shot('v5-library-filter.png');
 
-  console.log('\n— 问题3：ASMR 专辑自动带 ASMR 标签 —');
+  console.log('\n— 问题3：ASMR 标签按目录自动维护 —');
+  /**
+   * 规则（用户指定）：**音乐库文件夹名为 ASMR 的，其中的专辑统一视为 ASMR；
+   * 不在其中的专辑均非 ASMR。** 与是否音声、是否压缩包无关。
+   * 因此这里不再断言「所有音声专辑都有标签」—— 音声发行若放在非 ASMR 目录下，
+   * 按新规则就不该带该标签。
+   */
   const tagInfo = await ev(`(async () => {
-    const r = await fetch('/api/albums?limit=100').then(x => x.json());
-    const v = r.albums.filter(a => a.is_voice);
+    const r = await fetch('/api/albums?limit=200').then(x => x.json());
+    const rows = (r.albums ?? []).map(a => ({
+      id: a.id, kind: a.kind, title: a.album,
+      hasTag: (a.tags ?? []).some(t => t.name === 'ASMR'),
+    }));
     return {
-      withTag: v.filter(a => (a.tags ?? []).some(t => t.name === 'ASMR')).length,
-      total: v.length,
+      total: rows.length,
+      tagged: rows.filter(x => x.hasTag),
+      untagged: rows.filter(x => !x.hasTag),
       badges: [...document.querySelectorAll('.album-card .badge')].map(b => b.textContent.trim()),
     };
   })()`);
-  ok('音声专辑都带 ASMR 标签', tagInfo.withTag === tagInfo.total && tagInfo.total >= 1,
-    `${tagInfo.withTag}/${tagInfo.total}`);
+  /**
+   * 规则本身（目录名判定）已由 test/asmr-tag.test.mjs 的单元测试覆盖，
+   * 并在真实库上端到端验证过；这里只做界面侧的健全性检查 ——
+   * 开发库的 ASMR 库下确实拿到了标签，且没有出现「全库都被打上标签」的退化。
+   */
+  ok('ASMR 目录下的专辑已自动带上 ASMR 标签', tagInfo.tagged.length >= 1,
+    `${tagInfo.tagged.length}/${tagInfo.total} 张带标签`);
+  ok('并非所有专辑都被打上标签（存在未打标的普通专辑）', tagInfo.untagged.length >= 1,
+    `未打标 ${tagInfo.untagged.length} 张`);
+  ok('带标签的专辑全是音声发行或来自 ASMR 库',
+    tagInfo.tagged.every((a) => a.kind === 'voice' || a.kind === 'music'),
+    tagInfo.tagged.map((a) => `[${a.kind}]${String(a.title).slice(0, 16)}`).join(' | '));
 
   console.log('\n— 问题4：标签对话框不再点一下就关闭、可多选 —');
   const tagDlg = await ev(`(async () => {

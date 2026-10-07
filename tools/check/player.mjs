@@ -182,10 +182,22 @@ try {
   ok('切换到顺序播放后按钮标题更新', /播放模式：顺序播放/.test(seq.title), seq.title);
 
   const stopAtEnd = await ev(`(async () => {
-    // 用只有 1 首曲目的专辑：播完后应停止而不是回卷
-    const r = await fetch('/api/albums?limit=100&kind=music').then(x => x.json());
-    const one = await fetch('/api/albums/' + r.albums[0].id).then(x => x.json());
-    location.hash = '#/album/' + r.albums[0].id;
+    // 用只有 1 首曲目的专辑：播完后应停止而不是回卷。
+    // 不能假定「第一张音乐专辑就是单曲」——库里可能有整张原声压缩包（几十首）。
+    const r = await fetch('/api/albums?limit=200&kind=music').then(x => x.json());
+    let picked = null;
+    let pickedDetail = null;
+    for (const a of r.albums) {
+      const d = await fetch('/api/albums/' + a.id).then(x => x.json());
+      if ((d.tracks ?? []).length === 1) { picked = a; pickedDetail = d; break; }
+    }
+    if (!picked) {
+      // 兜底：选曲目最少的那张，并如实报告（断言会指出前提不成立）
+      const sorted = [...r.albums].sort((a, b) => (a.track_count ?? 0) - (b.track_count ?? 0));
+      picked = sorted[0];
+      pickedDetail = await fetch('/api/albums/' + picked.id).then(x => x.json());
+    }
+    location.hash = '#/album/' + picked.id;
     await new Promise(z => setTimeout(z, 2000));
     document.querySelector('#playAlbumBtn').click();
     await new Promise(z => setTimeout(z, 1500));
@@ -193,13 +205,15 @@ try {
     audio.dispatchEvent(new Event('ended'));
     await new Promise(z => setTimeout(z, 900));
     return {
-      queueLen: one.tracks.length,
+      queueLen: (pickedDetail.tracks ?? []).length,
+      album: picked.album,
       pausedAfter: audio.paused,
       bodyToasts: [...document.querySelectorAll('.toast, .toast-item, #toastBox *')]
         .map(e => e.textContent.trim()).join(' | ').slice(0, 80),
     };
   })()`);
-  ok('样本专辑只有 1 首（最后一首）', stopAtEnd.queueLen === 1, `${stopAtEnd.queueLen} 首`);
+  ok('样本专辑只有 1 首（最后一首）', stopAtEnd.queueLen === 1,
+    `${stopAtEnd.queueLen} 首（${String(stopAtEnd.album).slice(0, 26)}）`);
   ok('播完后停止（不回卷到第一首）',
     stopAtEnd.pausedAfter === true || /顺序播放结束/.test(stopAtEnd.bodyToasts),
     `paused=${stopAtEnd.pausedAfter} toast="${stopAtEnd.bodyToasts}"`);
