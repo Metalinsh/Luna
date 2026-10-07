@@ -31,7 +31,10 @@ export const AREAS = [
     id: 'unit',
     title: '单元测试',
     desc: '解析、数据库、迁移、歌词格式、写入任务等纯逻辑',
-    unit: ['test/'],
+    // 该 Node 版本不接受目录参数（node --test test/ 会报模块找不到），
+    // 用 unitAuto 表示「不加路径，由 node --test 自动发现 test/ 下的用例」
+    unit: [],
+    unitAuto: true,
     ui: [],
     app: false,
     covers: ['server/', 'test/'],

@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 
 import { writeTags } from '../../server/writers.mjs';
 
-const BASE = process.env.LAM_BASE ?? 'http://127.0.0.1:8787';
+const BASE = process.env.LUNA_BASE || 'http://127.0.0.1:8799';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let pass = 0; let fail = 0;
 const ok = (n, c, e = '') => {

@@ -18,7 +18,7 @@ import { parseFile } from 'music-metadata';
 
 import { writeTags, canWrite } from '../../server/writers.mjs';
 
-const BASE = process.env.LAM_BASE ?? 'http://127.0.0.1:8787';
+const BASE = process.env.LUNA_BASE || 'http://127.0.0.1:8799';
 let pass = 0; let fail = 0;
 const ok = (name, cond, extra = '') => {
   if (cond) { pass++; console.log(`  PASS  ${name}${extra ? `  (${extra})` : ''}`); }

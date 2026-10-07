@@ -43,7 +43,7 @@ if (has('--list')) {
   console.log('\n可用测试区域：\n');
   for (const a of AREAS) {
     const parts = [];
-    if (a.unit.length) parts.push('单元测试');
+    if (a.unitAuto || a.unit.length) parts.push('单元测试');
     if (a.ui.length) parts.push(`${a.ui.length} 个界面脚本`);
     console.log(`  ${a.id.padEnd(9)} ${a.title.padEnd(14)} ${a.desc}`);
     console.log(`  ${''.padEnd(9)} 包含：${parts.join(' + ')}${a.app ? '（需启动软件）' : ''}`);
@@ -188,8 +188,9 @@ await ensureApp();
 
 const results = [];
 for (const area of picked) {
-  if (area.unit.length) {
-    const targets = area.unit.map((t) => t.replace(/\/$/, ''));
+  if (area.unitAuto || area.unit.length) {
+    // unitAuto：不加路径，让 node --test 自动发现 test/ 下的用例
+    const targets = area.unitAuto ? [] : [...area.unit];
     const r = await run(process.execPath, ['--test', ...targets], `[${area.id}] ${area.title} · 单元测试`);
     results.push({ area, kind: 'unit', ...r });
   }

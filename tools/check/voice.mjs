@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const BASE = 'http://127.0.0.1:8787';
+const BASE = process.env.LUNA_BASE || 'http://127.0.0.1:8799';
 const PORT = 9341;
 const PROFILE = path.join(process.env.TEMP, `lam-voice-ui-${Date.now()}`);
 const SHOTS = 'E:\\Work\\本地专辑管理软件\\screenshots';
@@ -103,7 +103,10 @@ try {
     return out;
   })()`);
   const voiceCards = cards.filter((c) => c.badges.some((b) => /版本/.test(b)));
-  ok('专辑墙出现音声发行卡片', voiceCards.length === 3, `找到 ${voiceCards.length} 张：${voiceCards.map((c) => c.badges.join('/')).join(' | ')}`);
+  // 期望张数从接口现算，避免用户新增音声作品后测试失效
+  const expVoice = (await (await fetch(BASE + '/api/albums?limit=100&kind=voice')).json()).albums.length;
+  ok('专辑墙出现全部音声发行卡片', voiceCards.length === expVoice,
+    `找到 ${voiceCards.length} 张（期望 ${expVoice}）：${voiceCards.map((c) => c.badges.join('/')).join(' | ')}`);
   ok('卡片显示版本数角标', voiceCards.every((c) => c.badges.some((b) => /^\d+ 个版本$/.test(b))),
     voiceCards.map((c) => c.badges.find((b) => /版本/.test(b))).join(', '));
   const withBonus = voiceCards.filter((c) => c.badges.includes('含特典'));
