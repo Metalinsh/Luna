@@ -125,6 +125,15 @@ export const AREAS = [
     ],
   },
   {
+    id: 'settings',
+    title: '设置界面',
+    desc: '⚙ 位置与面板结构、压缩包预取与缓存设置、三种配色与背景透明度、提醒文案',
+    unit: [],
+    ui: ['check/settings.mjs'],
+    app: true,
+    covers: ['public/app.js', 'public/styles.css', 'public/index.html', 'server/config.mjs', 'server/collection.mjs', 'server/index.mjs'],
+  },
+  {
     id: 'icon',
     title: '图标资源',
     desc: 'ICO/PNG 生成与接入、界面品牌标与网页图标',
