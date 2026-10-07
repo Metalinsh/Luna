@@ -549,7 +549,7 @@ function voiceDetailMarkup(album, data) {
         </div>
         <div class="wb-missing" style="margin-top:14px" id="detailTags">
           ${album.tags?.length
-    ? album.tags.map((t) => `<span class="tag-pill is-on" style="border-color:${tagColor(t.color)}66">${esc(t.name)}</span>`).join('')
+    ? album.tags.map((t) => `<span class="tag-pill is-preset" style="--tag-color:${tagColor(t.color)}">${esc(t.name)}</span>`).join('')
     : '<span class="tag-count">还没有标签</span>'}
         </div>
         <div class="voice-notes">音声专辑的名称取自文件夹，艺术家只记录在软件内，<b>不会写回音频文件</b>。</div>
@@ -592,7 +592,7 @@ async function openAlbum(id, { push = true } = {}) {
   const c = album.completeness ?? { status: 'complete', missing: [], missingDetailed: [], ignored: [] };
 
   const tagsHtml = album.tags?.length
-    ? album.tags.map((t) => `<span class="tag-pill is-on" style="border-color:${tagColor(t.color)}66">${esc(t.name)}</span>`).join('')
+    ? album.tags.map((t) => `<span class="tag-pill is-preset" style="--tag-color:${tagColor(t.color)}">${esc(t.name)}</span>`).join('')
     : '<span class="tag-count">还没有标签</span>';
 
   const missingHtml = c.missingDetailed?.length
