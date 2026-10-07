@@ -71,12 +71,16 @@ async function changedFiles(since) {
     for (const f of await gitLines(['diff', '--name-only', since])) files.add(f);
     return [...files];
   }
-  for (const line of await gitLines(['status', '--porcelain'])) {
-    // 形如 " M path" / "?? path"
-    const f = line.slice(3).trim();
-    if (f) files.add(f.replace(/^"(.*)"$/, '$1'));
+  // 用三条精确命令代替 porcelain 解析，避免状态位截断文件名
+  // （porcelain 的 "XY path" 前缀在某些状态下会多吞一个字符）
+  for (const args of [
+    ['diff', '--name-only'],                    // 未暂存的修改
+    ['diff', '--name-only', '--cached'],        // 已暂存的修改
+    ['ls-files', '--others', '--exclude-standard'], // 新增未跟踪文件
+    ['diff', '--name-only', 'HEAD'],            // 兜底：相对 HEAD 的全部改动
+  ]) {
+    for (const f of await gitLines(args)) files.add(f);
   }
-  for (const f of await gitLines(['diff', '--name-only', 'HEAD'])) files.add(f);
   if (files.size === 0) {
     for (const f of await gitLines(['diff', '--name-only', 'HEAD~1'])) files.add(f);
   }
