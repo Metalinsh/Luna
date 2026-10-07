@@ -12,6 +12,10 @@ import * as tagsApi from './tags.mjs';
 import { collectOrphanCovers, albumsWithMissingCoverFiles, detectImageMime, pruneEmptyAlbums } from './maintenance.mjs';
 import { isWriting, cleanupTempFiles } from './write-jobs.mjs';
 import { analyzeRelease, locateRelease, VIDEO_EXT } from './asmr.mjs';
+import {
+  isArchiveName, looksLikeZip, probeZip, summarizeArchive,
+  virtualPath, splitVirtualPath, isVirtualPath, readEntryData, findEntry,
+} from './zip-reader.mjs';
 
 /** 扫描时一并收集视频（仅音声发行会用到它们） */
 const SCAN_EXTENSIONS = new Set([...AUDIO_EXTENSIONS, ...VIDEO_EXT]);
@@ -64,6 +68,17 @@ export const scanState = {
   removed: 0,
   albumsCreated: 0,
   albumsMerged: 0,
+  // 压缩包（P1 只读挂载）：见 docs/压缩包支持设计.md §5.3
+  archivesFound: 0,
+  archivesParsed: 0,
+  archivesFailed: 0,
+  archivesUnsupported: 0,
+  archivesEncrypted: 0,
+  archivesRemoved: 0,
+  archiveEntries: 0,
+  archiveTracks: 0,
+  archiveBytes: 0,
+  archiveMs: 0,
   errors: [],
 };
 
@@ -90,6 +105,16 @@ function resetState() {
     removed: 0,
     albumsCreated: 0,
     albumsMerged: 0,
+    archivesFound: 0,
+    archivesParsed: 0,
+    archivesFailed: 0,
+    archivesUnsupported: 0,
+    archivesEncrypted: 0,
+    archivesRemoved: 0,
+    archiveEntries: 0,
+    archiveTracks: 0,
+    archiveBytes: 0,
+    archiveMs: 0,
     errors: [],
   });
 }
@@ -116,6 +141,17 @@ function persistLastScan() {
       coverExtracted: scanState.coverExtracted,
       coversReclaimed: scanState.coversReclaimed,
       coverBytesReclaimed: scanState.coverBytesReclaimed,
+      // 压缩包统计（P1）：让「为什么多了这些专辑」在扫描报告里可解释
+      archivesFound: scanState.archivesFound,
+      archivesParsed: scanState.archivesParsed,
+      archivesFailed: scanState.archivesFailed,
+      archivesUnsupported: scanState.archivesUnsupported,
+      archivesEncrypted: scanState.archivesEncrypted,
+      archivesRemoved: scanState.archivesRemoved,
+      archiveEntries: scanState.archiveEntries,
+      archiveTracks: scanState.archiveTracks,
+      archiveBytes: scanState.archiveBytes,
+      archiveMs: scanState.archiveMs,
       errors: scanState.errors.slice(0, 30),
     }));
   } catch {
@@ -136,6 +172,7 @@ export function lastScanReport() {
 
 async function walkAudioFiles(root) {
   const found = [];
+  const archives = [];
   const stack = [root];
   while (stack.length) {
     if (scanState.cancelRequested) break;
@@ -158,12 +195,14 @@ async function walkAudioFiles(root) {
         if (entry.name.startsWith('.')) continue;
         if (entry.name.startsWith('.lam-tmp-')) continue; // 写任务残留（V2.2 使用）
         const ext = path.extname(entry.name).toLowerCase();
+        // 压缩包单独收集：它本身不是音频，但它内部可能整包都是音频（P1 只读挂载）
+        if (isArchiveName(entry.name)) { archives.push(full); continue; }
         if (!SCAN_EXTENSIONS.has(ext)) continue;
         found.push(full);
       }
     }
   }
-  return found;
+  return { files: found, archives };
 }
 
 /* ------------------------------------------------------ 音声发行（三层模型） */
@@ -204,6 +243,132 @@ function decideArtist(analysis, previousDecision = null) {
   };
 }
 
+/** 压缩包虚拟路径下的曲目取信息：不做任何解压（P1 只读挂载） */
+async function resolveVirtualTrack(file, known) {
+  const split = splitVirtualPath(file.path);
+  const archiveId = split ? known?.archives.get(split.archivePath)?.id ?? null : null;
+  return {
+    sourceKind: 'archive_member',
+    archiveId,
+    memberPath: split?.memberPath ?? null,
+    materializedState: 'archived',
+    size: file.size ?? null,
+    mtime: file.mtime ?? null,
+    tagged: {},
+  };
+}
+
+/** 普通磁盘文件下的曲目取信息：解析标签（现状逻辑，一字未改） */
+async function resolveDiskTrack(file) {
+  const fstat = await fsp.stat(file.path);
+  return {
+    sourceKind: 'file',
+    archiveId: null,
+    memberPath: null,
+    materializedState: 'ready',
+    size: fstat.size,
+    mtime: Math.round(fstat.mtimeMs),
+    tagged: file.kind === 'video' ? {} : await readTags(file.path),
+  };
+}
+
+/**
+ * 解出包内某个成员（P1 只用于封面这类小文件）。
+ * 找不到条目时抛错，由调用方决定是否降级。
+ */
+async function readVirtualMember(vpath, known) {
+  const split = splitVirtualPath(vpath);
+  if (!split) throw new Error(`不是虚拟路径：${vpath}`);
+  const cached = known?.archives?.get(split.archivePath);
+  const info = cached?.info ?? await probeZip(split.archivePath);
+  const entry = findEntry(info.entries, split.memberPath);
+  if (!entry) throw new Error(`包内不存在该成员：${split.memberPath}`);
+  return readEntryData(split.archivePath, entry);
+}
+
+/**
+ * 解析（或重新解析）一个压缩包发行，并把三层模型写入数据库。
+ *
+ * P1 关键约束：**全程零解压写入**
+ *   - 清单来自中央目录（probeZip），不解压任何音频数据；
+ *   - 不读包内标签（readTags=false），标题由文件名推导；
+ *   - 唯一解压对象是包内封面图（通常 0.5–5 MB）。
+ *
+ * @returns {Promise<object>} { archiveId, albumId, entries, tracks, skippedReason? }
+ */
+async function ingestArchive({ archivePath, libraryId, seen, known }) {
+  if (known.archives.has(archivePath)) return { skipped: 'already' };
+
+  let info;
+  let summary;
+  const t0 = Date.now();
+  try {
+    info = await probeZip(archivePath);
+    summary = summarizeArchive(info);
+  } catch (err) {
+    // 结构损坏 / 不是真正的压缩包：如实登记，绝不静默跳过
+    const status = err.code === 'NOT_ZIP' ? 'not_archive' : 'error';
+    store.upsertArchive({
+      path: archivePath, libraryId, format: 'zip', status, error: err.message,
+    }, []);
+    known.archives.set(archivePath, { id: store.getArchiveByPath(archivePath)?.id ?? null, info: null });
+    scanState.archivesFailed += 1;
+    pushError(`压缩包无法解析：${archivePath}（${err.message}）`);
+    return { error: err.message };
+  }
+
+  const archiveId = store.upsertArchive({
+    path: archivePath,
+    libraryId,
+    format: summary.format,
+    entryCount: summary.entryCount,
+    audioCount: summary.audioCount,
+    imageCount: summary.imageCount,
+    videoCount: summary.videoCount,
+    packedBytes: summary.packedBytes,
+    unpackedBytes: summary.unpackedBytes,
+    encrypted: summary.encrypted,
+    unsupported: summary.unsupported,
+    nameEncoding: summary.nameEncoding,
+    status: summary.unsupported ? 'partial' : 'ready',
+    fileSize: summary.size,
+    fileMtime: summary.mtime,
+  }, info.entries);
+  known.archives.set(archivePath, { id: archiveId, info });
+
+  scanState.archivesParsed += 1;
+  scanState.archiveEntries += summary.entryCount;
+  scanState.archiveBytes += summary.unpackedBytes;
+  scanState.archiveMs += Date.now() - t0;
+  if (summary.unsupported) scanState.archivesUnsupported += 1;
+  if (summary.encrypted) scanState.archivesEncrypted += 1;
+
+  // 合成虚拟文件清单：压缩包文件本身充当一层虚拟目录（设计文档 §4.2）
+  const virtualFiles = info.entries
+    .filter((e) => e.kind !== 'dir')
+    .map((e) => ({
+      path: virtualPath(archivePath, e.name),
+      name: path.posix.basename(e.name),
+      ext: path.posix.extname(e.name).toLowerCase(),
+      kind: e.kind,
+      size: e.size,
+      mtime: e.mtime,
+    }));
+
+  const audioFiles = virtualFiles.filter((f) => f.kind === 'audio');
+  if (!audioFiles.length) {
+    // 包里没有音频：登记但不出卡片（记录原因，便于排查）
+    store.upsertArchive({ path: archivePath, libraryId, status: 'no_audio' }, info.entries);
+    return { archiveId, tracks: 0, skippedReason: 'no_audio' };
+  }
+
+  const result = await ingestRelease({
+    root: archivePath, libraryId, seen, files: virtualFiles, readTags: false, known,
+  });
+  scanState.archiveTracks = (scanState.archiveTracks ?? 0) + (result.tracks ?? 0);
+  return { archiveId, ...result };
+}
+
 /**
  * 只重新解析一个音声发行（人工合并结论生效 / 手动刷新用），不触碰其它专辑。
  */
@@ -211,7 +376,11 @@ export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
   if (isWriting()) throw new Error('正在写回文件，请稍后再试');
   if (!releaseRoot) throw new Error('缺少发行根路径');
   const seen = new Set();
-  const result = await ingestRelease({ root: releaseRoot, libraryId, seen });
+  const known = { archives: new Map() };
+  // 发行根本身是压缩包时，走包内挂载；否则按目录重扫
+  const result = isArchiveName(releaseRoot) && looksLikeZip(releaseRoot)
+    ? await ingestArchive({ archivePath: releaseRoot, libraryId, seen, known })
+    : await ingestRelease({ root: releaseRoot, libraryId, seen });
   let removed = 0;
   for (const p of store.trackPathsUnder(releaseRoot)) {
     if (!seen.has(p)) { store.deleteTrackByPath(p); removed += 1; }
@@ -225,14 +394,17 @@ export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
  *
  * 收录范围遵循 R5「仅使用优先版本」：同一版本内只收 wav（或唯一存在的格式），
  * 视频文件作为所属轨道的「视频版」单独收录，以便一键播放。
+ *
+ * `files` 非空时表示成员清单由外部注入（压缩包），此时 root 是虚拟发行根，
+ * 且 readTags 应传 false —— P1 不对压缩包做任何解压。
  */
-async function ingestRelease({ root, libraryId, seen }) {
+async function ingestRelease({ root, libraryId, seen, files = null, readTags = true, known = null }) {
   const existingAlbum = store.findVoiceAlbum(root);
   const decisions = existingAlbum
     ? store.getMergeDecisions(existingAlbum.id)
     : { merge: [], separate: [] };
 
-  const analysis = await analyzeRelease(root, { readTags: true, decisions });
+  const analysis = await analyzeRelease(root, { readTags, decisions, files });
 
   // 艺术家：以曲目 artist 标签为准；albumartist 与之冲突时只作「建议」，由用户选择
   const previousDecision = existingAlbum?.artist_decision ?? null;
@@ -279,13 +451,20 @@ async function ingestRelease({ root, libraryId, seen }) {
 
       const filePath = entry.file.path;
       seen.add(filePath);
-      let fstat;
+
+      // 曲目信息来源：压缩包成员只登记清单，**不解压**（P1）；磁盘文件解析标签
+      let src;
       try {
-        fstat = await fsp.stat(filePath);
-      } catch {
-        continue;   // 文件在解析与写入之间消失
+        src = isVirtualPath(filePath)
+          ? await resolveVirtualTrack(entry.file, known)
+          : await resolveDiskTrack(entry.file);
+      } catch (err) {
+        // 文件在解析与写入之间消失：如实记录，不静默丢弃
+        pushError(`曲目跳过：${filePath}（${err.code ?? err.message}）`);
+        continue;
       }
-      const tagged = isVideo ? {} : await readTags(filePath);
+      const { tagged } = src;
+      if (src.sourceKind === 'archive_member' && !src.archiveId) continue;
 
       // 音声标题以解析结果为准（标签回退出来的「文件名标题」带有序号前缀，不用）
       const title = (!isVideo && tagged.titleSource === 'tag' && tagged.title)
@@ -298,8 +477,8 @@ async function ingestRelease({ root, libraryId, seen }) {
         libraryId,
         filename: entry.file.name,
         ext: entry.file.ext,
-        size: fstat.size,
-        mtime: Math.round(fstat.mtimeMs),
+        size: src.size,
+        mtime: src.mtime,
         title,
         artist: tagged.artist ?? null,
         albumArtist: tagged.albumArtist ?? analysis.artistFromTag ?? null,
@@ -325,6 +504,10 @@ async function ingestRelease({ root, libraryId, seen }) {
         fileKind: isVideo ? 'video' : 'audio',
         isBonus: row.isBonus,
         variantLabel: entry.variantLabel ?? null,
+        sourceKind: src.sourceKind,
+        archiveId: src.archiveId,
+        memberPath: src.memberPath,
+        materializedState: src.materializedState,
       });
       trackCount += 1;
     }
@@ -333,9 +516,13 @@ async function ingestRelease({ root, libraryId, seen }) {
   // 封面（R13）：只在尚未手工设置过封面时套用
   if (analysis.cover && !existingAlbum?.cover_file) {
     try {
-      const buf = await fsp.readFile(analysis.cover.path);
-      const cover = await persistCoverImage(buf, detectImageMime(buf), 'manual');
-      store.applyCover(albumId, cover);
+      const buf = isVirtualPath(analysis.cover.path)
+        ? await readVirtualMember(analysis.cover.path, known)
+        : await fsp.readFile(analysis.cover.path);
+      if (buf) {
+        const cover = await persistCoverImage(buf, detectImageMime(buf), 'manual');
+        store.applyCover(albumId, cover);
+      }
     } catch { /* 封面失败不影响曲目入库 */ }
   }
 
@@ -529,7 +716,8 @@ async function runScan({ libraryIds }) {
       if (cleaned) scanState.tempsCleaned = (scanState.tempsCleaned ?? 0) + cleaned;
     } catch { /* 清理失败不阻塞扫描 */ }
 
-    const allFiles = await walkAudioFiles(lib.path);
+    const walked = await walkAudioFiles(lib.path);
+    const allFiles = walked.files;
     scanState.filesFound += allFiles.length;
     scanState.phase = '解析标签';
 
@@ -549,6 +737,8 @@ async function runScan({ libraryIds }) {
     }
 
     const seen = new Set();
+    /** 本次扫描已登记的压缩包：{ path → { id, info } } */
+    const known = { archives: new Map() };
 
     if (voiceGroups.size) {
       scanState.phase = '解析音声发行';
@@ -570,6 +760,29 @@ async function runScan({ libraryIds }) {
     }
 
     let cursor = 0;
+
+    // 压缩包（P1 只读挂载）：清单解析零解压，逐个登记并合成音声发行
+    if (walked.archives.length && !scanState.cancelRequested) {
+      scanState.phase = '解析压缩包';
+      scanState.archivesFound += walked.archives.length;
+      for (const archivePath of walked.archives) {
+        if (scanState.cancelRequested) break;
+        try {
+          const r = await ingestArchive({ archivePath, libraryId: lib.id, seen, known });
+          if (r?.tracks) scanState.releasesIngested = (scanState.releasesIngested ?? 0) + 1;
+        } catch (err) {
+          scanState.archivesFailed += 1;
+          pushError(`压缩包处理失败：${archivePath}（${err.message}）`);
+          // 保守处理：该包已登记的曲目一律视为已见，避免被清理阶段误删
+          // （虚拟路径首段是 NUL，不能用 trackPathsUnder 前缀匹配）
+          const archiveId = known.archives.get(archivePath)?.id ?? store.getArchiveByPath(archivePath)?.id;
+          if (archiveId) {
+            for (const p of store.trackPathsInArchive(archiveId)) seen.add(p);
+          }
+        }
+      }
+      scanState.phase = '解析标签';
+    }
 
     const worker = async () => {
       while (!scanState.cancelRequested) {
@@ -655,11 +868,19 @@ async function runScan({ libraryIds }) {
 
     if (!scanState.cancelRequested) {
       scanState.phase = '清理失效条目';
-      const known = new Set(store.trackPathsInLibrary(lib.id));
-      for (const p of known) {
+      const trackPaths = store.trackPathsInLibrary(lib.id);
+      for (const p of trackPaths) {
         if (!seen.has(p)) {
           store.deleteTrackByPath(p);
           scanState.removed += 1;
+        }
+      }
+      // 压缩包消失 → 连同登记与成员清单一并删除（曲目已在上一步清掉）
+      for (const arch of store.listArchives({ libraryId: lib.id })) {
+        if (!known.archives.has(arch.path)) {
+          const r = store.deleteArchive(arch.id);
+          scanState.archivesRemoved += 1;
+          scanState.removed += r.tracks;
         }
       }
       store.touchLibrary(lib.id);

@@ -294,6 +294,12 @@ function badgesFor(album) {
     if (album.has_bonus) parts.push('<span class="badge is-bonus" title="包含特典轨道">含特典</span>');
     if (album.has_video) parts.push('<span class="badge is-video" title="部分轨道有视频版">含视频版</span>');
   }
+  // 压缩包只读挂载（P1）：曲目仍在包内未落盘
+  const arch = album.archive;
+  if (arch?.archives > 0) {
+    parts.push(`<span class="badge is-archive" title="该发行来自压缩包：${arch.tracks} 条曲目仍在包内，暂不能播放（P2 将支持按需解码）">`
+      + `🗜 包内 ${arch.tracks}</span>`);
+  }
   const c = album.completeness;
   if (c && c.status !== 'complete') {
     const critical = c.status === 'critical';
@@ -458,13 +464,19 @@ function voiceTrackRowMarkup(row, index) {
       ? `视频版${v.variant_label ? `·${esc(v.variant_label)}` : ''}`
       : esc(baseName);
     const active = v.track_id === row.preferred_track_id ? ' is-active' : '';
+    // 压缩包内曲目：标「包内」并禁用（P1 只读挂载，播放要等 P2）
+    const inArchive = v.playable === false;
     const tip = isVideo
       ? `${esc(v.version_name)}${v.variant_label ? ` · ${esc(v.variant_label)}` : ''}`
       : `${esc(v.version_name)}${v.variant_label ? ` · ${esc(v.variant_label)}` : ''}`;
-    return `<button type="button" class="ver-chip${active}${isVideo ? ' is-video' : ''}"
+    const tipFull = inArchive
+      ? `位于压缩包内：${esc(v.member_path ?? '')}\nP1 只做清单与分类，播放将在 P2（按需解码到缓存）支持`
+      : `${tip} (${esc(v.ext ?? '')})`;
+    return `<button type="button" class="ver-chip${active}${isVideo ? ' is-video' : ''}${inArchive ? ' is-archived' : ''}"
         data-track="${v.track_id}" data-kind="${v.file_kind}" data-label="${label}"
-        title="${tip} (${esc(v.ext ?? '')})">
-        ${isVideo ? '▶ ' : ''}${label}
+        ${inArchive ? 'data-archived="1" aria-disabled="true"' : ''}
+        title="${tipFull}">
+        ${isVideo ? '▶ ' : ''}${label}${inArchive ? '<span class="chip-arch">包内</span>' : ''}
       </button>`;
   }).join('');
 
@@ -540,6 +552,10 @@ function voiceDetailMarkup(album, data) {
     : '<span class="tag-count">还没有标签</span>'}
         </div>
         <div class="voice-notes">音声专辑的名称取自文件夹，艺术家只记录在软件内，<b>不会写回音频文件</b>。</div>
+        ${album.archive?.archives > 0 ? `<div class="voice-notes archive-note">
+          🗜 该发行来自压缩包：<b>${album.archive.tracks} 条曲目仍在包内</b>（已按包内目录结构解析版本与轨号）。
+          包内文件不会被修改；<b>播放支持（按需解码到缓存）在规划中的 P2</b>。
+        </div>` : ''}
       </div>
     </div>
 
@@ -747,6 +763,14 @@ async function openVoiceAlbum(data, { push = true } = {}) {
     const row = btn.closest('.voice-row');
     const rowData = [...(data.tracks ?? []), ...(data.bonus_tracks ?? [])]
       .find((r) => r.key === row?.dataset.row);
+
+    // 压缩包内曲目尚未落盘：明确告知，不做无效播放尝试（P1 只读挂载）
+    if (btn.dataset.archived === '1') {
+      const member = rowData?.variants?.find((v) => v.track_id === Number(btn.dataset.track))?.member_path;
+      toast(`该曲目仍在压缩包内，暂不能播放${member ? `：${member}` : ''}。播放支持（按需解码到缓存）在规划中的 P2。`, true);
+      return;
+    }
+
     if (btn.dataset.kind === 'video') {
       openVideoModal(btn.dataset.track, rowData?.title ?? '', btn.dataset.label);
       return;
@@ -937,10 +961,14 @@ function trackRowMarkup(track, index, { showAlbum = true } = {}) {
   const flags = [];
   if (track.parse_error) flags.push('<span class="t-badge" style="color:#ff9a9a">解析失败</span>');
   if (track.meta_source === 'db-override') flags.push('<span class="t-badge" style="color:var(--warn)">未写回</span>');
+  // 压缩包内曲目（P1 只读挂载）：标注来源并禁用播放
+  const inArchive = track.source_kind === 'archive_member' && track.materialized_state !== 'ready';
+  if (inArchive) flags.push('<span class="t-badge is-arch" title="位于压缩包内，暂不能播放">🗜 包内</span>');
   return `
-    <div class="track-row" data-track-index="${index}" data-track-id="${track.id}">
+    <div class="track-row" data-track-index="${index}" data-track-id="${track.id}"
+         ${inArchive ? 'data-archived="1"' : ''}>
       <div class="t-num">${track.track_no ?? index + 1}</div>
-      <div class="t-title" title="双击播放">
+      <div class="t-title" title="${inArchive ? '该曲目仍在压缩包内，暂不能播放' : '双击播放'}">
         <span>${esc(track.title)}</span>
         ${badge ? `<em class="t-badge">${esc(badge)}</em>` : ''}
         ${flags.join('')}
@@ -2439,6 +2467,12 @@ function bindEvents() {
     const titleCell = e.target.closest('.track-row:not(.is-head) .t-title');
     if (!titleCell) return;
     const row = titleCell.closest('.track-row');
+    // 压缩包内曲目尚未落盘：明确告知而不是发起必然失败的播放（P1 只读挂载）
+    if (row?.dataset.archived === '1') {
+      e.preventDefault();
+      toast('该曲目仍在压缩包内，暂不能播放。播放支持（按需解码到缓存）在规划中的 P2。', true);
+      return;
+    }
     const index = Number(row?.dataset.trackIndex);
     if (!Number.isInteger(index)) return;
     e.preventDefault();

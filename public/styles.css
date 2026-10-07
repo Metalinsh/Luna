@@ -310,6 +310,12 @@ body.is-col-resizing * { cursor: col-resize !important; }
   font-size: 10px; color: var(--fg-faint); border: 1px solid var(--line);
   padding: 1px 5px; border-radius: 5px; text-transform: uppercase; letter-spacing: .06em;
 }
+/* 压缩包内曲目：不适用 uppercase，且用暖色区分 */
+.t-badge.is-arch {
+  text-transform: none; letter-spacing: 0; cursor: help;
+  color: #ffd08a; border-color: rgba(240,184,102,.45); background: rgba(240,184,102,.1);
+}
+.track-row[data-archived="1"] .t-title { cursor: help; }
 
 /* -------------------------------------------------------------------- stats */
 
@@ -813,6 +819,24 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 }
 .ver-chip.is-video { color: #ff9ed8; border-color: rgba(240,120,190,.35); }
 .ver-chip.is-video.is-active { background: rgba(240,120,190,.2); border-color: #ff9ed8; }
+/* 压缩包内曲目（P1 只读挂载）：可点但会明确告知暂不能播放，视觉上退到背景层 */
+.ver-chip.is-archived {
+  cursor: help; color: var(--fg-dim);
+  border-style: dashed; border-color: rgba(255,255,255,.18);
+  background: repeating-linear-gradient(135deg,
+    rgba(255,255,255,.03) 0 5px, rgba(255,255,255,.06) 5px 10px);
+}
+.ver-chip.is-archived:hover { color: var(--fg); border-color: rgba(240,184,102,.45); }
+.chip-arch {
+  margin-left: 5px; padding: 0 4px; border-radius: 4px; font-size: 9px;
+  background: rgba(240,184,102,.18); color: #ffd08a; vertical-align: 1px;
+}
+.badge.is-archive { color: #ffd08a; border-color: rgba(240,184,102,.45); }
+.archive-note {
+  margin-top: 8px; padding: 7px 9px; border-radius: 6px;
+  background: rgba(240,184,102,.08); border: 1px solid rgba(240,184,102,.25);
+  color: var(--fg-dim); line-height: 1.55;
+}
 .row-warn { color: var(--warn); margin-left: 6px; cursor: help; }
 
 /* 特典分组 */

@@ -53,34 +53,63 @@ const stripExt = (name) => String(name).replace(/\.[a-z0-9]{1,5}$/i, '');
 /**
  * 基名归一化：去掉真实扩展名后，再去掉发布者偶尔重复写在尾部的格式词。
  * 实测样本：`02_…彗の乳首責めwav.wav`（5 个文件），扩展名才是格式的权威来源。
+ * 压缩包样本：`…早漏訓練（バイノーラル編集　効果音あり）.mp3`（包内 4 份同轨副本）。
  */
 export function baseNameOf(fileName) {
-  let base = stripExt(fileName);
-  const stripped = base.replace(/[\s_\-]?(wav|mp3|flac|aiff|m4a|aac|ogg|opus|wma)$/i, '');
-  return stripped.length >= 2 ? stripped : base;
+  const base = stripExt(fileName);
+  // 只在「尾部」剥格式词，避免误伤 `trackEX_每周一次…` 这类以 EX 开头的正常标题。
+  // 先尝试 `_格式` / `-格式` / 空格+格式 的整段尾巴，再退回裸格式词。
+  const tail = base.match(/^(.*?)(?:[\s_\-](mp3|wav|flac|aiff|m4a|aac|ogg|opus|wma))$/i);
+  if (tail && tail[1].length >= 2) return tail[1];
+  const bare = base.match(/^(.*?)(mp3|wav|flac|aiff|m4a|aac|ogg|opus|wma)$/i);
+  if (bare && bare[1].length >= 2) return bare[1];
+  return base;
 }
 
 /* ------------------------------------------------------------ R1 发行根 */
 
-/** 定位发行根：路径中最靠外的 RJ 号目录 */
-export function locateRelease(filePath) {
-  const parts = String(filePath).split(/[\\/]/).filter(Boolean);
-  const hits = [];
-  for (let i = 0; i < parts.length; i += 1) {
-    const m = RJ_PATTERN.exec(parts[i]);
-    if (m) hits.push({ index: i, code: m[0].toUpperCase().replace(/\s/g, '') });
-  }
-  if (!hits.length) return null;
+/**
+ * 把路径拆成「归档根 + 成员路径」两级段落。
+ * 普通路径：archive = null，members = 各目录段。
+ * 虚拟路径：archive = 压缩包路径，members = 包内成员段（NUL 之后）。
+ */
+function pathLayers(filePath) {
+  const s = String(filePath);
+  const i = s.indexOf('\u0000');
+  const archive = i >= 0 ? s.slice(0, i) : null;
+  const rest = i >= 0 ? s.slice(i + 1) : (archive === null ? s : '');
+  const members = rest.split(/[\\/]/).filter(Boolean);
+  const archiveSegs = archive === null ? [] : archive.split(/[\\/]/).filter(Boolean);
+  return { archive, archiveSegs, members, isVirtual: i >= 0 };
+}
 
-  const first = hits[0];
-  const releaseRoot = parts.slice(0, first.index + 1).join(path.sep);
+/** 定位发行根：路径中最靠外的 RJ 号（压缩包感知，见上方说明） */
+export function locateRelease(filePath) {
+  const { archive, archiveSegs, members, isVirtual } = pathLayers(filePath);
+  const codes = [];
+  for (let i = 0; i < archiveSegs.length; i += 1) {
+    const m = RJ_PATTERN.exec(archiveSegs[i]);
+    if (m) codes.push({ layer: 'archive', index: i, code: m[0].toUpperCase().replace(/\s/g, '') });
+  }
+  for (let i = 0; i < members.length; i += 1) {
+    const m = RJ_PATTERN.exec(members[i]);
+    if (m) codes.push({ layer: 'member', index: i, code: m[0].toUpperCase().replace(/\s/g, '') });
+  }
+  if (!codes.length) return null;
+
+  const first = codes[0];
+  // 发行根 = 从头到「最外层 RJ 所在段」的完整路径；压缩包边界原样保留。
+  const releaseRoot = first.layer === 'archive'
+    ? archiveSegs.slice(0, first.index + 1).join(path.sep)
+    : `${archiveSegs.join(path.sep)}${isVirtual ? '\u0000' : ''}${members.slice(0, first.index + 1).join(path.sep)}`;
+
   return {
     rjCode: first.code,
     releaseRoot,
-    releaseFolderName: parts[first.index],
-    nestedRjCodes: [...new Set(hits.slice(1).map((h) => h.code))],
+    releaseFolderName: first.layer === 'archive' ? archiveSegs[first.index] : members[first.index],
+    nestedRjCodes: [...new Set(codes.slice(1).map((h) => h.code))],
     /** 发行根之后的路径段（含文件名） */
-    tail: parts.slice(first.index + 1),
+    tail: members.slice(first.layer === 'member' ? first.index + 1 : 0),
   };
 }
 
@@ -123,13 +152,31 @@ export function isFormatWrapperDir(name) {
   return rest.length <= 1;
 }
 
-/** R2：判断某段是否只是专辑名的重复包装（忽略 RJ 前缀与社团名差异） */
+/** R2：判断某段是否只是专辑名的重复包装（忽略 RJ 前缀、扩展名与社团名差异） */
 function isAlbumWrapper(segment, title) {
-  const core = (s) => looseKey(String(s ?? '').replace(RJ_PATTERN, ''));
+  const core = (s) => looseKey(
+    String(s ?? '').replace(RJ_PATTERN, '').replace(/\.[a-z0-9]{1,5}$/i, ''),
+  );
   const a = core(segment);
   const b = core(title);
-  if (!a || !b || a.length < 4 || b.length < 4) return false;
+  if (!a || !b || b.length < 4) return false;
+  // 逐级包含任一方向都视为包装：
+  //   · a 含 b —— 压缩包里唯一顶层目录常写作「作品名 + 版本名」的连写；
+  //   · b 含 a —— 目录只写作品名、而发行根带了社团名（[RJ…][社团]作品名/作品名/…）。
   return a === b || a.includes(b) || b.includes(a);
+}
+
+/**
+ * 发行根 → 作品名候选：剥掉 `[RJxxxxxxxx]` 前缀。
+ *
+ * 压缩包的发行根是 `.zip` 本身，要先剥扩展名；且虚拟路径带 NUL 分隔符，
+ * 不能用 path.posix.basename —— 那会取到路径里那一段「ASMR」而不是包名。
+ */
+export function releaseTitleOf(rootDir) {
+  const s = String(rootDir ?? '');
+  const nul = s.indexOf('\u0000');
+  const base = nul >= 0 ? s.slice(0, nul) : s;
+  return titleFromFolder(path.basename(base).replace(/\.(zip|7z|rar|tar|gz|iso)$/i, ''));
 }
 
 /** R3：版本名归一化（去掉格式标记与参数） */
@@ -143,6 +190,17 @@ export function normalizeVersionName(raw) {
   n = n.replace(/（\s*）|\(\s*\)/g, '');
   n = n.replace(/\s{2,}/g, ' ');
   return n.replace(/^[_\-:：\s]+|[_\-:：\s]+$/g, '').trim();
+}
+
+/**
+ * 剥离「纯专辑名包装段」：例如压缩包里唯一顶层目录就叫作品名。
+ * 只从**开头**连续剥离，一旦遇到真正的版本段就停止——
+ * 否则会把「作品名 + 版本名」连写的段整段丢掉，版本信息就没了。
+ */
+function stripWrapperSegments(segments, releaseTitle) {
+  let i = 0;
+  while (i < segments.length && isAlbumWrapper(segments[i], releaseTitle)) i += 1;
+  return segments.slice(i);
 }
 
 /**
@@ -165,15 +223,18 @@ export function resolveVersion(tailSegments, releaseTitle) {
     }
     // 视频目录下的子目录是「视频子变体」（如「有日文字幕」），不构成新版本（R6）
     if (inVideoWrapper) { videoVariant = videoVariant ?? toHalfWidth(seg); continue; }
-    if (isAlbumWrapper(seg, releaseTitle)) continue;
     kept.push(seg);
   }
-  const rawName = kept.length ? kept[kept.length - 1] : '本篇';
+
+  const cleaned = stripWrapperSegments(kept, releaseTitle);
+  // 压缩包：发行根本身（`<包名>.zip`）也会作为一段出现，它不构成版本
+  const versionSegs = cleaned.filter((s) => !/\.(zip|7z|rar|tar|gz|iso)$/i.test(s));
+  const rawName = versionSegs.length ? versionSegs[versionSegs.length - 1] : '本篇';
   return {
     ignored: false,
     bonus,
     videoVariant,
-    segments: kept,
+    segments: versionSegs,
     name: normalizeVersionName(rawName) || '本篇',
   };
 }
@@ -434,6 +495,35 @@ function walkFiles(root) {
   return out;
 }
 
+/**
+ * 发行根 → 成员相对路径（**压缩包安全**）。
+ *
+ * 不能用 path.relative()：虚拟路径里含有 NUL 分隔符，Windows 上 path.relative()
+ * 在解析到 NUL 时返回 '..'，会让整个三-层模型退化成「无版本」。
+ * 这里改为纯字符串前缀裁剪，并把分隔符统一成 /，与 path.posix 系列配合使用。
+ *
+ * 还要在 NUL 处再切一刀：压缩包的虚拟路径是 `<包路径>\0<成员路径>`，
+ * 切开后「压缩包本身」成为发行根之后的**第一个目录段**，
+ * 于是包内唯一的顶层包装目录能被 R2 的专辑名包装规则正常识别。
+ */
+function relOf(rootDir, filePath) {
+  const root = String(rootDir);
+  let s = String(filePath);
+  // 三种边界都要认：普通目录用 \ 或 /，压缩包虚拟路径用 NUL（`<包路径>\0<成员路径>`）
+  for (const sep of [path.sep, '/', '\u0000']) {
+    if (s.startsWith(`${root}${sep}`)) { s = s.slice(root.length + 1); break; }
+  }
+  return s
+    .split('\u0000')
+    .flatMap((part) => part.split(/[\\/]/))
+    .filter((x) => x.length > 0);
+}
+
+/** 相对路径段 → 显示用的相对路径（统一 / 分隔，压缩包与目录都直观） */
+function relText(segments) {
+  return segments.join('/');
+}
+
 const COVER_DIR_HINTS = [/高画质封面/, /封面/, /^cover/i];
 /** 封面文件名优先级：先包装图，再封面，最后插图（同级内按文件名自然序取第一张） */
 const COVER_NAME_PRIORITY = [
@@ -445,7 +535,7 @@ const naturalByName = (a, b) => a.name.localeCompare(b.name, 'ja', { numeric: tr
 
 /** R13：在发行根内挑封面 */
 export function pickCover(files) {
-  const images = files.filter((f) => f.kind === 'other' && /\.(jpe?g|png|webp)$/i.test(f.name));
+  const images = files.filter((f) => /\.(jpe?g|png|webp)$/i.test(f.name));
   if (!images.length) return null;
 
   const inCoverDir = images.filter((f) => {
@@ -465,17 +555,23 @@ export function pickCover(files) {
 /**
  * 解析一个发行目录，返回结构化结果（不写数据库）。
  * opts.readTags=true 时读取标签用于标题校对与冲突检测（较慢）。
+ *
+ * opts.files：**外部注入的成员清单**（压缩包支持用，见 docs/压缩包支持设计.md §4.2）。
+ * 传入时不再遍历磁盘，`path` 允许是虚拟路径；其余逻辑与目录扫描完全一致，
+ * 因此音声三层模型、版本规则、特典分离、差分标注对压缩包同样成立。
  */
-export async function analyzeRelease(rootDir, { readTags = true, maxTagReads = 40, decisions = null } = {}) {
-  const files = walkFiles(rootDir);
-  const releaseTitle = titleFromFolder(path.basename(rootDir));
+export async function analyzeRelease(rootDir, {
+  readTags = true, maxTagReads = 40, decisions = null, files: injected = null,
+} = {}) {
+  const files = injected ?? walkFiles(rootDir);
+  // 压缩包：发行根是 .zip 文件本身，标题要剥掉 .zip 才是作品名（虚拟路径带 NUL，不能用 posix.basename）
+  const releaseTitle = releaseTitleOf(rootDir);
 
   // R1：发行根之内若还出现别的 RJ 号目录，视为「特典子发行」，标记但不单独成卡
   const ownRj = locateRelease(rootDir)?.rjCode ?? null;
   const nestedRjCodes = new Set();
   for (const f of files) {
-    const rel = path.relative(rootDir, f.path);
-    for (const seg of rel.split(path.sep)) {
+    for (const seg of relOf(rootDir, f.path)) {
       const m = RJ_PATTERN.exec(seg);
       const code = m ? m[0].toUpperCase().replace(/\s/g, '') : null;
       if (code && code !== ownRj) nestedRjCodes.add(code);
@@ -495,11 +591,10 @@ export async function analyzeRelease(rootDir, { readTags = true, maxTagReads = 4
 
   for (const f of files) {
     if (f.kind === 'other') continue;
-    const rel = path.relative(rootDir, f.path);
-    const segments = rel.split(path.sep);
+    const segments = relOf(rootDir, f.path);
 
     const v = resolveVersion(segments, releaseTitle);
-    if (v.ignored) { ignored.push({ path: rel, reason: v.reason }); continue; }
+    if (v.ignored) { ignored.push({ path: relText(segments), reason: v.reason }); continue; }
 
     const format = f.kind === 'video' ? 'video' : f.ext.replace('.', '');
     const key = `${v.bonus ? 'bonus:' : ''}${looseKey(v.name)}`;
@@ -507,7 +602,7 @@ export async function analyzeRelease(rootDir, { readTags = true, maxTagReads = 4
     if (!versions.has(key)) {
       versions.set(key, {
         key, name: v.name, group: v.bonus ? 'bonus' : 'main',
-        formats: new Set(), dir: path.dirname(f.path),
+        formats: new Set(), dir: path.posix.dirname(relText(segments)),
         fileCount: 0, bytes: 0, files: new Map(),
       });
     }
@@ -626,7 +721,7 @@ export async function analyzeRelease(rootDir, { readTags = true, maxTagReads = 4
         if (related) {
           conflicts.push({
             type: 'filename-variant',
-            file: path.relative(rootDir, rec.file.path),
+            file: relText(relOf(rootDir, rec.file.path)),
             versionFromFolder: version.name,
             leftover: rest,
             relatedToken: related,
@@ -659,10 +754,10 @@ export async function analyzeRelease(rootDir, { readTags = true, maxTagReads = 4
   /* 把冲突回填到轨道行，供界面标 ⚠ */
   const conflictFiles = new Set(conflicts.filter((c) => c.file).map((c) => c.file));
   for (const row of trackRows.values()) {
-    const hit = row.versions.find((v) => conflictFiles.has(path.relative(rootDir, v.file.path)));
+    const hit = row.versions.find((v) => conflictFiles.has(relText(relOf(rootDir, v.file.path))));
     if (hit) {
       row.conflict = true;
-      row.conflictNote = conflicts.find((c) => c.file === path.relative(rootDir, hit.file.path))?.note;
+      row.conflictNote = conflicts.find((c) => c.file === relText(relOf(rootDir, hit.file.path)))?.note;
     }
   }
 

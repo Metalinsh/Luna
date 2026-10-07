@@ -15,7 +15,7 @@ import {
   DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -203,6 +203,55 @@ function createV2Tables() {
   `);
 }
 
+/**
+ * V6 表：压缩包（P1 只读虚拟库）
+ * 见 docs/压缩包支持设计.md §5.2。
+ * 压缩包**永远只读**：这里只登记清单与统计，不代表任何写回意图。
+ */
+function createV6Tables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS archives (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      library_id        INTEGER,
+      path              TEXT NOT NULL UNIQUE,
+      format            TEXT NOT NULL DEFAULT 'zip',
+      entry_count       INTEGER NOT NULL DEFAULT 0,
+      audio_count       INTEGER NOT NULL DEFAULT 0,
+      image_count       INTEGER NOT NULL DEFAULT 0,
+      video_count       INTEGER NOT NULL DEFAULT 0,
+      packed_bytes      INTEGER NOT NULL DEFAULT 0,
+      unpacked_bytes    INTEGER NOT NULL DEFAULT 0,
+      encrypted         INTEGER NOT NULL DEFAULT 0,
+      unsupported       INTEGER NOT NULL DEFAULT 0,
+      name_encoding     TEXT,
+      status            TEXT NOT NULL DEFAULT 'ready',
+      error             TEXT,
+      file_size         INTEGER,
+      file_mtime        INTEGER,
+      scanned_at        INTEGER,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_archives_library ON archives(library_id);
+    CREATE INDEX IF NOT EXISTS idx_archives_status  ON archives(status);
+
+    -- 包内清单：P1 用于增量比对与统计，P2 用于按需取成员
+    CREATE TABLE IF NOT EXISTS archive_members (
+      archive_id   INTEGER NOT NULL,
+      member_path  TEXT NOT NULL,
+      kind         TEXT,
+      size         INTEGER,
+      packed_size  INTEGER,
+      method       INTEGER,
+      crc32        INTEGER,
+      mtime        INTEGER,
+      name_encoding TEXT,
+      PRIMARY KEY (archive_id, member_path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_archive_members_kind ON archive_members(archive_id, kind);
+  `);
+}
+
 function addV2Columns() {
   const wanted = {
     libraries: [['display_name', 'TEXT']],
@@ -221,6 +270,11 @@ function addV2Columns() {
       // V5：单曲喜欢（只对普通音乐曲目生效）
       ['favorite', 'INTEGER NOT NULL DEFAULT 0'],
       ['favorite_at', 'INTEGER'],
+      // V6：压缩包成员（P1 只读挂载）
+      ['source_kind', "TEXT NOT NULL DEFAULT 'file'"],
+      ['archive_id', 'INTEGER'],
+      ['member_path', 'TEXT'],
+      ['materialized_state', "TEXT NOT NULL DEFAULT 'ready'"],
     ],
     albums: [
       // V3：音声发行信息
@@ -252,6 +306,29 @@ function addV2Columns() {
     CREATE INDEX IF NOT EXISTS idx_tracks_version   ON tracks(version_id);
     CREATE INDEX IF NOT EXISTS idx_tracks_key       ON tracks(album_id, track_key);
     CREATE INDEX IF NOT EXISTS idx_albums_rj        ON albums(rj_code);
+  `);
+}
+
+function addV6Columns() {
+  const wanted = {
+    tracks: [
+      ['source_kind', "TEXT NOT NULL DEFAULT 'file'"],
+      ['archive_id', 'INTEGER'],
+      ['member_path', 'TEXT'],
+      ['materialized_state', "TEXT NOT NULL DEFAULT 'ready'"],
+    ],
+  };
+  for (const [table, columns] of Object.entries(wanted)) {
+    const existing = new Set(columnNames(table));
+    for (const [name, type] of columns) {
+      if (!existing.has(name)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+      }
+    }
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tracks_archive ON tracks(archive_id);
+    CREATE INDEX IF NOT EXISTS idx_tracks_src     ON tracks(source_kind, materialized_state);
   `);
 }
 
@@ -365,6 +442,8 @@ function migrate() {
   createBaseTables();
   createV2Tables();
   addV2Columns();
+  createV6Tables();
+  addV6Columns();
 
   let version;
   if (hadMeta) {
@@ -384,9 +463,9 @@ function migrate() {
     migrationReport.albums = result.groups;
     migrationReport.backup = result.backup;
   } else if (version < SCHEMA_VERSION) {
-    // v2/v3 → v4：只补新表与新列，无需重建专辑
+    // v2/v3/v4/v5 → v6：只补新表与新列，无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段`;
+    migrationReport.note = `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表`;
   }
   setMeta('schema_version', String(SCHEMA_VERSION));
   return migrationReport;
@@ -789,6 +868,7 @@ const UPSERT_TRACK = `
     duration, bitrate, sample_rate, channels, codec, container,
     has_cover, parse_error, title_source, meta_source, override_json, lyrics_path,
     version_id, track_key, file_kind, is_bonus, variant_label,
+    source_kind, archive_id, member_path, materialized_state,
     added_at, updated_at
   ) VALUES (
     ?, ?, ?, ?, ?, ?, ?,
@@ -797,6 +877,7 @@ const UPSERT_TRACK = `
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
+    ?, ?, ?, ?,
     ?, ?
   )
   ON CONFLICT(path) DO UPDATE SET
@@ -813,6 +894,8 @@ const UPSERT_TRACK = `
     version_id = excluded.version_id, track_key = excluded.track_key,
     file_kind = excluded.file_kind, is_bonus = excluded.is_bonus,
     variant_label = excluded.variant_label,
+    source_kind = excluded.source_kind, archive_id = excluded.archive_id,
+    member_path = excluded.member_path, materialized_state = excluded.materialized_state,
     updated_at = excluded.updated_at
 `;
 
@@ -832,6 +915,8 @@ export function upsertTrack(rec) {
     rec.lyricsPath ?? null,
     rec.versionId ?? null, rec.trackKey ?? null, rec.fileKind ?? 'audio',
     rec.isBonus ? 1 : 0, rec.variantLabel ?? null,
+    rec.sourceKind ?? 'file', rec.archiveId ?? null, rec.memberPath ?? null,
+    rec.materializedState ?? (rec.archiveId ? 'archived' : 'ready'),
     rec.addedAt ?? t, t,
   );
 }
@@ -864,6 +949,179 @@ export function trackPathsInLibrary(libraryId) {
 
 export function countTracksInLibrary(libraryId) {
   return db.prepare('SELECT COUNT(*) AS n FROM tracks WHERE library_id = ?').get(Number(libraryId)).n;
+}
+
+/* ================================================================= 压缩包 */
+
+/**
+ * 登记（或更新）一个压缩包，并整体替换它的成员清单。
+ * 压缩包永远只读：这里只写 Luna 自己的索引。
+ *
+ * @param {object} rec { path, libraryId, format, entryCount, audioCount, imageCount,
+ *                       videoCount, packedBytes, unpackedBytes, encrypted,
+ *                       unsupported, nameEncoding, status, error, fileSize, fileMtime }
+ * @param {Array<object>} members 成员清单（可空）
+ * @returns {number} archive id
+ */
+export function upsertArchive(rec = {}, members = []) {
+  const t = now();
+  const existing = db.prepare('SELECT id, created_at FROM archives WHERE path = ?').get(String(rec.path));
+  let id;
+  if (existing) {
+    id = existing.id;
+    db.prepare(`
+      UPDATE archives SET
+        library_id = ?, format = ?, entry_count = ?, audio_count = ?, image_count = ?,
+        video_count = ?, packed_bytes = ?, unpacked_bytes = ?, encrypted = ?,
+        unsupported = ?, name_encoding = ?, status = ?, error = ?,
+        file_size = ?, file_mtime = ?, scanned_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      rec.libraryId ?? null, rec.format ?? 'zip',
+      rec.entryCount ?? 0, rec.audioCount ?? 0, rec.imageCount ?? 0, rec.videoCount ?? 0,
+      rec.packedBytes ?? 0, rec.unpackedBytes ?? 0, rec.encrypted ? 1 : 0,
+      rec.unsupported ? 1 : 0, rec.nameEncoding ?? null,
+      rec.status ?? 'ready', rec.error ?? null,
+      rec.fileSize ?? null, rec.fileMtime ?? null, t, id,
+    );
+  } else {
+    const info = db.prepare(`
+      INSERT INTO archives (
+        library_id, path, format, entry_count, audio_count, image_count, video_count,
+        packed_bytes, unpacked_bytes, encrypted, unsupported, name_encoding,
+        status, error, file_size, file_mtime, scanned_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      rec.libraryId ?? null, String(rec.path), rec.format ?? 'zip',
+      rec.entryCount ?? 0, rec.audioCount ?? 0, rec.imageCount ?? 0, rec.videoCount ?? 0,
+      rec.packedBytes ?? 0, rec.unpackedBytes ?? 0, rec.encrypted ? 1 : 0,
+      rec.unsupported ? 1 : 0, rec.nameEncoding ?? null,
+      rec.status ?? 'ready', rec.error ?? null,
+      rec.fileSize ?? null, rec.fileMtime ?? null, t, t, t,
+    );
+    id = Number(info.lastInsertRowid);
+  }
+
+  // 成员清单整体替换：先删后插，保证包内容变化后不残留旧成员
+  db.prepare('DELETE FROM archive_members WHERE archive_id = ?').run(id);
+  if (Array.isArray(members) && members.length) {
+    const insert = db.prepare(`
+      INSERT OR REPLACE INTO archive_members
+        (archive_id, member_path, kind, size, packed_size, method, crc32, mtime, name_encoding)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const m of members) {
+      insert.run(id, m.name, m.kind ?? 'other', m.size ?? 0, m.packedSize ?? 0,
+        m.method ?? 0, m.crc32 ?? 0, m.mtime ?? null, m.nameEncoding ?? null);
+    }
+  }
+  return id;
+}
+
+export function getArchiveByPath(p) {
+  return db.prepare('SELECT * FROM archives WHERE path = ?').get(String(p)) ?? null;
+}
+
+export function getArchiveById(id) {
+  return db.prepare('SELECT * FROM archives WHERE id = ?').get(Number(id)) ?? null;
+}
+
+export function listArchives({ libraryId = null, status = null } = {}) {
+  const where = [];
+  const args = [];
+  if (libraryId != null) { where.push('library_id = ?'); args.push(Number(libraryId)); }
+  if (status) { where.push('status = ?'); args.push(String(status)); }
+  const sql = `SELECT * FROM archives ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY path`;
+  return db.prepare(sql).all(...args);
+}
+
+export function listArchiveMembers(archiveId, kind = null) {
+  const sql = kind
+    ? 'SELECT * FROM archive_members WHERE archive_id = ? AND kind = ? ORDER BY member_path'
+    : 'SELECT * FROM archive_members WHERE archive_id = ? ORDER BY member_path';
+  const args = kind ? [Number(archiveId), String(kind)] : [Number(archiveId)];
+  return db.prepare(sql).all(...args);
+}
+
+export function countArchiveMembers(archiveId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM archive_members WHERE archive_id = ?')
+    .get(Number(archiveId)).n;
+}
+
+/** 路径前缀下的所有压缩包（重扫单个发行用） */
+export function archivesUnder(rootPath) {
+  const prefix = String(rootPath);
+  return db.prepare('SELECT * FROM archives WHERE path = ? OR path LIKE ? ORDER BY path')
+    .all(prefix, `${prefix}${path.sep}%`);
+}
+
+/** 删除一个压缩包登记及其成员与曲目；返回删除的曲目数 */
+export function deleteArchive(archiveId) {
+  const id = Number(archiveId);
+  const row = db.prepare('SELECT path FROM archives WHERE id = ?').get(id);
+  if (!row) return { tracks: 0, removed: false };
+  const albumIds = db.prepare('SELECT DISTINCT album_id FROM tracks WHERE archive_id = ? AND album_id IS NOT NULL')
+    .all(id).map((r) => r.album_id);
+  const tracks = db.prepare('DELETE FROM tracks WHERE archive_id = ?').run(id).changes;
+  db.prepare('DELETE FROM archive_members WHERE archive_id = ?').run(id);
+  db.prepare('DELETE FROM archives WHERE id = ?').run(id);
+  for (const albumId of albumIds) deleteAlbumIfEmpty(albumId);
+  return { tracks, removed: true, path: row.path };
+}
+
+export function countTracksInArchive(archiveId) {
+  return db.prepare('SELECT COUNT(*) AS n FROM tracks WHERE archive_id = ?')
+    .get(Number(archiveId)).n;
+}
+
+/**
+ * 某个压缩包内的全部曲目路径。
+ * 注意：不能用 trackPathsUnder()——它按 `路径 + 分隔符` 前缀匹配，
+ * 而压缩包内成员路径的首段是 NUL 分隔符，永远匹配不到。
+ */
+export function trackPathsInArchive(archiveId) {
+  return db.prepare('SELECT path FROM tracks WHERE archive_id = ?')
+    .all(Number(archiveId)).map((r) => r.path);
+}
+
+/** 某个发行卡是否含有归档态曲目（界面角标用） */
+export function albumArchiveInfo(albumId) {
+  const row = db.prepare(`
+    SELECT COUNT(DISTINCT t.archive_id) AS archives,
+           COUNT(*)                     AS tracks
+    FROM tracks t
+    WHERE t.album_id = ? AND t.source_kind = 'archive_member'
+  `).get(Number(albumId));
+  return { archives: Number(row?.archives ?? 0), tracks: Number(row?.tracks ?? 0) };
+}
+
+export function archiveStats() {
+  const a = db.prepare(`
+    SELECT COUNT(*) AS archives,
+           COALESCE(SUM(entry_count), 0)    AS entries,
+           COALESCE(SUM(audio_count), 0)    AS audio,
+           COALESCE(SUM(packed_bytes), 0)   AS packed,
+           COALESCE(SUM(unpacked_bytes), 0) AS unpacked,
+           COALESCE(SUM(unsupported), 0)    AS unsupported,
+           COALESCE(SUM(encrypted), 0)      AS encrypted
+    FROM archives
+  `).get();
+  const t = db.prepare(`
+    SELECT COUNT(*) AS tracks,
+           COALESCE(SUM(CASE WHEN materialized_state = 'archived' THEN 1 ELSE 0 END), 0) AS archived
+    FROM tracks WHERE source_kind = 'archive_member'
+  `).get();
+  return {
+    archives: Number(a.archives),
+    entries: Number(a.entries),
+    audio: Number(a.audio),
+    packedBytes: Number(a.packed),
+    unpackedBytes: Number(a.unpacked),
+    unsupportedArchives: Number(a.unsupported),
+    encryptedArchives: Number(a.encrypted),
+    archiveTracks: Number(t.tracks),
+    archivedTracks: Number(t.archived),
+  };
 }
 
 /* =================================================================== covers */
@@ -1094,6 +1352,8 @@ export function listVoiceTracks(albumId) {
   return db.prepare(`
     SELECT t.id, t.path, t.filename, t.ext, t.title, t.track_no, t.track_key,
            t.file_kind, t.is_bonus, t.size, t.duration, t.version_id, t.variant_label,
+           -- 压缩包状态（P1）：界面据此显示「包内」并禁止播放
+           t.source_kind, t.materialized_state, t.archive_id, t.member_path,
            v.name AS version_name, v.group_kind, v.preferred_format, v.name_key AS version_key
     FROM tracks t LEFT JOIN album_versions v ON v.id = t.version_id
     WHERE t.album_id = ?
@@ -1229,6 +1489,12 @@ export function listAlbums({
            MAX(t.added_at)                    AS added_max,
            COUNT(DISTINCT t.disc_no)          AS disc_count,
            (SELECT COUNT(*) FROM album_tags at2 WHERE at2.album_id = a.id) AS tag_count,
+           -- 压缩包只读挂载（P1）：该发行有多少曲目仍在包内，供专辑墙角标使用
+           (SELECT COUNT(DISTINCT ta.archive_id) FROM tracks ta
+             WHERE ta.album_id = a.id AND ta.source_kind = 'archive_member') AS archive_count,
+           (SELECT COUNT(*) FROM tracks ta2
+             WHERE ta2.album_id = a.id AND ta2.source_kind = 'archive_member'
+               AND ta2.materialized_state <> 'ready')                        AS archived_track_count,
            (SELECT COUNT(*) FROM tracks tl2 LEFT JOIN albums al2 ON al2.id = tl2.album_id
              WHERE tl2.album_id = a.id AND (
                tl2.parse_error IS NOT NULL
@@ -1250,6 +1516,11 @@ export function listAlbums({
     favorite: Boolean(row.favorite),
     cover_url: row.cover_hash ? `/api/cover/${row.cover_hash}` : null,
     library_id: libraryId ?? null,
+    /** 压缩包挂载信息（P1）：包数 + 仍在包内的曲目数 */
+    archive: {
+      archives: Number(row.archive_count ?? 0),
+      tracks: Number(row.archived_track_count ?? 0),
+    },
   }));
 
   return filterByStatus(decorated, status);
@@ -1339,6 +1610,8 @@ export function listLooseTracks({
     SELECT t.id, t.path, t.filename, t.title, t.artist, t.album, t.album_id,
            t.track_no, t.disc_no, t.year, t.duration, t.bitrate, t.sample_rate, t.codec,
            t.lyrics_path, t.meta_source, t.title_source, t.parse_error, t.favorite,
+           -- 压缩包状态（P1）：供跨专辑曲目列表标注「包内」
+           t.source_kind, t.materialized_state, t.archive_id, t.member_path,
            COALESCE(NULLIF(TRIM(a.title), ''), '${PLACEHOLDER_ALBUM}') AS album_title,
            a.cover_hash, a.kind AS album_kind, a.circle AS album_circle
     FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
@@ -1416,7 +1689,7 @@ export function getStats() {
     GROUP BY tg.id ORDER BY albums DESC, tg.name COLLATE NOCASE LIMIT 15
   `).all();
 
-  return { ...base, byFormat, byDecade, topArtists, topTags };
+  return { ...base, archives: archiveStats(), byFormat, byDecade, topArtists, topTags };
 }
 
 export function vacuum() {

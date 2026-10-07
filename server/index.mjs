@@ -7,6 +7,7 @@ import express from 'express';
 
 import {
   PUBLIC_DIR, COVER_DIR, THUMB_DIR, DATA_DIR, MIME_BY_EXT, readConfig, writeConfig, ensureDirs,
+  APP_VERSION,
 } from './config.mjs';
 import * as store from './db.mjs';
 import * as tagsApi from './tags.mjs';
@@ -62,7 +63,7 @@ const parseId = (value) => {
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
-    version: '2.1.0',
+    version: APP_VERSION,
     schemaVersion: store.SCHEMA_VERSION,
     node: process.version,
     dataDir: DATA_DIR,
@@ -266,6 +267,8 @@ app.get('/api/albums/:id', (req, res) => {
     cover_source: album.cover_source,
     tags: tagsApi.getAlbumTags(id),
     completeness: completeness.completenessForAlbum(id),
+    /** 压缩包只读挂载（P1）：该发行是否有曲目仍在包内 */
+    archive: store.albumArchiveInfo(id),
   };
 
   // 普通音乐专辑：维持原有平铺列表
@@ -306,6 +309,12 @@ app.get('/api/albums/:id', (req, res) => {
       ext: t.ext,
       size: t.size,
       duration: t.duration,
+      // 压缩包状态：界面据此显示「包内」并禁用播放（P1 只读挂载）
+      source_kind: t.source_kind ?? 'file',
+      materialized_state: t.materialized_state ?? 'ready',
+      archive_id: t.archive_id ?? null,
+      member_path: t.member_path ?? null,
+      playable: !(t.source_kind === 'archive_member' && t.materialized_state !== 'ready'),
       stream_url: `/api/stream/${t.id}`,
     });
   }
@@ -732,6 +741,22 @@ app.get('/api/stream/:id', asyncRoute(async (req, res) => {
   const track = store.getTrack(req.params.id);
   if (!track) return res.status(404).json({ error: '曲目不存在' });
 
+  /**
+   * 压缩包内的曲目尚未落盘（P1 只读挂载）：**明确拒绝**，不假装能播。
+   * 必须在 fsp.stat 之前判断 —— 虚拟路径不是真实文件，stat 必然失败，
+   * 会退化成误导性的 410「文件已被移动或删除」。
+   * 按需解码与流播见 docs/压缩包支持设计.md §7 的 P2。
+   */
+  if (track.source_kind === 'archive_member' && track.materialized_state !== 'ready') {
+    return res.status(409).json({
+      error: '该曲目位于压缩包内，尚未实现直接播放（规划中的 P2：按需解码到缓存）',
+      code: 'ARCHIVE_NOT_MATERIALIZED',
+      archiveId: track.archive_id ?? null,
+      memberPath: track.member_path ?? null,
+      materializedState: track.materialized_state,
+    });
+  }
+
   let stat;
   try {
     stat = await fsp.stat(track.path);
@@ -1099,7 +1124,7 @@ const port = Number(process.env.PORT || config.port || 8787);
 const host = process.env.HOST || config.host || '127.0.0.1';
 
 const server = app.listen(port, host, () => {
-  console.log(`Luna v3.0 已启动： http://${host}:${port}`);
+  console.log(`Luna v${APP_VERSION} 已启动： http://${host}:${port}`);
   console.log(`数据目录： ${DATA_DIR}`);
   if (store.migrationReport.migrated) {
     console.log(`已从 V${store.migrationReport.from} 迁移到 V${store.SCHEMA_VERSION}，`
