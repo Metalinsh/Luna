@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Luna · 本地音乐与音声库</title>
+<link rel="stylesheet" href="/styles.css" />
+<link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png" />
+<link rel="icon" type="image/png" sizes="64x64" href="/icon-64.png" />
+<link rel="apple-touch-icon" href="/icon.png" />
+</head>
+<body>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <img class="brand-mark" src="/icon-64.png" alt="Luna" width="32" height="32" />
+      <div>
+        <div class="brand-title">Luna</div>
+        <div class="brand-sub" id="brandSub">未连接</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item is-active" data-view="albums">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        专辑墙
+      </button>
+      <button class="nav-item" data-view="tracks">
+        <svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
+        全部曲目
+      </button>
+      <button class="nav-item" data-view="favasmr">
+        <svg viewBox="0 0 24 24"><path d="M12 20.5 4.2 13a4.8 4.8 0 0 1 6.8-6.8l1 1 1-1A4.8 4.8 0 0 1 19.8 13z"/></svg>
+        喜欢的ASMR
+        <span class="nav-badge" id="favAsmrBadge" hidden>0</span>
+      </button>
+      <button class="nav-item" data-view="favalbum">
+        <svg viewBox="0 0 24 24"><path d="M12 20.5 4.2 13a4.8 4.8 0 0 1 6.8-6.8l1 1 1-1A4.8 4.8 0 0 1 19.8 13z"/></svg>
+        喜欢的专辑
+        <span class="nav-badge" id="favAlbumBadge" hidden>0</span>
+      </button>
+      <button class="nav-item" data-view="favtracks">
+        <svg viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg>
+        喜欢的音乐
+        <span class="nav-badge" id="favTrackBadge" hidden>0</span>
+      </button>
+      <button class="nav-item" data-view="incomplete">
+        <svg viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+        待完善
+        <span class="nav-badge" id="incompleteBadge" hidden>0</span>
+      </button>
+      <button class="nav-item" data-view="tags">
+        <svg viewBox="0 0 24 24"><path d="M20.6 13.4 12 22l-9-9V3h10l7.6 7.6a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.5"/></svg>
+        标签
+      </button>
+      <button class="nav-item" data-view="stats">
+        <svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+        统计
+      </button>
+    </nav>
+
+    <div class="side-section">
+      <div class="side-head">
+        <span>音乐库</span>
+        <button class="icon-btn" id="addLibraryBtn" title="添加音乐目录">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
+      <div class="library-list" id="libraryList"></div>
+      <button class="btn btn-primary btn-block" id="scanBtn">扫描音乐库</button>
+      <div class="scan-status" id="scanStatus" hidden>
+        <div class="scan-line"><span id="scanPhase">准备中</span><span id="scanCount"></span></div>
+        <div class="scan-bar"><i id="scanBarFill"></i></div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input id="searchInput" type="search" placeholder="搜索曲名、艺术家、专辑、标签…" autocomplete="off" />
+      </div>
+      <div class="select-wrap">
+        <select id="tagModeSelect" title="标签筛选方式">
+          <option value="and">同时具备</option>
+          <option value="or">任一标签</option>
+        </select>
+      </div>
+      <select id="sortSelect" title="排序">
+        <option value="artist-asc">艺术家 A→Z</option>
+        <option value="album-asc">专辑名 A→Z</option>
+        <option value="album-desc">专辑名 Z→A</option>
+        <option value="year-desc">年份 新→旧</option>
+        <option value="year-asc">年份 旧→新</option>
+        <option value="added-desc">最近入库</option>
+        <option value="tracks-desc">曲目数</option>
+        <option value="duration-desc">总时长</option>
+        <option value="tags-desc">标签数</option>
+      </select>
+      <button class="btn btn-ghost" id="selectModeBtn" title="多选模式">选择</button>
+      <span class="result-count" id="resultCount"></span>
+    </header>
+
+    <div class="tagbar" id="tagBar" hidden></div>
+
+    <div class="bulkbar" id="bulkBar" hidden>
+      <span id="bulkCount">已选 0 张</span>
+      <button type="button" class="btn" id="bulkTagBtn">批量打标签</button>
+      <button type="button" class="btn" id="bulkArtistBtn" hidden>批量填艺术家</button>
+      <button type="button" class="btn" id="bulkCircleBtn" hidden>批量填社团</button>
+      <span class="bulk-hint" id="bulkVoiceHint" hidden>仅对 ASMR 音声发行生效</span>
+      <button type="button" class="btn btn-ghost" id="bulkClearBtn">清空选择</button>
+      <button type="button" class="btn btn-ghost" id="bulkExitBtn">退出多选</button>
+    </div>
+
+    <section class="view" id="viewAlbums">
+      <div class="album-grid" id="albumGrid"></div>
+      <div class="load-more" id="loadMoreWrap" hidden>
+        <button class="btn" id="loadMoreBtn">加载更多</button>
+      </div>
+      <div class="empty" id="albumsEmpty" hidden>
+        <div class="empty-emoji">💿</div>
+        <h2 id="emptyTitle">还没有音乐</h2>
+        <p id="emptyText">在左侧添加一个音乐目录，然后点击「扫描音乐库」。</p>
+      </div>
+    </section>
+
+    <section class="view" id="viewAlbumDetail" hidden>
+      <button class="btn btn-ghost back-btn" id="backBtn">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg> 返回
+      </button>
+      <div class="detail" id="albumDetail"></div>
+    </section>
+
+    <section class="view" id="viewTracks" hidden>
+      <div class="track-table" id="trackTable"></div>
+    </section>
+
+    <section class="view" id="viewIncomplete" hidden>
+      <div class="workbench" id="incompletePanel"></div>
+    </section>
+
+    <section class="view" id="viewTags" hidden>
+      <div class="tagsview" id="tagsPanel"></div>
+    </section>
+
+    <section class="view" id="viewStats" hidden>
+      <div class="stats" id="statsPanel"></div>
+    </section>
+  </main>
+</div>
+
+<footer class="player" id="player">
+  <div class="now-playing" id="npOpen" title="展开正在播放与歌词">
+    <div class="np-cover" id="npCover"></div>
+    <div class="np-text">
+      <div class="np-title" id="npTitle">—</div>
+      <div class="np-artist" id="npArtist"></div>
+    </div>
+  </div>
+  <div class="player-center">
+    <div class="controls">
+      <button class="icon-btn" id="prevBtn" title="上一首">
+        <svg viewBox="0 0 24 24"><path d="M19 5v14L8 12zM5 5v14"/></svg>
+      </button>
+      <button class="icon-btn" id="back5Btn" title="倒退 5 秒 (←)">
+        <svg viewBox="0 0 24 24"><path d="M11 5V2L6 6l5 4V7a5 5 0 1 1-5 5H4a7 7 0 1 0 7-7z"/><text x="8" y="17" font-size="7" fill="currentColor" stroke="none">5</text></svg>
+      </button>
+      <button class="play-btn" id="playBtn" title="播放 / 暂停">
+        <svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4l13 8-13 8z"/></svg>
+      </button>
+      <button class="icon-btn" id="fwd5Btn" title="快进 5 秒 (→)">
+        <svg viewBox="0 0 24 24"><path d="M13 5V2l5 4-5 4V7a5 5 0 1 0 5 5h2a7 7 0 1 1-7-7z"/><text x="8" y="17" font-size="7" fill="currentColor" stroke="none">5</text></svg>
+      </button>
+      <button class="icon-btn" id="nextBtn" title="下一首">
+        <svg viewBox="0 0 24 24"><path d="M5 5v14l11-7zM19 5v14"/></svg>
+      </button>
+    </div>
+    <div class="seek-row">
+      <span class="time" id="curTime">0:00</span>
+      <input type="range" id="seek" min="0" max="1000" value="0" step="1" />
+      <span class="time" id="durTime">0:00</span>
+    </div>
+  </div>
+  <div class="player-right">
+    <button class="icon-btn mode-btn" id="modeBtn" title="播放模式：列表循环">
+      <span id="modeIcon">🔁</span>
+    </button>
+    <button class="icon-btn" id="lyricsBtn" title="歌词 (L)">
+      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 11h10M4 16h13"/></svg>
+    </button>
+    <div class="volume">
+      <svg viewBox="0 0 24 24"><path d="M4 9h3l5-4v14l-5-4H4z"/><path d="M16 8.5a5 5 0 0 1 0 7"/></svg>
+      <input type="range" id="volume" min="0" max="100" value="85" />
+    </div>
+  </div>
+</footer>
+
+<div class="nowplaying" id="nowPlaying" hidden>
+  <button class="np-close" id="npClose" title="关闭 (ESC)">
+    <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+  </button>
+  <div class="np-grid" id="npGrid">
+    <div class="np-left" id="npLeft">
+      <div class="np-bigcover" id="npBigCover"></div>
+      <div class="np-meta">
+        <div class="np-big-title" id="npBigTitle">—</div>
+        <div class="np-big-credit">
+          <span class="credit-item"><span class="credit-label">艺术家：</span><span id="npBigArtist">—</span></span>
+          <span class="credit-item"><span class="credit-label">社团：</span><span id="npBigCircle">—</span></span>
+        </div>
+        <div class="np-big-album" id="npBigAlbum"></div>
+      </div>
+    </div>
+    <div class="np-split" id="npSplit" title="拖动调整封面区域宽度"></div>
+    <div class="np-right">
+      <div class="lyrics-head">
+        <span id="lyricsSource">歌词</span>
+        <span class="lyrics-tools">
+          <button type="button" class="btn btn-mini" id="lyricsBigger" title="增大歌词字号">A+</button>
+          <button type="button" class="btn btn-mini" id="lyricsSmaller" title="减小歌词字号">A-</button>
+        </span>
+        <label class="lyrics-follow"><input type="checkbox" id="lyricsFollow" checked /> 跟随</label>
+      </div>
+      <div class="lyrics-body" id="lyricsBody">
+        <div class="lyrics-empty">未找到歌词文件</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<dialog class="dlg" id="libraryDialog">
+  <form method="dialog">
+    <h3>添加音乐目录</h3>
+    <p class="hint">选择一个包含音乐的文件夹，软件会递归扫描其中的音频文件。</p>
+    <input type="text" id="libPathInput" placeholder="例如 E:\Music" spellcheck="false" />
+    <input type="text" id="libNameInput" placeholder="库显示名（可选，留空取文件夹名）" spellcheck="false" />
+    <div class="dlg-actions">
+      <button class="btn" value="browse" id="browseBtn" type="button">浏览…</button>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" value="cancel" type="button" id="cancelLibBtn">取消</button>
+      <button class="btn btn-primary" value="ok" type="button" id="confirmLibBtn">添加并扫描</button>
+    </div>
+    <div class="dlg-error" id="libError" hidden></div>
+  </form>
+</dialog>
+
+<dialog class="dlg" id="tagDialog">
+  <form method="dialog">
+    <h3 id="tagDlgTitle">添加标签</h3>
+    <p class="hint" id="tagDlgHint">勾选已有标签，或在下方输入新标签名后回车直接打上。</p>
+    <div class="tag-input-row">
+      <input type="text" id="tagInput" placeholder="输入新标签名，回车即创建并勾选" autocomplete="off" spellcheck="false" />
+      <button class="btn" type="button" id="tagCreateBtn">新建</button>
+    </div>
+    <div class="tag-suggest" id="tagSuggest" hidden></div>
+    <div class="tag-picker" id="tagPicker"></div>
+    <div class="dlg-actions">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" value="cancel" type="button" id="tagCancelBtn">取消</button>
+      <button class="btn btn-primary" value="ok" type="button" id="tagApplyBtn">应用</button>
+    </div>
+    <div class="dlg-error" id="tagError" hidden></div>
+  </form>
+</dialog>
+
+<!-- 通用文本输入框（替代 Electron 不支持的 window.prompt） -->
+<dialog class="dlg dlg-narrow" id="askDialog">
+  <form method="dialog">
+    <h3 id="askTitle">请输入</h3>
+    <p class="hint" id="askHint"></p>
+    <input type="text" id="askInput" autocomplete="off" spellcheck="false" />
+    <div class="dlg-actions">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" id="askCancel">取消</button>
+      <button class="btn btn-primary" type="button" id="askOk">确定</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 通用确认框（替代 Electron 不支持的 window.confirm） -->
+<dialog class="dlg dlg-narrow" id="confirmDialog">
+  <form method="dialog">
+    <h3 id="confirmTitle">请确认</h3>
+    <p class="hint" id="confirmText"></p>
+    <div class="dlg-actions">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" id="confirmCancel">取消</button>
+      <button class="btn btn-primary" type="button" id="confirmOk">确定</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="jobbar" id="jobBar" hidden>
+  <div class="jobbar-inner">
+    <span class="jobbar-text" id="jobText">写入中…</span>
+    <span class="jobbar-bar"><i id="jobFill"></i></span>
+    <button class="btn btn-ghost" id="jobUndoBtn" hidden>撤销本次写入</button>
+    <button class="icon-btn" id="jobCloseBtn" title="关闭">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+</div>
+
+<div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+<aside class="drawer" id="editDrawer" hidden>
+  <div class="drawer-head">
+    <h3>编辑专辑信息</h3>
+    <button class="icon-btn" id="editCloseBtn" title="关闭 (ESC)">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body" id="editBody"></div>
+  <div class="drawer-foot">
+    <div class="drawer-impact" id="editImpact">留空的字段不会被修改；点「清除」才会清空该字段。</div>
+    <div class="drawer-actions">
+      <button class="btn btn-ghost" id="editCancelBtn">取消</button>
+      <button class="btn btn-primary" id="editSaveBtn">保存并写回文件</button>
+    </div>
+  </div>
+</aside>
+
+<input type="file" id="coverFileInput" accept="image/jpeg,image/png,image/webp,image/gif,image/bmp" hidden />
+
+<div class="toast" id="toast" hidden></div>
+
+<audio id="audio" preload="metadata"></audio>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
