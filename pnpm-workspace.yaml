@@ -1,0 +1,13 @@
+# pnpm 10 起，构建脚本白名单放在这里（package.json 的 pnpm 字段不再被读取）
+# Electron 需要执行 postinstall 才能下载对应平台的二进制
+allowBuilds:
+  electron: true
+  electron-builder: true
+  electron-winstaller: false
+
+# electron-builder 26.15.3 对 @electron/get 的依赖范围是 ^3.0.0，
+# 但 3.0.0 没有导出 ElectronDownloadCacheMode，会导致打包时报
+# "Cannot read properties of undefined (reading 'ReadWrite')"。
+# 强制升到 3.1.0 及以上。
+overrides:
+  '@electron/get': ^3.1.0

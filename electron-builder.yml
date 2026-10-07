@@ -1,0 +1,56 @@
+appId: com.luna.medialibrary
+productName: Luna
+copyright: Luna 本地音乐与音声库管理器
+
+directories:
+  output: Release
+  buildResources: build
+
+# 只打进运行必需的文件
+files:
+  - electron/**/*
+  - server/**/*
+  - public/**/*
+  - package.json
+  - '!**/*.md'
+  - '!**/*.map'
+  - '!test/**'
+  - '!tools/**'
+  - '!screenshots/**'
+  - '!docs/**'
+  - '!data/**'
+  - '!Release/**'
+  - '!node_modules/.cache/**'
+
+# 依赖是纯 JS，无需重建原生模块
+npmRebuild: false
+
+# 关闭 asar：本项目以 ESM 动态 import 加载服务模块，
+# 而 Node 的 ESM 加载器不走 Electron 的 asar 补丁，打包进 asar 会加载失败。
+asar: false
+
+# 直接复用 node_modules/electron/dist，跳过 electron-builder 自己的下载
+# （其下载路径在部分镜像配置下会触发 resolveCacheMode 报错）
+electronDist: node_modules/electron/dist
+
+win:
+  target:
+    - target: portable
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: Luna_v${version}.${ext}
+
+portable:
+  artifactName: Luna_v${version}.${ext}
+  # 便携版：数据放在 exe 同级的 data 目录（由主进程的 resolveDataDir 决定）
+  requestExecutionLevel: user
+  unpackDirName: Luna
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Luna
+  artifactName: Luna-Setup-${version}.${ext}
