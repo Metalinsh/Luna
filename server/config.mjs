@@ -62,6 +62,11 @@ const DEFAULT_CONFIG = {
     /** 允许占用的缓存上限（字节），默认 20 GiB */
     maxBytes: 20 * 1024 ** 3,
   },
+  /** 桌面外壳行为（由 Electron 主进程读取，见 electron/main.cjs） */
+  desktop: {
+    /** 关闭窗口时最小化到托盘，而不是退出（默认关：保持「点 × 就退出」的直觉） */
+    minimizeToTray: false,
+  },
   /** 外观：配色方案、深浅模式、背景透明、自定义背景图 */
   appearance: {
     theme: 'midnight',
@@ -104,9 +109,12 @@ function sanitize(cfg) {
   appearance.bgOpacity = Math.min(100, Math.max(0, num(appearance.bgOpacity, 100)));
   appearance.bgImage = cleanImagePath(appearance.bgImage);
 
+  const desktop = { ...d.desktop, ...(cfg.desktop ?? {}) };
+  desktop.minimizeToTray = desktop.minimizeToTray === true;
+
   return {
     ...d, ...cfg, search: { ...d.search, ...(cfg.search ?? {}) },
-    backup: { ...d.backup, ...(cfg.backup ?? {}) }, archive, appearance,
+    backup: { ...d.backup, ...(cfg.backup ?? {}) }, archive, appearance, desktop,
   };
 }
 
@@ -153,7 +161,7 @@ export function resolveCacheDir(cfg = readConfig()) {
 export function writeConfig(patch = {}) {
   const current = readConfig();
   const merged = { ...current, ...patch };
-  for (const key of ['search', 'backup', 'archive', 'appearance']) {
+  for (const key of ['search', 'backup', 'archive', 'appearance', 'desktop']) {
     if (patch[key] && typeof patch[key] === 'object') {
       merged[key] = { ...current[key], ...patch[key] };
     }

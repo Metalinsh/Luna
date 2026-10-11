@@ -198,9 +198,14 @@
     <button class="icon-btn" id="lyricsBtn" title="歌词 (L)">
       <svg viewBox="0 0 24 24"><path d="M4 6h16M4 11h10M4 16h13"/></svg>
     </button>
-    <div class="volume">
+    <div class="volume" id="volumeBox">
       <svg viewBox="0 0 24 24"><path d="M4 9h3l5-4v14l-5-4H4z"/><path d="M16 8.5a5 5 0 0 1 0 7"/></svg>
-      <input type="range" id="volume" min="0" max="100" value="85" />
+      <div class="volume-track" title="0–100% 为原始音量；100% 以上是软件放大，可能失真（已自动限幅）">
+        <input type="range" id="volume" min="0" max="200" value="85"
+               aria-label="音量（100% 以上为软件放大）" />
+        <i class="volume-mark" aria-hidden="true"></i>
+      </div>
+      <span class="volume-val" id="volumeVal">85%</span>
     </div>
   </div>
 </footer>
@@ -355,6 +360,19 @@
 </aside>
 
 <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
+
+<!-- 图片预览：点缩略图后在此看原图（← → 切换，ESC 关闭，点背景关闭） -->
+<div class="lightbox" id="lightbox" hidden>
+  <div class="lightbox-bar">
+    <span class="lightbox-caption" id="lightboxCaption"></span>
+    <button class="btn btn-ghost" id="lightboxOpenBtn">在新窗口打开原图</button>
+    <button class="btn btn-ghost" id="lightboxClose">关闭 ✕</button>
+  </div>
+  <button class="lightbox-nav is-prev" id="lightboxPrev" title="上一张（←）">‹</button>
+  <img id="lightboxImg" alt="" />
+  <button class="lightbox-nav is-next" id="lightboxNext" title="下一张（→）">›</button>
+</div>
+
 <aside class="drawer" id="editDrawer" hidden>
   <div class="drawer-head">
     <h3>编辑专辑信息</h3>

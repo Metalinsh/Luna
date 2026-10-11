@@ -302,3 +302,42 @@ test('差分标记：标题里的「（前篇）」不会被误当成版本标�
   assert.equal(fileVariantLabel('01.甲（前篇）.wav', '本篇', ['本篇', '无音效', '无饮尿']), null);
   assert.equal(fileVariantLabel('01.甲（前篇）.wav', '本篇', ['本篇', '无音效']), null);
 });
+
+/* ------------------------------------------------- 图片不进轨道模型（回归） */
+
+test('图片不是轨道：特典文件夹里的图片不再变成一个「特典版本」', async () => {
+  const root = makeRelease({
+    '[RJ414024]クールメイド/本編/01.甲.wav': 2048,
+    '[RJ414024]クールメイド/本編/02.乙.wav': 2048,
+    // 与真实发行同形：EXデータ 命中特典规则，图片曾经被当成特典版本 + 一条轨道
+    '[RJ414024]クールメイド/EXデータ/高画質パッケージ.jpg': 4096,
+    '[RJ414024]クールメイド/EXデータ/readme.txt': 128,
+  });
+
+  const r = await analyze(root);
+  const allTracks = [...r.tracks, ...r.bonusTracks];
+  assert.equal(allTracks.length, 2, `只应有 2 条音频轨道，实际 ${allTracks.length}`);
+  for (const row of allTracks) {
+    for (const v of row.versions) {
+      assert.ok(['audio', 'video'].includes(v.file.kind),
+        `轨道里混进了非音频文件：${v.file.name}（${v.file.kind}）`);
+    }
+  }
+  assert.equal(r.bonusTracks.length, 0, '图片不该形成特典轨道');
+  assert.ok(!r.versions.some((v) => v.group === 'bonus'), '图片不该形成特典版本');
+  assert.equal(r.stats.image, 1, '图片应被单独计数，供图片预览栏目使用');
+});
+
+test('图片不是轨道：插图目录也不进版本列表', async () => {
+  const root = makeRelease({
+    '[RJ309902]ゲーマーカノジョ/01.甲.mp3': 1024,
+    '[RJ309902]ゲーマーカノジョ/2.アートワーク/イメージイラスト.jpg': 512,
+    '[RJ309902]ゲーマーカノジョ/2.アートワーク/イメージイラスト_ロゴ有り.png': 512,
+  });
+
+  const r = await analyze(root);
+  assert.equal(r.tracks.length, 1);
+  assert.equal(r.bonusTracks.length, 0);
+  assert.ok(!r.versions.some((v) => /アートワーク/.test(v.name)), '插图目录不该成为版本名');
+  assert.equal(r.stats.image, 2);
+});

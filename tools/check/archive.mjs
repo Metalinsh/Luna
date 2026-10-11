@@ -361,6 +361,48 @@ try {
   const errs = await cdp.eval('window.__archiveProbe.errors');
   ok('页面无 JS 报错', errs.length === 0, errs.join(' | ') || '(无)');
 
+  console.log('\n— 详情页「预读专辑 / 清除缓存」按钮与「已预读」标签 —');
+  // 这里只做**只读**断言：不真的预读（会把整张专辑解码进缓存），也不清缓存
+  const btnIds = await cdp.eval(`(async () => {
+    location.hash = '#/album/${target.id}';
+    await new Promise(r => setTimeout(r, 2800));
+    return {
+      ids: [...document.querySelectorAll('#albumDetail .detail-actions button')].map((b) => b.id),
+      prefetch: document.querySelector('#prefetchAlbumBtn')?.textContent.trim() ?? '',
+      clear: document.querySelector('#clearAlbumCacheBtn')?.textContent.trim() ?? '',
+    };
+  })()`);
+  ok('包内发行的详情页出现「预读专辑」与「清除缓存」',
+    Boolean(btnIds.prefetch) && Boolean(btnIds.clear), `${btnIds.prefetch} / ${btnIds.clear}`);
+  const iReveal = btnIds.ids.indexOf('revealAlbumBtn');
+  const iPre = btnIds.ids.indexOf('prefetchAlbumBtn');
+  const iClear = btnIds.ids.indexOf('clearAlbumCacheBtn');
+  ok('两个按钮排在「打开文件夹」之后，且预读在清除之前',
+    iReveal >= 0 && iPre > iReveal && iClear > iPre, btnIds.ids.join(' → '));
+
+  const prefetchTag = await fetch(`${BASE}/api/tags`).then((r) => r.json())
+    .then((r) => (r.tags ?? []).find((t) => t.name === '已预读') ?? null).catch(() => null);
+  if (prefetchTag) {
+    ok('「已预读」标签归入风格分类', prefetchTag.category === 'style',
+      `category=${prefetchTag.category} · ${prefetchTag.album_count} 张专辑`);
+    ok('「已预读」带固顶标记（界面据此排在风格栏首位）', prefetchTag.lead === true,
+      `lead=${prefetchTag.lead}`);
+
+    // 风格栏首个 chip 必须是「已预读」
+    const firstChip = await cdp.eval(`(async () => {
+      location.hash = '#/';
+      await new Promise(r => setTimeout(r, 2200));
+      const row = [...document.querySelectorAll('#tagBar .tagbar-row')]
+        .find(r => (r.querySelector('.tagbar-label')?.textContent ?? '').startsWith('风格'));
+      const chip = row?.querySelector('.tagbar-chip');
+      return { label: row?.querySelector('.tagbar-label')?.textContent.replace(/\\s+/g,'').trim() ?? '', first: chip?.textContent.replace(/\\s+/g,' ').trim() ?? '' };
+    })()`);
+    ok('风格栏首个标签是「已预读」', firstChip.first.startsWith('已预读'),
+      `${firstChip.label} → ${firstChip.first}`);
+  } else {
+    console.log('  （库里还没有专辑被整张预读过，「已预读」标签尚未建立 —— 不算失败）');
+  }
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 } catch (err) {
   console.error('验证脚本异常：', err.message);

@@ -146,9 +146,17 @@ try {
     hasBgClear: Boolean(document.querySelector('#setBgClear')),
     hasSave: Boolean(document.querySelector('#settingsSaveBtn')),
     hasReset: Boolean(document.querySelector('#settingsResetBtn')),
+    trayPicks: [...document.querySelectorAll('[data-tray-pick]')].map((b) => [b.dataset.trayPick, b.textContent.trim()]),
+    trayActive: document.querySelector('[data-tray-pick].is-active')?.dataset.trayPick ?? null,
   }))()`);
   ok('抽屉已打开且遮罩可见', panel.open && panel.backdrop);
-  ok('两个分段：压缩包 + 外观', panel.sections.length === 2, panel.sections.join(' / '));
+  ok('三个分段：压缩包 + 外观 + 桌面', panel.sections.length === 3, panel.sections.join(' / '));
+  ok('桌面分段提供「退出程序 / 最小化到托盘」两个选项',
+    panel.trayPicks.length === 2
+    && panel.trayPicks.map((p) => p[0]).join(',') === '0,1'
+    && /退出|托盘/.test(panel.trayPicks.map((p) => p[1]).join('')),
+    panel.trayPicks.map((p) => p[1]).join(' | '));
+  ok('托盘开关有明确的当前值', ['0', '1'].includes(String(panel.trayActive)), String(panel.trayActive));
   ok('预取策略为三项（不预读取 / 仅下一首 / 专辑）',
     panel.prefetch.length === 3
     && panel.prefetch.map((p) => p[0]).join(',') === 'off,next,album',

@@ -16,6 +16,7 @@ import * as assets from './assets.mjs';
 import * as lyricsApi from './lyrics.mjs';
 import * as maintenance from './maintenance.mjs';
 import * as collection from './collection.mjs';
+import * as gallery from './gallery.mjs';
 import { analyzeRelease } from './asmr.mjs';
 
 /** 视频轨要用 video/* 才能被浏览器的 <video> 播放 */
@@ -437,23 +438,87 @@ function looseText(s) {
     .toLowerCase();
 }
 
+/** 宽松比较：两个名称（全角/空格/大小写不敏感）是否等价 */
+function sameLoose(a, b) {
+  const x = looseText(a);
+  return Boolean(x) && x === looseText(b);
+}
+
 /**
- * 把用户刚填的社团/艺术家自动套用到「名称里包含该文字」的其他音声发行。
- * 例：为 RJ01128508 填「上海飯店」后，文件夹名里同样含「上海飯店」的 RJ01002989 一并填上。
+ * 取用（或新建）一个「与名称同名」的标签，并把它归入对应的分栏。
+ * 名称不合法（空 / 超长）时如实说明原因，不静默失败。
  */
-function propagateVoiceField(albumId, value, field) {
-  const needle = looseText(value);
-  if (!needle) return [];
-  const others = store.voiceAlbumsMatching(value, { excludeId: albumId })
-    .filter((a) => {
-      // 作品名或发行根路径（含文件夹名）任一处包含即可
-      return looseText(a.title).includes(needle) || looseText(a.release_root).includes(needle);
-    });
-  if (!others.length) return [];
-  const ids = others.map((a) => a.id);
-  if (field === 'circle') store.setAlbumCircleBulk(ids, value);
-  else store.setAlbumArtistBulk(ids, value);
-  return others.map((a) => ({ id: a.id, title: a.title }));
+function ensureNameTag(name, category = null) {
+  const check = tagsApi.validateTagName(name);
+  if (!check.ok) return { tag: null, reason: check.error };
+  try {
+    return { tag: tagsApi.ensureTag(check.name, category), reason: null };
+  } catch (err) {
+    return { tag: null, reason: err.message };
+  }
+}
+
+/**
+ * 手工填写社团 / 艺术家之后的联动（**只写库，绝不碰任何音频文件**）：
+ *   ① 自动套用 —— 把该名称填给库里其它音声发行：标题或发行根目录（含文件夹名）里
+ *      含该名称的，或本来就填着同一名称的（宽松比较）；
+ *   ② 自动打标 —— 为该名称建立**同名标签**（已存在则直接复用），
+ *      并打到「本次填写的 + 上面检索到的」全部作品上。
+ *
+ * 注意：**已经填着同一名称**的作品只打标签、不重写字段 —— 重写会把它的艺术家来源
+ * 强制标成「手工」，从此不再跟随扫描结果更新，属有害副作用。
+ *
+ * 例：为 RJ01128508 填「上海飯店」后，文件夹名里同样含「上海飯店」的 RJ01002989
+ * 一并填上社团，且两张都打上标签「上海飯店」。
+ *
+ * @param {Array<number|string>} baseIds 本次刚填写的专辑（单张填是 1 张，批量填是多张）
+ * @param {string} value 用户填写的名称
+ * @param {'circle'|'artist'} field 填的是社团还是艺术家
+ * @param {{matchOthers?: boolean}} opts 普通音乐专辑填社团时检索无意义，传 false
+ */
+function autoLinkName(baseIds, value, field, { matchOthers = true } = {}) {
+  const name = String(value ?? '').trim();
+  const empty = { propagated: [], tagged: 0, tag: null, tag_skipped: null };
+  if (!name) return empty;
+
+  const base = (baseIds ?? []).map(Number).filter(Number.isFinite);
+  if (!base.length) return empty;
+
+  // 归一后为空（例如只输入了全角空格）时，`includes('')` 会命中所有作品，必须挡住
+  const needle = looseText(name);
+  if (!needle) return empty;
+
+  let matched = [];
+  let toWrite = [];
+  if (matchOthers) {
+    matched = store.voiceAlbumsMatching(name)
+      .filter((a) => !base.includes(a.id))
+      .filter((a) => {
+        const current = field === 'circle' ? a.circle : a.album_artist;
+        // 已填着同一名称，或作品名 / 发行根路径里含该名称
+        return sameLoose(current, name)
+          || looseText(a.title).includes(needle)
+          || looseText(a.release_root).includes(needle);
+      });
+    // 只有「名称对不上」的才需要写入
+    toWrite = matched.filter((a) => !sameLoose(field === 'circle' ? a.circle : a.album_artist, name));
+    if (toWrite.length) {
+      const ids = toWrite.map((a) => a.id);
+      if (field === 'circle') store.setAlbumCircleBulk(ids, name);
+      else store.setAlbumArtistBulk(ids, name);
+    }
+  }
+
+  const { tag, reason } = ensureNameTag(name, field === 'circle' ? 'circle' : 'artist');
+  const targets = [...base, ...matched.map((a) => a.id)];
+  if (tag?.id) tagsApi.applyAlbumTags(targets, { add: [tag.id] });
+
+  return {
+    propagated: toWrite.map((a) => ({ id: a.id, title: a.title })),
+    tagged: tag?.id ? targets.length : 0,
+    tag: tag ? { id: tag.id, name: tag.name, color: tag.color, category: tag.category } : null,
+    tag_skipped: tag ? null : reason,
+  };
 }
 
 /**
@@ -470,6 +535,7 @@ app.post('/api/albums/:id/favorite', (req, res) => {
 
 /**
  * 社团名称（音声发行常用）：与艺术家一样只记进库，不写回音频文件。
+ * 填写后自动套用到其它同名音声发行，并建立同名标签。
  */
 app.post('/api/albums/:id/circle', (req, res) => {
   const id = parseId(req.params.id);
@@ -477,13 +543,14 @@ app.post('/api/albums/:id/circle', (req, res) => {
   const album = store.getAlbumById(id);
   if (!album) return res.status(404).json({ error: '专辑不存在' });
   const circle = store.setAlbumCircle(id, req.body?.circle);
-  // 音声发行：把社团名自动套用到文件夹名里含该名字的其他作品
-  const propagated = album.is_voice && circle ? propagateVoiceField(id, circle, 'circle') : [];
-  res.json({ ok: true, circle, propagated, wrote_files: false });
+  // 音声发行之间才做自动套用；普通音乐专辑只建立标签
+  const link = autoLinkName([id], circle, 'circle', { matchOthers: Boolean(album.is_voice) });
+  res.json({ ok: true, circle, ...link, wrote_files: false });
 });
 
 /**
  * 音声发行：只把艺术家记进库（R12），**不写回任何音频文件**。
+ * 与社团完全对称：填写后自动套用到其它同名作品，并建立同名标签。
  */
 app.post('/api/albums/:id/voice-artist', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
@@ -492,8 +559,8 @@ app.post('/api/albums/:id/voice-artist', asyncRoute(async (req, res) => {
   if (!album?.is_voice) return badRequest(res, '该专辑不是音声发行');
   const artist = String(req.body?.artist ?? '').trim() || null;
   store.setAlbumArtistManual(id, artist);
-  const propagated = artist ? propagateVoiceField(id, artist, 'artist') : [];
-  res.json({ ok: true, album_artist: artist, propagated, wrote_files: false });
+  const link = autoLinkName([id], artist, 'artist');
+  res.json({ ok: true, album_artist: artist, ...link, wrote_files: false });
 }));
 
 /**
@@ -525,12 +592,22 @@ app.post('/api/albums/bulk-voice-meta', (req, res) => {
   if (hasArtist) updated = Math.max(updated, store.setAlbumArtistBulk(voiceIds, req.body.artist));
   if (hasCircle) updated = Math.max(updated, store.setAlbumCircleBulk(voiceIds, req.body.circle));
 
+  // 与单张填写一致：库内检索同名作品自动套用 + 建立同名标签
+  const links = [
+    hasArtist ? autoLinkName(voiceIds, req.body.artist, 'artist') : null,
+    hasCircle ? autoLinkName(voiceIds, req.body.circle, 'circle') : null,
+  ].filter(Boolean);
+
   res.json({
     ok: true,
     updated: voiceIds.length,
     skipped,
     artist: hasArtist ? (String(req.body.artist ?? '').trim() || null) : undefined,
     circle: hasCircle ? (String(req.body.circle ?? '').trim() || null) : undefined,
+    propagated: links.flatMap((l) => l.propagated),
+    tags: links.map((l) => l.tag).filter(Boolean),
+    tagged: links.reduce((n, l) => n + l.tagged, 0),
+    tag_skipped: links.find((l) => l.tag_skipped)?.tag_skipped ?? null,
     wrote_files: false,
   });
 });
@@ -549,10 +626,10 @@ app.post('/api/albums/:id/artist-decision', (req, res) => {
   const decision = String(req.body?.decision ?? '');
   if (!['adopted', 'kept'].includes(decision)) return badRequest(res, 'decision 只能是 adopted 或 kept');
   const updated = store.setArtistDecision(id, decision);
-  const propagated = decision === 'adopted' && updated.album_artist
-    ? propagateVoiceField(id, updated.album_artist, 'artist')
-    : [];
-  res.json({ ok: true, decision, album_artist: updated.album_artist, propagated, wrote_files: false });
+  const link = decision === 'adopted' && updated.album_artist
+    ? autoLinkName([id], updated.album_artist, 'artist')
+    : { propagated: [], tagged: 0, tag: null, tag_skipped: null };
+  res.json({ ok: true, decision, album_artist: updated.album_artist, ...link, wrote_files: false });
 });
 
 /** 音声发行的「待人工确认」问题清单（文件名冲突 + 相似轨道是否合并） */
@@ -713,7 +790,7 @@ app.get('/api/tags', (req, res) => {
 
 app.post('/api/tags', (req, res) => {
   try {
-    const tag = tagsApi.createTag(req.body?.name, req.body?.color);
+    const tag = tagsApi.createTag(req.body?.name, req.body?.color, req.body?.category);
     scheduleAssetBackup('tag-create');
     res.status(201).json({ tag });
   } catch (err) {
@@ -784,6 +861,51 @@ app.get('/api/incomplete', (req, res) => {
     ...completeness.listIncomplete({ group, status, limit, offset }),
   });
 });
+
+/* --------------------------------------------------- 图片预览（只读画廊） */
+
+/**
+ * 专辑内的图片清单（按所在文件夹分组）。
+ * 音声发行看 release_root（目录或压缩包），普通专辑看各曲目所在目录。
+ */
+app.get('/api/albums/:id/images', (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+  res.json(gallery.listAlbumImages(album, store.listAlbumTracks(id)));
+});
+
+/**
+ * 取原图。`p` 必须是上面清单里的 key：
+ * 压缩包按 member_path 精确匹配，磁盘按「落在该专辑根目录内」校验，
+ * 因此无法借此读到专辑目录之外的文件。
+ *
+ * 压缩包内图片**在内存中解出后直接供流**，不写缓存目录：
+ * 图片体积小、且不该挤占音频的播放缓存额度。
+ */
+app.get('/api/albums/:id/image', asyncRoute(async (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+
+  const found = await gallery.resolveAlbumImage(album, store.listAlbumTracks(id), req.query?.p);
+  if (!found) return res.status(404).json({ error: '图片不存在' });
+  if (found.tooLarge) {
+    return res.status(413).json({
+      error: `图片过大（${Math.round(found.size / 1024 / 1024)} MB），已放弃预览`,
+    });
+  }
+
+  res.setHeader('Content-Type', found.mime);
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  if (found.data) return res.end(found.data);
+
+  const stream = fs.createReadStream(found.filePath);
+  stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end(); });
+  stream.pipe(res);
+}));
 
 /* ----------------------------------------------------------- covers & audio */
 
@@ -1200,10 +1322,20 @@ app.post('/api/config', (req, res) => {
     if (a.bgImage !== undefined) next.bgImage = a.bgImage ? String(a.bgImage) : null;
     if (Object.keys(next).length) patch.appearance = next;
   }
+  // 桌面外壳：关闭窗口时是否最小化到托盘（由 Electron 主进程在关闭时读取）
+  if (req.body?.desktop && typeof req.body.desktop === 'object') {
+    const d = req.body.desktop;
+    const next = {};
+    if (d.minimizeToTray !== undefined) next.minimizeToTray = d.minimizeToTray === true;
+    if (Object.keys(next).length) patch.desktop = next;
+  }
   res.json({ config: writeConfig(patch) });
 });
 
 /* ------------------------------------------------------- 压缩包缓存管理（P2） */
+
+/** 整张预读完成后自动打上的标签（固定归入「风格」分类，见 tags.mjs 的三分类） */
+const PREFETCHED_TAG = '已预读';
 
 app.get('/api/archive/cache', asyncRoute(async (req, res) => {
   res.json({ cache: await collection.cacheStatus() });
@@ -1228,16 +1360,19 @@ app.post('/api/archive/prefetch', asyncRoute(async (req, res) => {
 
   let tracks = [];
   let label = '';
+  let tagAlbumId = null;
   if (body.albumId != null) {
     const albumId = parseId(body.albumId);
     if (!albumId) return badRequest(res, '无效的专辑 ID');
     const album = store.getAlbumById(albumId);
     if (!album) return res.status(404).json({ error: '专辑不存在' });
-    // 带上 bonus：预读取整张时特典也该一起就绪
-    tracks = store.listVoiceTracks(albumId)
+    // 带上 bonus：预读取整张时特典也该一起就绪；普通专辑（包内纯音乐）同样支持
+    const albumTracks = album.is_voice ? store.listVoiceTracks(albumId) : store.listAlbumTracks(albumId);
+    tracks = albumTracks
       .filter((t) => t.source_kind === 'archive_member')
       .filter((t) => t.file_kind !== 'video');   // 视频不参与音频队列
     label = album.title ?? '';
+    tagAlbumId = albumId;
   } else {
     const trackId = parseId(body.trackId);
     if (!trackId) return badRequest(res, '需要 trackId 或 albumId');
@@ -1274,12 +1409,45 @@ app.post('/api/archive/prefetch', asyncRoute(async (req, res) => {
     }
   }
 
+  // 整张预读**全部成功**才打「已预读」标签（收入「风格」分类，专辑墙可直接筛）
+  let tag = null;
+  if (tagAlbumId && tracks.length && failed === 0) {
+    const t = tagsApi.ensureTag(PREFETCHED_TAG, 'style');
+    if (t?.id) {
+      tagsApi.applyAlbumTags([tagAlbumId], { add: [t.id] });
+      tag = { id: t.id, name: t.name, category: t.category };
+    }
+  }
+
   res.json({
     result: {
       ok: failed === 0, total: tracks.length, done, failed, bytes,
       ms: Date.now() - t0, label, items,
     },
+    tag,
   });
+}));
+
+/**
+ * 清除**单张专辑**的压缩包缓存（其它专辑的缓存不受影响）。
+ *
+ * 顺带撤销该专辑的「已预读」标签：缓存都没了，标签再挂着就是假信息。
+ * 只解除关联，不删除标签本身（别的专辑可能还在用）。
+ */
+app.post('/api/albums/:id/cache/clear', asyncRoute(async (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+
+  const tracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
+  const result = await collection.clearAlbumCache(tracks);
+
+  let untagged = 0;
+  const tag = tagsApi.findTagByName(PREFETCHED_TAG);
+  if (tag?.id) untagged = tagsApi.applyAlbumTags([id], { remove: [tag.id] }).removed;
+
+  res.json({ result, untagged, cache: await collection.cacheStatus() });
 }));
 
 /* -------------------------------------------------------------- spa fallback */

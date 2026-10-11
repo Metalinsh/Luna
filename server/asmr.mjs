@@ -13,6 +13,8 @@ import { parseFile } from 'music-metadata';
 
 export const AUDIO_EXT = new Set(['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif']);
 export const VIDEO_EXT = new Set(['.mp4', '.mkv', '.webm', '.m4v', '.mov', '.avi']);
+/** 图片：既不是轨道，也不参与版本判定；它们进「图片预览」栏目（见 gallery.mjs） */
+export const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']);
 
 /** R7：这些目录整棵子树不收录 */
 const IGNORE_PATTERNS = [
@@ -486,7 +488,10 @@ function walkFiles(root) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) { walk(full); continue; }
       const ext = path.extname(e.name).toLowerCase();
-      const kind = AUDIO_EXT.has(ext) ? 'audio' : VIDEO_EXT.has(ext) ? 'video' : 'other';
+      const kind = AUDIO_EXT.has(ext) ? 'audio'
+        : VIDEO_EXT.has(ext) ? 'video'
+          : IMAGE_EXT.has(ext) ? 'image'
+            : 'other';
       let size = 0;
       try { size = fs.statSync(full).size; } catch { /* 忽略 */ }
       out.push({ path: full, name: e.name, ext, kind, size });
@@ -590,7 +595,14 @@ export async function analyzeRelease(rootDir, {
   let taggedAlbum = null;
 
   for (const f of files) {
-    if (f.kind === 'other') continue;
+    /**
+     * 只有音频与视频才是「轨道」。
+     *
+     * 早期这里只挡 kind==='other'，而压缩包成员的图片被 zip-reader 标成 'image'，
+     * 于是包内图片（如 `EXデータ/高画質パッケージ.jpg`）被当成一个版本 + 一条轨道
+     * 显示在曲目列表里（实测 RJ414024、RJ317041 都中招）。图片一律不进轨道模型。
+     */
+    if (f.kind !== 'audio' && f.kind !== 'video') continue;
     const segments = relOf(rootDir, f.path);
 
     const v = resolveVersion(segments, releaseTitle);
@@ -790,6 +802,7 @@ export async function analyzeRelease(rootDir, {
       files: files.length,
       audio: files.filter((f) => f.kind === 'audio').length,
       video: files.filter((f) => f.kind === 'video').length,
+      image: files.filter((f) => f.kind === 'image').length,
       other: files.filter((f) => f.kind === 'other').length,
       /** 版本数：主集合里可用的完整渲染数（视频版不计入） */
       versionCount: versionList.filter((v) => v.group === 'main' && !v.isVideo).length,

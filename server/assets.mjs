@@ -25,7 +25,7 @@ function albumRef(row) {
 /** 导出全部用户资产为可移植的 JSON 结构 */
 export function exportUserAssets() {
   const libraries = listLibraries().map((l) => ({ path: l.path, displayName: l.display_name }));
-  const tags = db.prepare('SELECT id, name, color, pinned FROM tags ORDER BY id').all();
+  const tags = db.prepare('SELECT id, name, color, pinned, category FROM tags ORDER BY id').all();
 
   const albumTags = db.prepare(`
     SELECT a.album_key, a.title, a.album_artist, tg.name AS tag
@@ -59,7 +59,9 @@ export function exportUserAssets() {
     version: ASSET_VERSION,
     exportedAt: Date.now(),
     libraries,
-    tags: tags.map((t) => ({ name: t.name, color: t.color, pinned: Boolean(t.pinned) })),
+    tags: tags.map((t) => ({
+      name: t.name, color: t.color, pinned: Boolean(t.pinned), category: t.category ?? 'style',
+    })),
     albumTags,
     ignores,
     manualCovers: covers,
@@ -109,6 +111,8 @@ export function importUserAssets(payload) {
       const id = findOrCreateTag(tag.name, tag.color);
       if (!before) result.tags += 1;
       if (tag.pinned) db.prepare('UPDATE tags SET pinned = 1 WHERE id = ?').run(id);
+      // 分类同样是用户资产（用户可在标签页手工调整），导入时一并还原
+      if (tag.category) db.prepare('UPDATE tags SET category = ? WHERE id = ?').run(String(tag.category), id);
     }
 
     for (const link of payload.albumTags ?? []) {

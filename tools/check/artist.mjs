@@ -187,6 +187,29 @@ try {
 
   // 列宽拖动方向 → 由 check/detail.mjs 负责
   // 顺序播放 → 由 check/player.mjs 负责
+
+  console.log('\n— 需求3：手工填社团 / 艺术家 → 自动建立同名标签 —');
+  const voiceAll = (await j('/api/albums?limit=100&kind=voice')).albums;
+  const teamA = voiceAll.find((a) => a.rj_code === 'RJ01128508');
+  const teamB = voiceAll.find((a) => a.rj_code === 'RJ01002989');
+  if (!teamA || !teamB) throw new Error('缺少「上海飯店」测试样本');
+
+  // 先清空两者社团，再只给 A 填一次 —— B 靠文件夹名自动套用
+  await post(`/api/albums/${teamA.id}/circle`, { circle: '' });
+  await post(`/api/albums/${teamB.id}/circle`, { circle: '' });
+  const linkRes = await post(`/api/albums/${teamA.id}/circle`, { circle: '上海飯店' });
+  ok('填写社团返回自动建立的同名标签', linkRes.tag?.name === '上海飯店', JSON.stringify(linkRes.tag));
+  ok('本次填写的作品被打上同名标签',
+    ((await j(`/api/albums/${teamA.id}`)).album.tags ?? []).some((t) => t.name === '上海飯店'));
+  ok('被自动套用的作品同样打上同名标签',
+    ((await j(`/api/albums/${teamB.id}`)).album.tags ?? []).some((t) => t.name === '上海飯店'));
+  await shot('v10-circle-tag.png');
+
+  const artTagRes = await post(`/api/albums/${teamA.id}/voice-artist`, { artist: '小花衣こっこ' });
+  ok('填写艺术家同样建立同名标签', artTagRes.tag?.name === '小花衣こっこ', JSON.stringify(artTagRes.tag));
+  ok('艺术家标签已打到该作品',
+    ((await j(`/api/albums/${teamA.id}`)).album.tags ?? []).some((t) => t.name === '小花衣こっこ'));
+  await shot('v10-artist-tag.png');
 } catch (err) {
   console.error('验证异常：', err.message);
   fail += 1;

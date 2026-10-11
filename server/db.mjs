@@ -15,7 +15,7 @@ import {
   DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 9;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -122,6 +122,8 @@ function createV2Tables() {
       name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
       color       INTEGER NOT NULL DEFAULT 0,
       pinned      INTEGER NOT NULL DEFAULT 0,
+      -- V8：标签分类（style 风格 / circle 社团 / artist CV），专辑墙按三类分栏展示
+      category    TEXT NOT NULL DEFAULT 'style',
       created_at  INTEGER NOT NULL,
       updated_at  INTEGER NOT NULL
     );
@@ -332,6 +334,13 @@ function addV2Columns() {
   `);
 }
 
+/** V8：标签分类列（老库补列；新库已在 CREATE TABLE 里带上） */
+function addV8Columns() {
+  if (!columnNames('tags').includes('category')) {
+    db.exec("ALTER TABLE tags ADD COLUMN category TEXT NOT NULL DEFAULT 'style'");
+  }
+}
+
 function addV6Columns() {
   const wanted = {
     tracks: [
@@ -456,7 +465,58 @@ function migrateV1ToV2() {
   return { groups: db.prepare('SELECT COUNT(*) AS n FROM albums').get().n, backup };
 }
 
+/**
+ * V9 数据修复：把**曾经被误当成轨道收录的图片**清出去。
+ *
+ * 背景：压缩包成员的图片被标成 kind='image'，而 analyzeRelease 当时只挡 'other'，
+ * 于是包内图片（如 RJ414024 的 `EXデータ/高画質パッケージ.jpg`）成了「特典版本 + 一条轨道」。
+ * 解析层已修（只收 audio / video），这里负责把**已经入库的脏数据**一并清掉，
+ * 用户不必为了这个修复重扫整个音乐库。
+ *
+ * 只删扩展名明确是图片的轨道，以及因此变空的版本；不动任何用户文件。
+ */
+function deleteMistakenImageTracks() {
+  const removed = db.prepare(`
+    DELETE FROM tracks
+     WHERE LOWER(COALESCE(ext, '')) IN ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp')
+  `).run().changes;
+  const emptyVersions = db.prepare(`
+    DELETE FROM album_versions
+     WHERE id NOT IN (SELECT DISTINCT version_id FROM tracks WHERE version_id IS NOT NULL)
+  `).run().changes;
+  return { removed, emptyVersions };
+}
+
 export const migrationReport = { from: null, to: SCHEMA_VERSION, migrated: false, albums: 0, backup: null };
+
+/**
+ * V8 一次性归类：把老库里**已经存在**的标签按「名称与库内社团 / 艺术家同名」的线索归入对应分栏。
+ *
+ * 规则（保守，只升级不降级）：
+ *   1. 名称与某个专辑的**社团**同名 → 社团栏
+ *   2. 否则名称与某个**音声发行**的艺术家同名 → CV 栏
+ *   3. 其余保持「风格」栏（用户自建标签的默认去处）
+ *
+ * 只在 v7 及更早的库升级时跑一次，之后用户在标签页里的手工归类不会被覆盖。
+ */
+function categorizeExistingTags() {
+  const circle = db.prepare(`
+    UPDATE tags SET category = 'circle'
+     WHERE category = 'style'
+       AND EXISTS (SELECT 1 FROM albums a
+                    WHERE TRIM(COALESCE(a.circle, '')) <> ''
+                      AND LOWER(TRIM(a.circle)) = LOWER(TRIM(tags.name)))
+  `).run().changes;
+  const artist = db.prepare(`
+    UPDATE tags SET category = 'artist'
+     WHERE category = 'style'
+       AND EXISTS (SELECT 1 FROM albums a
+                    WHERE a.kind = 'voice'
+                      AND TRIM(COALESCE(a.album_artist, '')) <> ''
+                      AND LOWER(TRIM(a.album_artist)) = LOWER(TRIM(tags.name)))
+  `).run().changes;
+  return { circle, artist };
+}
 
 function migrate() {
   const hadTracks = tableExists('tracks');
@@ -468,6 +528,7 @@ function migrate() {
   createV6Tables();
   addV6Columns();
   createV7Tables();
+  addV8Columns();
 
   let version;
   if (hadMeta) {
@@ -487,10 +548,23 @@ function migrate() {
     migrationReport.albums = result.groups;
     migrationReport.backup = result.backup;
   } else if (version < SCHEMA_VERSION) {
-    // v2..v6 → v7：只补新表与新列，无需重建专辑
+    // v2..v8 → v9：只补新表与新列，无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表`;
+    migrationReport.note = version >= 8
+      ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道`
+      : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道`;
   }
+
+  if (version < 8) {
+    const tagged = categorizeExistingTags();
+    migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}已归类 ${tagged.circle} 个社团标签、${tagged.artist} 个 CV 标签`;
+  }
+
+  if (version < 9) {
+    const cleaned = deleteMistakenImageTracks();
+    migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}已清理 ${cleaned.removed} 条被误收录的图片轨道（连带 ${cleaned.emptyVersions} 个空版本）`;
+  }
+
   setMeta('schema_version', String(SCHEMA_VERSION));
   return migrationReport;
 }

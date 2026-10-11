@@ -69,6 +69,20 @@ function toast(message, isError = false, action = null) {
   toastTimer = setTimeout(() => { el.hidden = true; }, isError ? 5200 : 3600);
 }
 
+/**
+ * 手工填写社团 / 艺术家的统一提示文案。
+ * 后端一并返回：被自动套用的作品（propagated）与自动建立的同名标签（tag / tags）。
+ */
+function linkToastText(base, res = {}) {
+  const n = (res.propagated ?? []).length;
+  const tags = res.tags ?? (res.tag ? [res.tag] : []);
+  const parts = [base];
+  if (n) parts.push(`自动套用到 ${n} 张同名作品`);
+  for (const t of tags) parts.push(`已打标签「${t.name}」`);
+  if (!tags.length && res.tag_skipped) parts.push(`标签未建立：${res.tag_skipped}`);
+  return parts.join('，');
+}
+
 /* ------------------------------------------------------------------ 常量 */
 
 const TAG_COLORS = ['#7d6cf5', '#43dfb8', '#f0b866', '#ff8fab', '#5aa9ff',
@@ -111,11 +125,17 @@ const state = {
   albumOffset: 0,
   hasMore: false,
   tagCatalog: [],
+  /** 标签栏是否展开（每栏默认只显示前若干个，避免标签一多就把专辑墙挤下去） */
+  tagBarExpanded: false,
   libraries: [],
   trackList: [],
   incomplete: { summary: null, albums: [], group: null, status: null },
   tagsView: [],
   currentAlbum: null,
+  /** 从专辑墙进详情页时的浏览进度快照（视图 + 滚动位置），供返回时还原 */
+  wallSnapshot: null,
+  /** 当前专辑的图片清单（图片预览栏目用；点缩略图时按下标取） */
+  galleryImages: [],
   selecting: false,
   selected: new Set(),
   libraryFilter: null,
@@ -140,8 +160,100 @@ const state = {
 };
 
 const audio = $('#audio');
-audio.volume = Number(localStorage.getItem('volume') ?? 85) / 100;
-$('#volume').value = String(Math.round(audio.volume * 100));
+
+/* ---------------------------------------------------------------- 音量 */
+/**
+ * 音量：0–100 与原来一致（直接给元素设 volume，1.0 = 数字满刻度），
+ * 100 以上就是**软件放大** —— HTMLMediaElement.volume 规范上限就是 1，
+ * 所以必须另接一层 Web Audio 的 GainNode 才能真正更响（用户要求扩到 200%）。
+ *
+ * 两个刻意的取舍：
+ *   1. **懒接入**：只有真的用到 >100% 才创建音频图。没超过 100% 的用户走的还是原来那条路，
+ *      不引入「AudioContext 被挂起 → 完全没声」这类新风险。
+ *   2. **接上就一路走 gain**：一旦建了图，元素音量固定 1.0，音量全由 gain 决定，
+ *      避免「元素音量 × 增益」两处叠加、换算关系说不清。
+ *
+ * 放大必然可能削顶，所以 100% 以上自动挂一个软限幅（DynamicsCompressor 当限制器用）：
+ * 压住爆音，代价是轻微压缩动态。
+ */
+const VOLUME_MAX = 200;
+const volumeState = {
+  value: Number(localStorage.getItem('volume') ?? 85),
+  graph: null,
+  /** 成功接过音频图或接失败过，都不再重试（createMediaElementSource 一个元素只能接一次） */
+  graphClaimed: false,
+};
+
+/** 建立「元素 → gain → 软限幅 → 输出」这条链路（只能建一次） */
+function buildVolumeGraph() {
+  if (volumeState.graphClaimed) return volumeState.graph;
+  volumeState.graphClaimed = true;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) throw new Error('当前环境不支持 Web Audio');
+    const ctx = new Ctx();
+    const source = ctx.createMediaElementSource(audio);
+    const gain = ctx.createGain();
+    const limiter = ctx.createDynamicsCompressor();
+    // 限制器参数：阈值贴着 0 dBFS、大比率、快启动，只当「安全阀」用
+    limiter.threshold.value = -1.5;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.003;
+    limiter.release.value = 0.25;
+    source.connect(gain);
+    gain.connect(limiter);
+    limiter.connect(ctx.destination);
+    volumeState.graph = { ctx, source, gain, limiter };
+  } catch (err) {
+    volumeState.graph = null;
+    toast(`无法启用音量放大（${err.message}），最高仍为 100%`, true);
+  }
+  return volumeState.graph;
+}
+
+/**
+ * 把音量（0–200）落到实际链路上；UI 文案与配色也在这里同步。
+ *
+ * @param {boolean} gesture 是否发生在用户手势里。**建音频图必须在手势里**：
+ *   AudioContext 在非手势下会被自动播放策略挂起，而元素一旦接进这条图，
+ *   挂起期间就是静音 —— 所以启动时读到 >100% 也只先按 100% 播，
+ *   等用户第一次点/按键盘再补上放大（见 ensureVolumeGraphOnGesture）。
+ */
+function applyVolume(raw, { persist = true, gesture = false } = {}) {
+  const value = Math.max(0, Math.min(VOLUME_MAX, Math.round(Number(raw) || 0)));
+  volumeState.value = value;
+  const ratio = value / 100;
+  volumeState.pendingGraph = ratio > 1;
+
+  if (ratio > 1 && (gesture || volumeState.graph)) buildVolumeGraph();
+
+  if (volumeState.graph) {
+    audio.volume = 1;
+    volumeState.graph.gain.gain.value = ratio;
+    volumeState.graph.limiter.threshold.value = ratio > 1 ? -1.5 : 0;
+    try { void volumeState.graph.ctx.resume?.(); } catch { /* 忽略 */ }
+  } else {
+    audio.volume = Math.min(1, ratio);
+  }
+
+  const input = $('#volume');
+  if (input && Number(input.value) !== value) input.value = String(value);
+  const label = $('#volumeVal');
+  if (label) label.textContent = `${value}%`;
+  $('#volumeBox')?.classList.toggle('is-boost', value > 100);
+  if (persist) localStorage.setItem('volume', String(value));
+}
+
+/** 首次真实交互时补建音频链路：上次退出前音量 >100% 的情况要等手势才接得上 */
+function ensureVolumeGraphOnGesture() {
+  if (!volumeState.pendingGraph || volumeState.graph) return;
+  applyVolume(volumeState.value, { persist: false, gesture: true });
+}
+document.addEventListener('pointerdown', ensureVolumeGraphOnGesture, { capture: true });
+document.addEventListener('keydown', ensureVolumeGraphOnGesture, { capture: true });
+
+applyVolume(volumeState.value, { persist: false, gesture: false });
 
 /* ==================================================== 封面缩略图（零依赖） */
 /**
@@ -233,9 +345,103 @@ function swapCoverImages(hash, url) {
   });
 }
 
+/* ------------------------------- 图片预览的缩略图（复用封面那套缓存/生成） */
+
+/**
+ * 画廊缩略图：**先在小尺寸上生成，再赋 src**。
+ *
+ * 与封面不同，这里不能「先显示原图再替换」—— 实测发行里单张预览图可到 21 MB
+ * （RJ414024 的「高画質パッケージ.jpg」），一栏十几张原图解码会直接把内存拉满。
+ * 因此首屏只留占位块，缩略图进视口时才生成（createImageBitmap 直接按目标宽度解码）。
+ */
+const GALLERY_THUMB_WIDTH = 360;
+const galleryThumbUrls = new Map();
+const galleryThumbPending = new Map();
+let galleryThumbChain = Promise.resolve();
+
+const galleryThumbRequest = (key, width) => new Request(`/__lam_gthumb/${key}-${width}`);
+const galleryThumbKeyOf = (key, width) => `${key}:${width}`;
+
+/** 生成并缓存一张画廊缩略图（同一 key 只跑一次，串行生成避免同时解码多张原图） */
+function buildGalleryThumb(key, url, width) {
+  const cacheKey = galleryThumbKeyOf(key, width);
+  if (galleryThumbUrls.has(cacheKey)) return Promise.resolve(galleryThumbUrls.get(cacheKey));
+  if (galleryThumbPending.has(cacheKey)) return galleryThumbPending.get(cacheKey);
+
+  const job = galleryThumbChain.then(async () => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('取图失败');
+    const blob = await res.blob();
+    const bitmap = await createImageBitmap(blob, { resizeWidth: width, resizeQuality: 'high' });
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    canvas.getContext('2d').drawImage(bitmap, 0, 0);
+    bitmap.close?.();
+    // PNG 可能带透明通道，转 JPEG 会变黑，这类原图仍按 PNG 输出
+    const alpha = /\.(png|gif)$/i.test(url);
+    const out = await canvas.convertToBlob(
+      alpha ? { type: 'image/png' } : { type: 'image/jpeg', quality: 0.85 },
+    );
+    const cache = await caches.open(THUMB_CACHE);
+    await cache.put(galleryThumbRequest(key, width), new Response(out, {
+      headers: { 'Content-Type': out.type || 'image/jpeg' },
+    }));
+    const objectUrl = URL.createObjectURL(out);
+    galleryThumbUrls.set(cacheKey, objectUrl);
+    return objectUrl;
+  }).catch(() => null).finally(() => galleryThumbPending.delete(cacheKey));
+
+  galleryThumbPending.set(cacheKey, job);
+  galleryThumbChain = job.then(() => undefined, () => undefined);
+  return job;
+}
+
+/** 从缓存取；没有就生成。失败时返回原图 URL，保证「至少能看见」 */
+async function galleryThumbUrl(key, originalUrl, width) {
+  const cacheKey = galleryThumbKeyOf(key, width);
+  if (galleryThumbUrls.has(cacheKey)) return galleryThumbUrls.get(cacheKey);
+  try {
+    const cache = await caches.open(THUMB_CACHE);
+    const hit = await cache.match(galleryThumbRequest(key, width));
+    if (hit) {
+      const objectUrl = URL.createObjectURL(await hit.blob());
+      galleryThumbUrls.set(cacheKey, objectUrl);
+      return objectUrl;
+    }
+  } catch { /* 缓存不可用就现生成 */ }
+  const built = await buildGalleryThumb(key, originalUrl, width);
+  return built ?? originalUrl;
+}
+
+async function fillGalleryThumb(img) {
+  const original = img.dataset.gallerySrc;
+  const key = img.dataset.galleryKey;
+  if (!original || img.dataset.galleryFilled === '1') return;
+  img.dataset.galleryFilled = '1';
+  if (!key || !thumbSupported()) { img.src = original; return; }
+  const url = await galleryThumbUrl(key, original, GALLERY_THUMB_WIDTH);
+  img.src = url;
+}
+
+/** 只给「进入视口附近」的缩略图生成，长画廊不会一次性解码全部原图 */
+function hydrateGalleryThumbs(root = document) {
+  const images = $$('img[data-gallery-src]', root);
+  if (!images.length) return;
+  if (typeof IntersectionObserver !== 'function') {
+    images.forEach((img) => { void fillGalleryThumb(img); });
+    return;
+  }
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      observer.unobserve(entry.target);
+      void fillGalleryThumb(entry.target);
+    }
+  }, { rootMargin: '400px 0px' });
+  images.forEach((img) => observer.observe(img));
+}
+
 /** 渲染后决定每张封面加载缩略图还是原图（异步、不阻塞首屏） */
-async function hydrateCoverThumbs(root = document) {
-  if (!thumbSupported()) {
+async function hydrateCoverThumbs(root = document) {  if (!thumbSupported()) {
     $$('img[data-cover-src]', root).forEach((img) => {
       if (!img.getAttribute('src')) img.src = img.dataset.coverSrc;
     });
@@ -273,6 +479,30 @@ async function thumbCacheStats() {
  * 否则先不设 src，由 hydrateCoverThumbs 决定加载缩略图还是原图 ——
  * 这样重复访问时永远不会去取那张几 MB 的大图。
  */
+/**
+ * 详情页封面。有封面时可点击看原图（复用图片预览的浮层），
+ * 因此渲染成 button，样式由 .detail-cover.is-zoomable 抹平。
+ */
+function detailCoverMarkup(album) {
+  const inner = coverMarkup(album.cover_url, album.album, album.cover_hash, { eager: true });
+  if (!album.cover_url) return `<div class="detail-cover">${inner}</div>`;
+  return `<button type="button" class="detail-cover is-zoomable" data-cover-zoom
+            data-cover-url="${esc(album.cover_url)}" title="点击查看完整封面原图">
+            ${inner}
+          </button>`;
+}
+
+/**
+ * 专辑详情页里与压缩包缓存相关的按钮（仅包内曲目存在时出现）：
+ * 「预读专辑」把整张解码进缓存，「清除缓存」只清这一张。
+ */
+function archiveCacheButtons(album) {
+  if (!(Number(album.archive?.tracks) > 0)) return '';
+  return `
+    <button class="btn" id="prefetchAlbumBtn" title="把该专辑包内曲目一次性解码到缓存，之后播放无需等待">⤓ 预读专辑</button>
+    <button class="btn" id="clearAlbumCacheBtn" title="只清除这一张专辑的缓存，不影响其它专辑">🧹 清除缓存</button>`;
+}
+
 function coverMarkup(url, name, hash = null, { eager = false } = {}) {
   const initial = esc((name ?? '?').trim().charAt(0).toUpperCase() || '?');
   if (!url) return `<div class="placeholder">${initial}</div>`;
@@ -381,12 +611,17 @@ function albumQuery(offset) {
   return `/api/albums?${params}`;
 }
 
-async function loadAlbums({ append = false } = {}) {
-  const offset = append ? state.albumOffset : 0;
-  const { albums, total, hasMore } = await api(albumQuery(offset));  state.albums = append ? [...state.albums, ...albums] : albums;
-  state.albumTotal = total;
-  state.albumOffset = state.albums.length;
-  state.hasMore = hasMore;
+async function loadAlbums({ append = false, reuse = false } = {}) {
+  // reuse：从专辑详情返回时**沿用已加载的列表**，不重新请求，配合 route() 还原滚动位置
+  if (!reuse) {
+    const offset = append ? state.albumOffset : 0;
+    const { albums, total, hasMore } = await api(albumQuery(offset));
+    state.albums = append ? [...state.albums, ...albums] : albums;
+    state.albumTotal = total;
+    state.albumOffset = state.albums.length;
+    state.hasMore = hasMore;
+  }
+  const total = state.albumTotal;
 
   $('#albumGrid').className = `album-grid size-${state.albumSize}`;
   $('#albumGrid').innerHTML = state.albums.map(albumCardMarkup).join('');
@@ -405,7 +640,7 @@ async function loadAlbums({ append = false } = {}) {
     : `${total} 张专辑`;
 
   const filtered = Boolean(state.query || state.tagFilter.size || state.libraryFilter || state.favScope);
-  const empty = albums.length === 0;
+  const empty = state.albums.length === 0;
   $('#albumsEmpty').hidden = !empty;
   if (empty) {
     $('#emptyTitle').textContent = filtered ? '没有匹配的专辑' : '还没有音乐';
@@ -423,32 +658,133 @@ async function loadAlbums({ append = false } = {}) {
 
 /* ------------------------------------------------------------ 标签筛选条 */
 
+/**
+ * 标签三大分类（与后端 tags.mjs 的 TAG_CATEGORIES 对应）。
+ * 专辑墙上方按「风格 / 社团 / CV」分栏，便于直接点标签筛选。
+ */
+const TAG_CATEGORY_META = [
+  { key: 'style', label: '风格', hint: '曲风、氛围、玩法等自建标签' },
+  { key: 'circle', label: '社团', hint: '填写社团时自动建立' },
+  { key: 'artist', label: 'CV', hint: '填写艺术家时自动建立' },
+];
+const TAG_CATEGORY_LABEL = Object.fromEntries(TAG_CATEGORY_META.map((c) => [c.key, c.label]));
+const TAG_CATEGORY_ORDER = TAG_CATEGORY_META.map((c) => c.key);
+
+/**
+ * 把标签按分类分桶；未知分类一律归入「风格」。
+ *
+ * 带 `lead` 标记的标签（后端 tags.mjs 的 LEAD_TAG_NAMES，「已预读」）
+ * **固定排在自己那一栏的最前面**，不跟随使用频次 —— 它是状态标签，
+ * 用户扫一眼标签栏就该看到自己预读过哪些。
+ */
+function groupTagsByCategory(tags) {
+  const map = new Map(TAG_CATEGORY_ORDER.map((k) => [k, []]));
+  for (const t of tags ?? []) {
+    const key = TAG_CATEGORY_LABEL[t.category] ? t.category : 'style';
+    map.get(key).push(t);
+  }
+  for (const [key, list] of map) {
+    const lead = list.filter((t) => t.lead === true);
+    if (lead.length && lead.length < list.length) {
+      map.set(key, [...lead, ...list.filter((t) => t.lead !== true)]);
+    }
+  }
+  return map;
+}
+
 async function loadTagBar() {
   const { tags } = await api('/api/tags');
   state.tagCatalog = tags;
   renderTagBar();
 }
 
+function tagChipMarkup(t) {
+  return `
+    <button class="tag-chip tagbar-chip ${state.tagFilter.has(t.id) ? 'is-active' : ''}" data-tag="${t.id}">
+      <span class="tag-dot" style="background:${tagColor(t.color)}"></span>
+      ${esc(t.name)}<span class="tag-count">${t.album_count}</span>
+    </button>`;
+}
+
+/**
+ * 折叠状态：每一栏只保留**第一行**放得下的 chip，其余隐藏。
+ *
+ * 隐藏的 chip 不占位，因此「＋ 还有 N 个」会自然落到第一行末尾。
+ * 若这个按钮本身被挤到第二行，就让出末尾的 chip，直到它也回到第一行为止。
+ */
+function collapseTagRowToFirstLine(box) {
+  const chips = [...box.querySelectorAll('.tagbar-chip')];
+  const more = box.querySelector('[data-more]');
+  if (!more || chips.length < 2) return;
+
+  for (const c of chips) c.hidden = false;
+  more.hidden = false;
+
+  const lineTop = chips[0].offsetTop;
+  for (const c of chips.slice(1)) {
+    if (c.offsetTop !== lineTop) c.hidden = true;
+  }
+  const hiddenCount = () => chips.filter((c) => c.hidden).length;
+  if (!hiddenCount()) { more.hidden = true; return; } // 一行就放得下，无需按钮
+
+  more.textContent = `＋ 还有 ${hiddenCount()} 个`;
+  let guard = 0;
+  while (more.offsetTop !== lineTop && guard < 5) {
+    const visible = chips.filter((c) => !c.hidden);
+    if (!visible.length) break;
+    visible[visible.length - 1].hidden = true;
+    more.textContent = `＋ 还有 ${hiddenCount()} 个`;
+    guard += 1;
+  }
+}
+
 function renderTagBar() {
   const bar = $('#tagBar');
   bar.hidden = state.view !== 'albums';
-  const top = state.tagCatalog.slice(0, 20);
-  const chips = top.map((t) => `
-    <button class="tag-chip ${state.tagFilter.has(t.id) ? 'is-active' : ''}" data-tag="${t.id}">
-      <span class="tag-dot" style="background:${tagColor(t.color)}"></span>
-      ${esc(t.name)}<span class="tag-count">${t.album_count}</span>
-    </button>`).join('');
+
+  const byCategory = groupTagsByCategory(state.tagCatalog);
 
   const sizes = ['small', 'medium', 'large'];
   const sizeLabels = { small: '小', medium: '中', large: '大' };
 
-  bar.innerHTML = `
-    ${state.tagFilter.size ? '<button class="tag-chip is-clear" data-clear="1">✕ 清除筛选</button>' : ''}
-    ${chips || '<span class="tag-count">还没有标签 —— 在专辑卡片或详情页点「🏷」即可创建</span>'}
-    <span style="flex:1"></span>
-    <span class="tag-count">封面</span>
-    ${sizes.map((s) => `<button class="tag-chip ${state.albumSize === s ? 'is-active' : ''}"
-       data-size="${s}">${sizeLabels[s]}</button>`).join('')}`;
+  const head = `
+    <div class="tagbar-head">
+      ${state.tagFilter.size ? '<button class="tag-chip is-clear" data-clear="1">✕ 清除筛选</button>' : ''}
+      <span class="tagbar-title">标签筛选</span>
+      <span style="flex:1"></span>
+      <span class="tag-count">封面</span>
+      ${sizes.map((s) => `<button class="tag-chip ${state.albumSize === s ? 'is-active' : ''}"
+         data-size="${s}">${sizeLabels[s]}</button>`).join('')}
+    </div>`;
+
+  const rows = TAG_CATEGORY_META.map(({ key, label, hint }) => {
+    const all = byCategory.get(key) ?? [];
+    if (!all.length) return '';
+    // 折叠态：先按原样渲染，插入 DOM 后再量出第一行能放几个（见 collapseTagRowToFirstLine）
+    const tail = state.tagBarExpanded
+      ? (all.length > 1 ? '<button class="tag-chip is-more" data-less="1">收起</button>' : '')
+      : '<button class="tag-chip is-more" data-more="1" hidden>＋ 还有 0 个</button>';
+    return `
+      <div class="tagbar-row">
+        <span class="tagbar-label" title="${esc(hint)}">${label}<em>${all.length}</em></span>
+        <div class="tagbar-chips">${all.map(tagChipMarkup).join('')}${tail}</div>
+      </div>`;
+  }).join('');
+
+  const emptyRow = `
+    <div class="tagbar-row">
+      <span class="tagbar-label">标签</span>
+      <div class="tagbar-chips">
+        <span class="tag-count">还没有标签 —— 在专辑卡片或详情页点「🏷」即可创建</span>
+      </div>
+    </div>`;
+
+  bar.innerHTML = head + (state.tagCatalog.length ? rows : emptyRow);
+
+  // 隐藏状态下量不出真实行高，等回到专辑墙（showView → renderTagBar）再量
+  if (!bar.hidden && !state.tagBarExpanded) {
+    for (const box of $$('#tagBar .tagbar-chips')) collapseTagRowToFirstLine(box);
+  }
 }
 
 /* ========================================================== 视图：专辑详情 */
@@ -494,7 +830,8 @@ function voiceTrackRowMarkup(row, index) {
 }
 
 /** 音声发行详情：版本列表 + 按轨号合并的轨道行 + 特典分组 + 问题面板 */
-function voiceDetailMarkup(album, data) {
+/** 音声发行详情：版本列表 + 按轨号合并的轨道行 + 特典分组 + 问题面板 + 图片预览 */
+function voiceDetailMarkup(album, data, gallery = null) {
   const versions = data.versions ?? [];
   const bonus = data.bonus_tracks ?? [];
   const mainCount = data.tracks?.length ?? 0;
@@ -513,7 +850,7 @@ function voiceDetailMarkup(album, data) {
 
   return `
     <div class="detail-head">
-      <div class="detail-cover">${coverMarkup(album.cover_url, album.album, album.cover_hash, { eager: true })}</div>
+      ${detailCoverMarkup(album)}
       <div class="detail-info">
         <div class="detail-kind">音声发行　RJ 号 <button class="rj-code" id="rjCopyBtn"
           title="点击复制">${esc(album.rj_code ?? '—')}</button></div>
@@ -545,6 +882,7 @@ function voiceDetailMarkup(album, data) {
           <button class="btn" id="revealAlbumBtn">
             <svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> 打开文件夹
           </button>
+          ${archiveCacheButtons(album)}
           <button class="btn" id="voiceIssuesBtn">⚠ 检查问题</button>
         </div>
         <div class="wb-missing" style="margin-top:14px" id="detailTags">
@@ -573,15 +911,109 @@ function voiceDetailMarkup(album, data) {
       </div>
       ${rowsHtml || '<div class="tag-count" style="padding:16px">没有可播放的轨道</div>'}
     </div>
-    ${bonusHtml}`;
+    ${bonusHtml}
+    ${imageGalleryMarkup(gallery, album.id)}`;
+}
+
+/* ==================================================== 图片预览（专辑内图片） */
+
+/**
+ * 图片预览栏目：按图片所在文件夹分组，点缩略图看原图。
+ * 数据来自 `/api/albums/:id/images`（音声发行看 release_root，压缩包同样支持）。
+ */
+function imageGalleryMarkup(gallery, albumId = 'a') {
+  const images = gallery?.images ?? [];
+  if (!images.length) return '';
+  const groups = gallery.groups?.length
+    ? gallery.groups
+    : [{ label: '图片', indices: images.map((i) => i.index) }];
+
+  const body = groups.map((g) => `
+    <div class="gallery-group">
+      <div class="gallery-group-head">
+        ${esc(g.label)}<span class="tag-count">${g.indices.length}</span>
+      </div>
+      <div class="gallery-grid">
+        ${g.indices.map((i) => {
+    const img = images[i];
+    if (!img) return '';
+    // 不直接给 src：先留占位，缩略图进视口时才生成（见 fillGalleryThumb）
+    return `<button type="button" class="gallery-thumb" data-gallery-index="${img.index}"
+              title="${esc(img.name)}（点击看原图）">
+              <img data-gallery-src="${esc(img.url)}"
+                   data-gallery-key="g${albumId}-${img.index}-${img.size ?? 0}"
+                   alt="${esc(img.name)}" />
+            </button>`;
+  }).join('')}
+      </div>
+    </div>`).join('');
+
+  return `
+    <details class="image-gallery" open>
+      <summary>图片预览<span class="tag-count">${images.length} 张${
+  gallery.source === 'archive' ? ' · 压缩包内' : ''}</span></summary>
+      ${gallery.truncated ? '<div class="tag-count">图片较多，这里只列出前一部分</div>' : ''}
+      ${body}
+    </details>`;
+}
+
+/** 看原图：单例浮层，← → 切换、ESC 关闭、点背景关闭 */
+const lightboxState = { images: [], index: 0 };
+
+function renderLightbox() {
+  const { images, index } = lightboxState;
+  const img = images[index];
+  if (!img) { closeLightbox(); return; }
+  $('#lightboxImg').src = img.url;
+  $('#lightboxImg').alt = img.name;
+  $('#lightboxCaption').textContent =
+    `${index + 1} / ${images.length}${img.group ? ` · ${img.group}` : ''} · ${img.name}`;
+  const single = images.length < 2;
+  $('#lightboxPrev').disabled = single;
+  $('#lightboxNext').disabled = single;
+}
+
+function openLightbox(images, index) {
+  if (!images?.length) return;
+  lightboxState.images = images;
+  lightboxState.index = Math.max(0, Math.min(Number(index) || 0, images.length - 1));
+  renderLightbox();
+  $('#lightbox').hidden = false;
+}
+
+function stepLightbox(delta) {
+  const n = lightboxState.images.length;
+  if (n < 2) return;
+  lightboxState.index = (lightboxState.index + delta + n) % n;
+  renderLightbox();
+}
+
+function closeLightbox() {
+  $('#lightbox').hidden = true;
+  $('#lightboxImg').removeAttribute('src');
+  lightboxState.images = [];
+  lightboxState.index = 0;
 }
 
 async function openAlbum(id, { push = true } = {}) {
-  const data = await api(`/api/albums/${encodeURIComponent(id)}`);
+  /**
+   * 从专辑墙进详情页前记下浏览进度（视图 + 滚动位置）。
+   * 返回时 route() 会用这份快照原地还原，见 state.wallSnapshot。
+   */
+  if (ALBUM_WALL_VIEWS.includes(state.view)) {
+    state.wallSnapshot = { view: state.view, scrollTop: $('#viewAlbums')?.scrollTop ?? 0 };
+  }
+
+  // 图片清单与专辑数据并行取；画廊失败不该拖垮详情页
+  const [data, gallery] = await Promise.all([
+    api(`/api/albums/${encodeURIComponent(id)}`),
+    api(`/api/albums/${encodeURIComponent(id)}/images`).catch(() => null),
+  ]);
   const { album, tracks } = data;
+  state.galleryImages = gallery?.images ?? [];
 
   // 音声发行走专用渲染（版本切换 + 特典分组 + 问题面板）
-  if (album.is_voice) return openVoiceAlbum(data, { push });
+  if (album.is_voice) return openVoiceAlbum(data, { push, gallery });
 
   state.currentAlbum = { album, tracks };
 
@@ -605,7 +1037,7 @@ async function openAlbum(id, { push = true } = {}) {
 
   $('#albumDetail').innerHTML = `
     <div class="detail-head">
-      <div class="detail-cover">${coverMarkup(album.cover_url, album.album, album.cover_hash, { eager: true })}</div>
+      ${detailCoverMarkup(album)}
       <div class="detail-info">
         <div class="detail-kind">专辑</div>
         <h1 class="detail-title">${esc(album.album)}</h1>
@@ -628,6 +1060,7 @@ async function openAlbum(id, { push = true } = {}) {
             <svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> 编辑信息
           </button>
           <button class="btn" id="circleBtn" title="仅记录在软件内，不写回文件">填写社团</button>
+          ${archiveCacheButtons(album)}
           <button class="btn" id="revealAlbumBtn">
             <svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> 打开文件夹
           </button>
@@ -640,8 +1073,10 @@ async function openAlbum(id, { push = true } = {}) {
     <div class="track-table">
       ${trackTableHeader('艺术家')}
       ${tracks.map((t, i) => trackRowMarkup(t, i, { showAlbum: false })).join('')}
-    </div>`;
+    </div>
+    ${imageGalleryMarkup(gallery, album.id)}`;
 
+  hydrateGalleryThumbs($('#albumDetail'));
   $('#playAlbumBtn').addEventListener('click', () => playQueue(tracks, 0, {
     cover: album.cover_url, label: `专辑《${album.album}》`,
   }));
@@ -655,13 +1090,15 @@ async function openAlbum(id, { push = true } = {}) {
       placeholder: '例如 上海飯店',
     });
     if (name === null) return;
-    await api(`/api/albums/${album.id}/circle`, { method: 'POST', body: { circle: name } });
-    toast('已保存社团（仅库内记录）');
+    const res = await api(`/api/albums/${album.id}/circle`, { method: 'POST', body: { circle: name } });
+    toast(linkToastText('已保存社团（仅库内记录）', res));
+    await loadTagBar(); // 自动建立的同名标签要立刻出现在专辑墙上方的「社团」栏
     openAlbum(album.id, { push: false });
   });
   $('#revealAlbumBtn').addEventListener('click', () => {
     api('/api/reveal', { method: 'POST', body: { path: tracks[0]?.path } }).catch(() => {});
   });
+  bindDetailCacheActions(album);
   $$('#albumDetail [data-open-group]').forEach((el) => el.addEventListener('click', async () => {
     await api(`/api/albums/${album.id}/ignore`, { method: 'POST', body: { key: el.dataset.openGroup } });
     toast('已忽略该提醒');
@@ -680,12 +1117,84 @@ async function openAlbum(id, { push = true } = {}) {
   highlightPlayingRow();
 }
 
-/** 音声发行详情：渲染 + 事件（版本切换播放 / 视频弹窗 / 问题面板） */
-async function openVoiceAlbum(data, { push = true } = {}) {
+/** 详情页「预读专辑」：确认后把整张专辑解码进缓存，成功后自动打「已预读」标签 */
+async function prefetchWholeAlbum(album) {
+  const rows = state.currentAlbum?.album?.id === album.id ? (state.currentAlbum?.tracks ?? []) : [];
+  const pending = rows.flatMap((r) => r.variants ?? []).filter((v) => v.needs_prefetch === true);
+  const bytes = pending.reduce((n, v) => n + (Number(v.size) || 0), 0);
+
+  const ok = await askConfirm({
+    title: '预读整张专辑',
+    text: `将把包内 ${pending.length || Number(album.archive?.tracks ?? 0)} 条曲目解码到缓存`
+      + `${bytes ? `（约 ${fmtBytes(bytes)}）` : ''}，完成后播放不再等待。`
+      + '缓存目录与上限可在设置里调整。',
+    okLabel: '开始预读',
+  });
+  if (!ok) return;
+
+  showPrefetchProgress('正在预读整张专辑…', '完成前可以继续浏览其它页面');
+  try {
+    const { result, tag } = await api('/api/archive/prefetch', {
+      method: 'POST', body: { albumId: album.id, mode: 'album' },
+    });
+    if (!result.total) {
+      toast('该专辑没有包内曲目，无需预读');
+    } else if (result.failed) {
+      const first = result.items.find((i) => !i.ok);
+      toast(`预读完成 ${result.done}/${result.total}，部分未能完成：${first?.reason ?? first?.code ?? ''}`, true);
+    } else {
+      toast(`已预读 ${result.done} 条曲目（${fmtBytes(result.bytes)}）`
+        + `${tag ? `，已打标签「${tag.name}」` : ''}`);
+    }
+  } catch (err) {
+    toast(`预读失败：${err.message}`, true);
+  } finally {
+    hidePrefetchProgress();
+  }
+
+  // 缓存状态与「已预读」标签都变了，两边一起刷新
+  await Promise.all([openAlbum(album.id, { push: false }), loadTagBar()]);
+}
+
+/** 详情页「清除缓存」：只清这一张专辑的缓存，并撤下它的「已预读」标签 */
+async function clearAlbumCache(album) {
+  const ok = await askConfirm({
+    title: '清除该专辑的缓存',
+    text: `只删除《${album.album}》已解码到缓存的文件，其它专辑的缓存与压缩包本身都不受影响。`
+      + '下次播放时按需重新解码。',
+    okLabel: '清除缓存',
+    danger: true,
+  });
+  if (!ok) return;
+
+  try {
+    const { result } = await api(`/api/albums/${album.id}/cache/clear`, { method: 'POST', body: {} });
+    if (!result.removed && !result.failed) {
+      toast('该专辑没有已缓存的曲目');
+    } else {
+      toast(`已清除 ${result.removed} 个缓存文件（释放 ${fmtBytes(result.freed)}）`
+        + `${result.failed ? `，${result.failed} 个被占用未能删除` : ''}`);
+    }
+  } catch (err) {
+    toast(`清除失败：${err.message}`, true);
+  }
+
+  await Promise.all([openAlbum(album.id, { push: false }), loadTagBar()]);
+}
+
+/** 详情页里与缓存/封面相关的按钮（音声与普通专辑共用一套绑定） */
+function bindDetailCacheActions(album) {
+  $('#prefetchAlbumBtn')?.addEventListener('click', () => prefetchWholeAlbum(album));
+  $('#clearAlbumCacheBtn')?.addEventListener('click', () => clearAlbumCache(album));
+}
+
+/** 音声发行详情：版本列表 + 按轨号合并的轨道行 + 特典分组 + 问题面板 + 图片预览 */
+async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
   const { album } = data;
   state.currentAlbum = { album, tracks: data.tracks };
 
-  $('#albumDetail').innerHTML = voiceDetailMarkup(album, data);
+  $('#albumDetail').innerHTML = voiceDetailMarkup(album, data, gallery);
+  hydrateGalleryThumbs($('#albumDetail'));
 
   /** 把某个版本的轨道行变成可播放队列 */
   const queueFromRows = (rows) => rows.map((r) => {
@@ -725,8 +1234,9 @@ async function openVoiceAlbum(data, { push = true } = {}) {
       placeholder: '例如 小花衣こっこ',
     });
     if (name === null) return;
-    await api(`/api/albums/${album.id}/voice-artist`, { method: 'POST', body: { artist: name } });
-    toast('已保存（仅库内记录）');
+    const res = await api(`/api/albums/${album.id}/voice-artist`, { method: 'POST', body: { artist: name } });
+    toast(linkToastText('已保存艺术家（仅库内记录）', res));
+    await loadTagBar(); // 自动建立的同名标签要立刻出现在专辑墙上方的「CV」栏
     openAlbum(album.id, { push: false });
   });
   $('#voiceCircleBtn')?.addEventListener('click', async () => {
@@ -738,16 +1248,16 @@ async function openVoiceAlbum(data, { push = true } = {}) {
     });
     if (name === null) return;
     const res = await api(`/api/albums/${album.id}/circle`, { method: 'POST', body: { circle: name } });
-    const n = (res.propagated ?? []).length;
-    toast(n ? `已保存，并自动套用到 ${n} 张同名社团的作品` : '已保存社团（仅库内记录）');
+    toast(linkToastText('已保存社团（仅库内记录）', res));
+    await loadTagBar();
     openAlbum(album.id, { push: false });
   });
   $('#adoptArtistBtn')?.addEventListener('click', async () => {
     const res = await api(`/api/albums/${album.id}/artist-decision`, {
       method: 'POST', body: { decision: 'adopted' },
     });
-    const n = (res.propagated ?? []).length;
-    toast(n ? `已采用该艺术家，并自动套用到 ${n} 张作品` : '已采用该艺术家（仅软件显示）');
+    toast(linkToastText('已采用该艺术家（仅软件显示）', res));
+    await loadTagBar();
     openAlbum(album.id, { push: false });
   });
   $('#keepArtistBtn')?.addEventListener('click', async () => {
@@ -758,6 +1268,7 @@ async function openVoiceAlbum(data, { push = true } = {}) {
     openAlbum(album.id, { push: false });
   });
   $('#voiceIssuesBtn').addEventListener('click', () => loadVoiceIssues(album));
+  bindDetailCacheActions(album);
 
   // 版本 chip：音频切换播放源，视频弹窗播放
   $$('#albumDetail .ver-chip').forEach((btn) => btn.addEventListener('click', () => {
@@ -1092,11 +1603,15 @@ async function loadTagsView() {
   state.tagsView = tags;
   state.tagCatalog = tags;
 
-  const rows = tags.map((t) => `
+  const rowMarkup = (t) => `
     <div class="tag-row" data-tag-id="${t.id}">
       <span class="tag-swatch" style="background:${tagColor(t.color)}" data-color="${t.id}"
             title="点击切换颜色"></span>
       <span class="tag-name" data-name="${t.id}">${esc(t.name)}</span>
+      <select class="tag-cat" data-cat="${t.id}" title="标签分类（决定它在专辑墙上方哪一栏显示）">
+        ${TAG_CATEGORY_META.map((c) => `<option value="${c.key}"
+           ${(t.category ?? 'style') === c.key ? 'selected' : ''}>${c.label}</option>`).join('')}
+      </select>
       <span class="tag-stats">${t.album_count} 张专辑 · ${t.track_count} 首曲目</span>
       <span class="tag-actions">
         <button class="icon-btn" data-pin="${t.id}" title="${t.pinned ? '取消置顶' : '置顶'}"
@@ -1113,25 +1628,47 @@ async function loadTagsView() {
           <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
       </span>
-    </div>`).join('');
+    </div>`;
+
+  // 按「风格 / 社团 / CV」三组分栏展示，与专辑墙上方一致
+  const byCategory = groupTagsByCategory(tags);
+  const sections = TAG_CATEGORY_META.map(({ key, label, hint }) => {
+    const list = byCategory.get(key) ?? [];
+    if (!list.length) return '';
+    return `
+      <div class="tag-group">
+        <div class="tag-group-head">
+          <h3>${label}</h3>
+          <span>${list.length} 个 · ${esc(hint)}</span>
+        </div>
+        ${list.map(rowMarkup).join('')}
+      </div>`;
+  }).join('');
 
   $('#tagsPanel').innerHTML = `
     <div class="wb-head">
       <h2>标签</h2>
-      <span class="wb-sub">${tags.length} 个标签 · 点击名字重命名，点击色块换色</span>
+      <span class="wb-sub">${tags.length} 个标签 · 点击名字重命名，点击色块换色；
+        分类决定它在专辑墙上方显示在「风格 / 社团 / CV」哪一栏</span>
     </div>
     <div style="display:flex;gap:8px">
       <input type="text" id="newTagName" placeholder="新建标签…" style="background:#0c0c11;border:1px solid var(--line-strong);border-radius:10px;padding:9px 12px;color:var(--fg);outline:none;flex:1;max-width:320px" />
+      <select id="newTagCat" class="tag-cat" title="新标签的分类">
+        ${TAG_CATEGORY_META.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}
+      </select>
       <button class="btn" id="newTagBtn">新建</button>
     </div>
-    <div class="wb-list">${rows || '<div class="wb-sub">还没有标签。可以在专辑卡片或详情页点「🏷」创建第一个。</div>'}</div>`;
+    <div class="wb-list">${sections || '<div class="wb-sub">还没有标签。可以在专辑卡片或详情页点「🏷」创建第一个。</div>'}</div>`;
 
   // 这两个元素随视图动态生成，必须在这里绑定（不能放在 bindEvents 里）
   const createFromInput = async () => {
     const input = $('#newTagName');
     if (!input.value.trim()) return;
     try {
-      await api('/api/tags', { method: 'POST', body: { name: input.value.trim() } });
+      await api('/api/tags', {
+        method: 'POST',
+        body: { name: input.value.trim(), category: $('#newTagCat')?.value ?? 'style' },
+      });
       input.value = '';
       await loadTagsView();
       await loadTagBar();
@@ -2302,6 +2839,7 @@ async function updateFavoriteBadges() {
 function bindEvents() {
   $$('.nav-item').forEach((btn) => btn.addEventListener('click', () => {
     const view = btn.dataset.view;
+    state.wallSnapshot = null; // 主动点导航 = 重新加载，不用「返回」的进度快照
     history.pushState({}, '', view === 'albums' ? '#/' : `#/${view}`);
     // 进入收藏视图前清掉库筛选，否则「Album 库」的筛选会把收藏里的 ASMR 藏起来
     if (view === 'favasmr' || view === 'favalbum') state.libraryFilter = null;
@@ -2351,6 +2889,16 @@ function bindEvents() {
       loadAlbums();
       return;
     }
+    if (e.target.closest('[data-more]')) {
+      state.tagBarExpanded = true;
+      renderTagBar();
+      return;
+    }
+    if (e.target.closest('[data-less]')) {
+      state.tagBarExpanded = false;
+      renderTagBar();
+      return;
+    }
     const sizeBtn = e.target.closest('[data-size]');
     if (sizeBtn) {
       state.albumSize = sizeBtn.dataset.size;
@@ -2359,6 +2907,19 @@ function bindEvents() {
       $('#albumGrid').className = `album-grid size-${state.albumSize}`;
       loadAlbums(); // 重新按新尺寸取缩略图
     }
+  });
+
+  /**
+   * 窗口宽度变化后重新量一次「第一行能放几个」。
+   * 折叠态才需要重算；展开态本来就全部铺开。
+   */
+  let tagBarResizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(tagBarResizeTimer);
+    tagBarResizeTimer = setTimeout(() => {
+      if (state.view !== 'albums' || state.tagBarExpanded) return;
+      for (const box of $$('#tagBar .tagbar-chips')) collapseTagRowToFirstLine(box);
+    }, 160);
   });
 
   $('#loadMoreBtn').addEventListener('click', () => loadAlbums({ append: true }));
@@ -2401,12 +2962,16 @@ function bindEvents() {
       if (!res.updated) {
         toast(`选中的都不是 ASMR 音声发行，未做改动`, true);
       } else {
-        toast(`已为 ${res.updated} 张音声发行填写${isArtist ? '艺术家' : '社团'}`
-          + (skipped ? `，跳过 ${skipped} 张普通专辑` : ''));
+        toast(linkToastText(
+          `已为 ${res.updated} 张音声发行填写${isArtist ? '艺术家' : '社团'}`
+            + (skipped ? `，跳过 ${skipped} 张普通专辑` : ''),
+          res,
+        ));
       }
       state.selected.clear();
       state.selecting = false;
       await loadAlbums();
+      await loadTagBar(); // 批量填写同样会建立同名标签，标签栏要跟着刷新
       syncSelectionUi();
     } catch (err) {
       toast(`失败：${err.message ?? ''}`, true);
@@ -2576,6 +3141,22 @@ function bindEvents() {
       const id = Number(open.dataset.openAlbum);
       history.pushState({}, '', `#/album/${id}`);
       openAlbum(id, { push: false });
+    }
+  });
+
+  /** 标签分类切换：只改这一张标签的归类，随后同步专辑墙上方的分栏 */
+  $('#tagsPanel').addEventListener('change', async (e) => {
+    const sel = e.target.closest('[data-cat]');
+    if (!sel) return;
+    const id = Number(sel.dataset.cat);
+    try {
+      await api(`/api/tags/${id}`, { method: 'PATCH', body: { category: sel.value } });
+      toast(`已归入「${TAG_CATEGORY_LABEL[sel.value] ?? sel.value}」栏`);
+      await loadTagsView();
+      await loadTagBar();
+    } catch (err) {
+      toast(err.message, true);
+      loadTagsView();
     }
   });
 
@@ -2897,8 +3478,8 @@ function bindEvents() {
     audio.currentTime = (Number(e.target.value) / 1000) * audio.duration;
   });
   $('#volume').addEventListener('input', (e) => {
-    audio.volume = Number(e.target.value) / 100;
-    localStorage.setItem('volume', e.target.value);
+    // input 事件本身就是用户手势，可以在这里接上音频图
+    applyVolume(e.target.value, { gesture: true });
   });
 
   document.addEventListener('keydown', (e) => {
@@ -2917,6 +3498,51 @@ function bindEvents() {
     else if (e.key === '3') setPlayMode('shuffle');
   });
 
+  /* ------------------------------------------------- 图片预览：点缩略图看原图 */
+
+  // 缩略图随详情页反复重渲染，因此用事件委托绑在常驻容器上
+  $('#albumDetail').addEventListener('click', (e) => {
+    // 封面：点开看完整原图（同样走「看原图」浮层）
+    const cover = e.target.closest('[data-cover-zoom]');
+    if (cover) {
+      const album = state.currentAlbum?.album;
+      openLightbox([{
+        index: 0,
+        url: cover.dataset.coverUrl,
+        name: `专辑封面 · ${album?.album ?? ''}`.trim(),
+        group: '',
+      }], 0);
+      return;
+    }
+    const thumb = e.target.closest('[data-gallery-index]');
+    if (!thumb) return;
+    openLightbox(state.galleryImages, Number(thumb.dataset.galleryIndex));
+  });
+
+  $('#lightboxClose').addEventListener('click', closeLightbox);
+  $('#lightboxPrev').addEventListener('click', (e) => { e.stopPropagation(); stepLightbox(-1); });
+  $('#lightboxNext').addEventListener('click', (e) => { e.stopPropagation(); stepLightbox(1); });
+  $('#lightboxOpenBtn').addEventListener('click', () => {
+    const img = lightboxState.images[lightboxState.index];
+    if (img) window.open(img.url, '_blank');
+  });
+  // 点背景关闭；点图片本身不关闭（免得看细节时误触）
+  $('#lightbox').addEventListener('click', (e) => {
+    if (e.target.id === 'lightbox') closeLightbox();
+  });
+
+  /**
+   * 看原图时的键盘操作。用**捕获阶段 + stopPropagation**，
+   * 否则空格会被下面的播放快捷键抢走、ESC 会去关别的面板。
+   */
+  document.addEventListener('keydown', (e) => {
+    if ($('#lightbox').hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeLightbox(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); stepLightbox(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); stepLightbox(1); }
+    else if (e.code === 'Space') { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+
   window.addEventListener('popstate', route);
 }
 
@@ -2932,6 +3558,16 @@ async function route() {
   if (hash === '/incomplete') { showView('incomplete'); await loadIncomplete(); return; }
   if (hash === '/tags') { showView('tags'); await loadTagsView(); return; }
   if (hash === '/stats') { showView('stats'); await loadStats(); return; }
+  // 从专辑详情返回：**原地还原**之前的列表与滚动位置（不重新请求，避免从头加载）
+  if (state.wallSnapshot) {
+    const snap = state.wallSnapshot;
+    state.wallSnapshot = null;
+    showView(snap.view ?? 'albums');
+    await loadAlbums({ reuse: true });
+    const box = $('#viewAlbums');
+    if (box) box.scrollTop = Number(snap.scrollTop) || 0;
+    return;
+  }
   showView('albums');
   await loadAlbums();
 }
@@ -3183,6 +3819,9 @@ function settingsMarkup() {
     theme: 'midnight', mode: 'dark', bgOpacity: 100, bgImage: null,
   };
   const cache = settingsState.cache ?? {};
+  const desktop = cfg.desktop ?? { minimizeToTray: false };
+  // 浏览器里运行时没有托盘可言，如实说明（避免用户以为设置没生效）
+  const desktopShell = /electron/i.test(navigator.userAgent);
 
   const used = Number(cache.bytes ?? 0);
   const max = Number(cache.maxBytes ?? arch.maxBytes ?? 0);
@@ -3297,6 +3936,27 @@ function settingsMarkup() {
         </div>
       </div>
     </section>
+
+    <section class="set-sec">
+      <h4>桌面</h4>
+      <div class="set-row">
+        <div class="set-label">关闭窗口时</div>
+        <div class="set-control">
+          <div class="seg-list">
+            <button type="button" class="seg${desktop.minimizeToTray ? '' : ' is-active'}"
+                    data-tray-pick="0">退出程序</button>
+            <button type="button" class="seg${desktop.minimizeToTray ? ' is-active' : ''}"
+                    data-tray-pick="1">最小化到托盘</button>
+          </div>
+          <div class="set-note">
+            ${desktop.minimizeToTray
+    ? '点窗口的 × 只是收进托盘，播放与扫描照常继续；要真正退出请用托盘菜单的「退出 Luna」或菜单栏「文件 → 退出」。'
+    : '点窗口的 × 直接退出 Luna（当前行为）。'}
+          </div>
+          ${desktopShell ? '' : '<div class="set-note is-warn">⚠ 当前不是桌面版（在浏览器里打开）：没有托盘可用，该设置不会生效。</div>'}
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -3355,8 +4015,29 @@ async function saveArchiveSettings() {
   }
 }
 
+/** 桌面外壳设置：关闭窗口的行为（改动立即保存并生效，主进程在关闭那一刻现读） */
+async function saveDesktopSetting(minimizeToTray) {
+  try {
+    const { config } = await api('/api/config', { method: 'POST', body: { desktop: { minimizeToTray } } });
+    settingsState.config = config;
+    toast(minimizeToTray
+      ? '已设置：点 × 收进托盘，仍会继续播放与扫描'
+      : '已设置：点 × 直接退出 Luna');
+    await refreshSettings();
+  } catch (err) {
+    toast(`保存失败：${err.message}`, true);
+  }
+}
+
 /** 设置抽屉内控件的事件（每次重绘都要重新绑） */
 function bindSettingsBody() {
+  $$('#settingsBody [data-tray-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const on = btn.dataset.trayPick === '1';
+      $$('#settingsBody [data-tray-pick]').forEach((b) => b.classList.toggle('is-active', b === btn));
+      saveDesktopSetting(on);
+    });
+  });
   $('#setPrefetch')?.addEventListener('change', (e) => {
     const note = PREFETCH_LABELS.find((p) => p.id === e.target.value)?.note ?? '';
     const el = $('#setPrefetchNote');

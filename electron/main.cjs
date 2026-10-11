@@ -8,7 +8,7 @@
  * ⚠ 依赖 Electron 内置 Node ≥ 22.5（本项目用 node:sqlite），
  *   因此 Electron 版本必须 ≥ 35。
  */
-const { app, BrowserWindow, shell, Menu, dialog } = require('electron');
+const { app, BrowserWindow, shell, Menu, dialog, Tray, nativeImage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const net = require('node:net');
@@ -82,6 +82,58 @@ function resolveDataDir() {
   const portable = path.join(appRoot(), 'data');
   if (fs.existsSync(path.join(portable, 'library.db'))) return portable;
   return path.join(app.getPath('userData'), 'data');
+}
+
+/**
+ * 读取「关闭窗口时最小化到托盘」开关。
+ *
+ * 设置由渲染层通过 /api/config 写进 data/config.json，主进程在**关闭窗口的那一刻**
+ * 现读一次 —— 这样用户在设置里一改就立即生效，不需要重启，也不需要 IPC 同步。
+ */
+function minimizeToTrayEnabled() {
+  try {
+    const file = path.join(resolveDataDir(), 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return cfg?.desktop?.minimizeToTray === true;
+  } catch {
+    return false; // 还没写过配置 / 配置坏了 → 保持「关闭即退出」的直觉
+  }
+}
+
+let tray = null;
+/** 真正要退出（而不是收进托盘）时置位，close 事件据此放行 */
+let isQuitting = false;
+
+function showMainWindow() {
+  if (!mainWindow) { createWindow(); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+/** 托盘图标：只在真的需要（用户开了开关）时才创建，避免给不需要的人留一个图标 */
+function ensureTray() {
+  if (tray) return tray;
+  try {
+    const iconPath = appIconPath();
+    const image = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
+    tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: 16, height: 16 }));
+  } catch (err) {
+    log('创建托盘失败:', err);
+    return null;
+  }
+  tray.setToolTip('Luna · 本地音乐与音声库');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示主窗口', click: () => showMainWindow() },
+    { type: 'separator' },
+    {
+      label: '退出 Luna',
+      click: () => { isQuitting = true; app.quit(); },
+    },
+  ]));
+  // 左键单击托盘图标 → 回到窗口（Windows 上习惯用法）
+  tray.on('click', () => showMainWindow());
+  return tray;
 }
 
 /** 找一个可用端口 */
@@ -162,8 +214,27 @@ async function createWindow() {
     },
   });
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+    // 开关打开时提前把托盘准备好，用户第一次点 × 时才有地方可收
+    if (minimizeToTrayEnabled()) ensureTray();
+  });
   mainWindow.loadURL(serverUrl);
+
+  /**
+   * 关闭按钮的两种语义（设置项「关闭窗口时最小化到托盘」）：
+   *   开 → 拦住关闭、只隐藏窗口，应用继续在托盘运行
+   *   关 → 正常关闭（随后 window-all-closed 退出整个应用）
+   */
+  mainWindow.on('close', (e) => {
+    if (isQuitting || !minimizeToTrayEnabled()) return;
+    // 托盘建不出来就别藏窗口 —— 否则用户只能靠重开 exe 找回来
+    if (!ensureTray()) return;
+    e.preventDefault();
+    mainWindow.hide();
+    log('窗口已最小化到托盘');
+  });
+
   mainWindow.on('closed', () => { mainWindow = null; });
 
   // 外部链接交给系统浏览器，不在应用内打开
@@ -183,7 +254,8 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); }
+    // 再次启动 exe：把已有窗口叫回来（收进托盘时 focus() 不会显示，必须 show()）
+    showMainWindow();
   });
 
   app.whenReady().then(() => {
@@ -217,4 +289,7 @@ if (!gotLock) {
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
   });
+
+  // 任何退出路径（菜单「退出」、托盘菜单、系统关机）都要放行 close
+  app.on('before-quit', () => { isQuitting = true; });
 }

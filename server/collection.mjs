@@ -190,6 +190,49 @@ export async function clearCache({ force = false } = {}) {
 }
 
 /**
+ * 清除**单张专辑**的缓存：只删这张专辑曲目对应的缓存文件与登记。
+ *
+ * 与 clearCache() 的分工：那个是整目录清空（带目录身份校验），
+ * 这里按 (archive_id, member_path) 精确匹配，且**只删缓存目录内的文件** ——
+ * 登记表若因任何原因指向别处，宁可不动。
+ *
+ * @param {Array<object>} tracks 该专辑的曲目（含 source_kind / archive_id / member_path）
+ */
+export async function clearAlbumCache(tracks) {
+  const cfg = readConfig();
+  const dir = path.resolve(resolveCacheDir(cfg));
+  const insideDir = (p) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : `${dir}${path.sep}`);
+
+  const seen = new Set();
+  const result = { removed: 0, freed: 0, untouched: 0, failed: 0, dir };
+
+  for (const t of tracks ?? []) {
+    if (t?.source_kind !== 'archive_member' || !t.archive_id || !t.member_path) continue;
+    const key = `${t.archive_id}\u0000${t.member_path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const entry = store.getCacheEntry(t.archive_id, t.member_path);
+    if (!entry) { result.untouched += 1; continue; }
+
+    const file = path.resolve(String(entry.file_path ?? ''));
+    if (!insideDir(file)) { result.untouched += 1; continue; }
+
+    try {
+      await fsp.rm(file, { force: true });
+    } catch {
+      // 被占用 / 权限不足：保留登记，下次清理还能再试，缓存统计也不失真
+      result.failed += 1;
+      continue;
+    }
+    store.deleteCacheEntry(t.archive_id, t.member_path);
+    result.removed += 1;
+    result.freed += Number(entry.bytes) || 0;
+  }
+  return result;
+}
+
+/**
  * 人类可读体积（供容量判定与界面提示复用）。
  * 必须定义在 canCacheMember 之前被调用到 —— 函数声明会提升，这里保持顶层声明。
  */

@@ -218,6 +218,35 @@ try {
     stopAtEnd.pausedAfter === true || /顺序播放结束/.test(stopAtEnd.bodyToasts),
     `paused=${stopAtEnd.pausedAfter} toast="${stopAtEnd.bodyToasts}"`);
   await shot('v8-sequential-mode.png');
+
+  console.log('\n— 音量：0–200%（100% 以上为软件放大） —');
+  const vol = await ev(`(async () => {
+    const input = document.querySelector('#volume');
+    const label = document.querySelector('#volumeVal');
+    const a = document.querySelector('audio');
+    const set = (v) => { input.value = String(v); input.dispatchEvent(new Event('input', { bubbles: true })); };
+    const before = { max: input.max, min: input.min, tick: !!document.querySelector('.volume-mark') };
+    set(150);
+    await new Promise(z => setTimeout(z, 300));
+    const at150 = {
+      label: label.textContent,
+      boost: document.querySelector('#volumeBox').classList.contains('is-boost'),
+    };
+    set(50);
+    await new Promise(z => setTimeout(z, 300));
+    // 接上 Web Audio 后音量由 gain 决定、元素音量恒为 1；未接图时这里会是 0.5
+    const at50 = { label: label.textContent, elementVolume: a.volume };
+    set(85);
+    await new Promise(z => setTimeout(z, 200));
+    return { before, at150, at50 };
+  })()`);
+  ok('音量条量程扩到 0–200 且带 100% 刻度',
+    vol.before.max === '200' && vol.before.min === '0' && vol.before.tick === true,
+    `min=${vol.before.min} max=${vol.before.max} tick=${vol.before.tick}`);
+  ok('超过 100% 时给出「放大」提示', vol.at150.label === '150%' && vol.at150.boost === true,
+    `${vol.at150.label} boost=${vol.at150.boost}`);
+  ok('放大由 Web Audio 承担（元素音量恒为 1，避免两处叠加）',
+    vol.at50.elementVolume === 1, `at50 elementVolume=${vol.at50.elementVolume}`);
 } catch (err) {
   console.error('验证异常：', err.message);
   fail += 1;

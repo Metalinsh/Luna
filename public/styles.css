@@ -404,12 +404,20 @@ select {
   position: relative;
 }
 .detail-cover img { width: 100%; height: 100%; object-fit: cover; position: relative; z-index: 1; }
+/* 有封面时封面本身是按钮：抹平按钮默认样式，点击看完整原图 */
+.detail-cover.is-zoomable {
+  padding: 0; border: 0; cursor: zoom-in;
+  transition: transform .15s, box-shadow .15s;
+}
+.detail-cover.is-zoomable:hover { transform: translateY(-2px); box-shadow: 0 20px 48px rgba(0,0,0,.65); }
+.detail-cover.is-zoomable:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .detail-info { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
 .detail-kind { color: var(--fg-faint); font-size: 11.5px; letter-spacing: .16em; text-transform: uppercase; }
 .detail-title { font-size: 30px; font-weight: 700; line-height: 1.18; margin: 0; }
 .detail-artist { color: var(--fg-dim); font-size: 15px; }
 .detail-meta { color: var(--fg-faint); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-.detail-actions { display: flex; gap: 10px; margin-top: 6px; }
+/* 允许换行：缓存相关按钮会随压缩包来源出现，按钮数不固定 */
+.detail-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
 
 .track-table { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
 /* 曲目行：前 4 列（序号 / 标题 / 艺术家 / 时长），右侧 132px 固定留给操作按钮，
@@ -543,6 +551,24 @@ input[type="range"]::-webkit-slider-thumb {
 .volume { display: flex; align-items: center; gap: 8px; color: var(--fg-faint); }
 .volume svg { width: 16px; height: 16px; }
 .volume input[type="range"] { width: 92px; }
+/* 100% 刻度线：0–200 的量程中点就是「原始音量满刻度」 */
+.volume-track { position: relative; display: flex; align-items: center; }
+.volume-mark {
+  position: absolute; left: 50%; top: 50%; width: 2px; height: 10px;
+  transform: translate(-1px, -50%); border-radius: 1px;
+  background: rgba(var(--mix-fg),.28); pointer-events: none;
+}
+.volume-val {
+  min-width: 34px; font-size: 11px; text-align: right;
+  font-variant-numeric: tabular-nums; color: var(--fg-faint);
+}
+/* 进入软件放大区：数值转 warn 色 + 音量图标同步提醒 */
+.volume.is-boost { color: var(--warn); }
+.volume.is-boost .volume-val { color: var(--warn); }
+.volume.is-boost input[type="range"] { background: rgba(240,184,102,.34); }
+.volume.is-boost input[type="range"]::-webkit-slider-thumb {
+  opacity: 1; box-shadow: 0 0 0 3px rgba(240,184,102,.35);
+}
 
 /* ------------------------------------------------------------------ dialog */
 
@@ -586,9 +612,21 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .tagbar {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 12px 24px; border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 10px 24px 12px; border-bottom: 1px solid var(--line);
 }
+/* 表头行：清除筛选 + 标题 + 右侧封面尺寸 */
+.tagbar-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tagbar-title { font-size: 12px; color: var(--fg-faint); }
+/* 每一栏：固定宽度的类目名 + 可换行的 chip 区 */
+.tagbar-row { display: flex; align-items: flex-start; gap: 10px; }
+.tagbar-label {
+  flex: none; width: 52px; padding-top: 5px;
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font-size: 12px; color: var(--fg-faint);
+}
+.tagbar-label em { font-style: normal; font-size: 11px; opacity: .6; }
+.tagbar-chips { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
 .tag-chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 11px; border-radius: 99px; cursor: pointer;
@@ -599,7 +637,16 @@ input[type="range"]::-webkit-slider-thumb {
 .tag-chip.is-active { background: var(--accent-soft); border-color: rgba(125,108,245,.55); color: #cdc6ff; }
 .tag-chip .tag-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .tag-chip .tag-count { color: var(--fg-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tag-chip[hidden] { display: none; } /* 折叠时隐藏放不下的 chip（display 由本类显式声明，必须压过它） */
 .tag-chip.is-clear { color: var(--fg-faint); }
+.tag-chip.is-more { border-style: dashed; color: var(--accent-2); }
+
+/* 标签页：按风格 / 社团 / CV 分栏 */
+.tag-group { margin-bottom: 6px; }
+.tag-group-head { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 8px; }
+.tag-group-head h3 { margin: 0; font-size: 14px; }
+.tag-group-head span { font-size: 12px; color: var(--fg-faint); }
+select.tag-cat { flex: none; padding: 3px 8px; border-radius: 8px; font-size: 12px; min-width: 72px; }
 
 .bulkbar {
   display: flex; align-items: center; gap: 10px;
@@ -725,6 +772,69 @@ body.is-selecting .select-mark { display: flex; }
 .tag-row .tag-stats { color: var(--fg-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .tag-row .tag-actions { margin-left: auto; display: flex; gap: 4px; }
 .tag-row .tag-actions .icon-btn { width: 30px; height: 30px; }
+
+/* ==================== 专辑详情：图片预览与「看原图」浮层 ==================== */
+
+.image-gallery {
+  margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line);
+}
+.image-gallery > summary {
+  display: flex; align-items: baseline; gap: 8px;
+  cursor: pointer; font-size: 14px; font-weight: 600; color: var(--fg);
+  list-style: none;
+}
+.image-gallery > summary::-webkit-details-marker { display: none; }
+.image-gallery > summary::before {
+  content: '▸'; color: var(--fg-faint); font-size: 12px; transition: transform .15s;
+}
+.image-gallery[open] > summary::before { transform: rotate(90deg); }
+.image-gallery > .tag-count { margin: 8px 0 0 16px; display: block; }
+
+.gallery-group { margin-top: 14px; }
+.gallery-group-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px;
+  font-size: 12.5px; color: var(--fg-dim);
+}
+.gallery-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.gallery-thumb {
+  width: 132px; height: 132px; padding: 0; overflow: hidden;
+  border-radius: 10px; border: 1px solid var(--line-strong);
+  background: var(--tag-bg); cursor: zoom-in;
+}
+.gallery-thumb img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+  transition: transform .18s;
+}
+.gallery-thumb:hover { border-color: var(--accent); }
+.gallery-thumb:hover img { transform: scale(1.06); }
+
+.lightbox {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .88);
+}
+.lightbox img {
+  max-width: 94vw; max-height: 88vh; object-fit: contain;
+  border-radius: 6px; box-shadow: 0 18px 60px rgba(0, 0, 0, .6);
+}
+.lightbox-bar {
+  position: absolute; top: 14px; left: 20px; right: 20px;
+  display: flex; align-items: center; gap: 10px; color: #fff;
+}
+.lightbox-caption {
+  margin-right: auto; font-size: 12.5px; color: rgba(255, 255, 255, .78);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lightbox-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 46px; height: 76px; border-radius: 12px; cursor: pointer;
+  background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .16);
+  color: #fff; font-size: 30px; line-height: 1;
+}
+.lightbox-nav:hover { background: rgba(255, 255, 255, .16); }
+.lightbox-nav:disabled { opacity: .25; cursor: default; }
+.lightbox-nav.is-prev { left: 18px; }
+.lightbox-nav.is-next { right: 18px; }
 
 /* ========================================================== V2：标签弹窗 */
 

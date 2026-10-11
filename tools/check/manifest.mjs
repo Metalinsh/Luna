@@ -42,7 +42,7 @@ export const AREAS = [
   {
     id: 'wall',
     title: '专辑墙',
-    desc: '卡片与角标、标签筛选、三个收藏入口、收藏视图',
+    desc: '卡片与角标、标签筛选（风格/社团/CV 三栏）、三个收藏入口、收藏视图、从详情返回保留浏览进度',
     unit: [],
     ui: ['check/wall.mjs', 'check/favorites.mjs'],
     app: true,
@@ -60,16 +60,16 @@ export const AREAS = [
   {
     id: 'detail',
     title: '专辑详情',
-    desc: '曲目表布局、列宽拖动、双击名称播放、多艺术家显示',
+    desc: '曲目表布局、列宽拖动、双击名称播放、多艺术家显示、图片预览与看原图、点封面看原图',
     unit: [],
-    ui: ['check/detail.mjs'],
+    ui: ['check/detail.mjs', 'check/gallery.mjs'],
     app: true,
-    covers: ['public/app.js', 'public/styles.css', 'server/db.mjs', 'server/index.mjs'],
+    covers: ['public/app.js', 'public/styles.css', 'server/db.mjs', 'server/index.mjs', 'server/gallery.mjs'],
   },
   {
     id: 'voice',
     title: '音声专辑',
-    desc: '版本与差分、特典、视频版、三层轨道模型、ASMR 自动打标',
+    desc: '版本与差分、特典、视频版、三层轨道模型、ASMR 自动打标、图片不进轨道',
     unit: [],
     ui: ['check/voice.mjs', 'check/voice-fixes.mjs'],
     app: true,
@@ -78,7 +78,7 @@ export const AREAS = [
   {
     id: 'artist',
     title: '艺术家与社团',
-    desc: '以 artist 为准的识别、待确认提示、采用/保持现状、自动套用',
+    desc: '以 artist 为准的识别、待确认提示、采用/保持现状、自动套用与同名标签',
     unit: [],
     ui: ['check/artist.mjs'],
     app: true,
@@ -114,20 +114,20 @@ export const AREAS = [
   {
     id: 'archive',
     title: '压缩包只读挂载',
-    desc: 'ZIP 清单解析与编码嗅探、压缩包入库与角标、包内曲目禁播告知',
+    desc: 'ZIP 清单解析与编码嗅探、压缩包入库与角标、包内曲目禁播告知、预读专辑/清除缓存与「已预读」标签',
     // 单元测试已覆盖 zip-reader；界面检查只验「扫出来的包在界面上表现正确」
     unit: ['test/zip-reader.test.mjs'],
     ui: ['check/archive.mjs'],
     app: true,
     covers: [
-      'server/zip-reader.mjs', 'server/scanner.mjs', 'server/asmr.mjs',
+      'server/zip-reader.mjs', 'server/scanner.mjs', 'server/asmr.mjs', 'server/gallery.mjs',
       'server/db.mjs', 'server/index.mjs', 'public/app.js', 'public/styles.css',
     ],
   },
   {
     id: 'settings',
     title: '设置界面',
-    desc: '⚙ 位置与面板结构、压缩包预取与缓存设置、三种配色与背景透明度、提醒文案',
+    desc: '⚙ 位置与面板结构、压缩包预取与缓存设置、桌面（关闭窗口最小化到托盘）、三种配色与背景透明度、提醒文案',
     unit: [],
     ui: ['check/settings.mjs'],
     app: true,
