@@ -39,7 +39,7 @@ V1.1 起还支持**压缩包只读挂载**：不解压也能把包内作品摆�
 首次启动进「扫描音乐库」添加你的目录即可。
 
 ```powershell
-pnpm release          # 完整测试 + 打包 + 生成纯净数据
+pnpm release                          # 按改动测试 + 打包 + 生成纯净数据
 ```
 
 ---
@@ -68,12 +68,17 @@ pnpm scan -- --all           # 重扫全部已登记的音乐库
 
 pnpm test             # 局部测试：按 git 改动自动挑区域
 pnpm test:unit        # 只跑单元测试（约 1 秒）
-pnpm test:full        # 完整测试流程（发布前必跑）
+pnpm test:audit       # 测试内容审计：找重复断言/用例（全面测试前必跑）
+pnpm test:full        # 完整测试流程（**仅当明确要求全面回归时**）
 pnpm test:list        # 列出所有测试区域
 
-pnpm release          # 完整测试 + 打包 + 纯净数据
+pnpm release                          # 默认：只测「相对上一版有改动」的区域 + 打包 + 纯净数据
+pnpm release -- --areas=archive,lyrics # 改动落在公共文件时，按功能明确指定要测的区域
+pnpm release -- --full-tests          # 打包 + 完整测试流程（用户明确要求时才用）
 ```
 
+> **测试范围约定**：日常与发布都只验证**有改动的功能**；全面回归只在明确要求时跑，
+> 且开跑前先用 `pnpm test:audit` 复核一遍测试内容、剔除重复项。
 > 完整说明见 [`docs/测试流程.md`](docs/测试流程.md)。
 
 ---

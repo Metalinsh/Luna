@@ -6,8 +6,14 @@
  *   node tools/check/run.mjs --changed          # 局部：按 git 改动自动挑区域（日常开发）
  *   node tools/check/run.mjs --area=lyrics      # 局部：只跑指定区域（可逗号分隔多个）
  *   node tools/check/run.mjs --unit             # 只跑单元测试（最快）
- *   node tools/check/run.mjs --full             # 完整：所有区域（发布前必跑）
+ *   node tools/check/run.mjs --full             # 完整：所有区域（**仅当用户明确要求全面回归时**）
  *   node tools/check/run.mjs --list             # 列出所有区域
+ *
+ * 测试范围约定（2026-10-11）：
+ *   · 日常开发与**发布打包**都只验证「有改动的功能区域」——
+ *     发布脚本默认就是 `--changed --since=<上一版标签>`（见 tools/release/build.mjs）。
+ *   · `--full` 只在用户明确要求全面回归时使用；跑之前先按 docs/测试流程.md §4.4
+ *     复核一遍测试内容、剔除重复项，再开跑。
  *
  * 其它选项：
  *   --since=<ref>   以某个 git 引用为基准判断改动（默认 HEAD，未提交改动优先）
@@ -236,6 +242,7 @@ if (failed) {
 if (mode === '完整流程') {
   console.log('\n完整测试流程通过，可以进入打包发布。');
 } else {
-  console.log('\n局部测试通过。发布前请再跑一次 --full 完整流程。');
+  console.log('\n局部测试通过。发布默认也只跑改动区域；'
+    + '只有用户明确要求全面回归时才跑 --full（跑之前先按 docs/测试流程.md §4.4 复核测试内容）。');
 }
 process.exit(0);

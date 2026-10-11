@@ -15,6 +15,7 @@
     "electron": "electron .",
     "test": "node tools/check/run.mjs --changed",
     "test:unit": "node tools/check/run.mjs --unit",
+    "test:audit": "node tools/check/audit.mjs",
     "test:full": "node tools/check/run.mjs --full",
     "test:list": "node tools/check/run.mjs --list",
     "release": "node tools/release/build.mjs",

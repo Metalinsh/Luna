@@ -4,16 +4,23 @@
  *
  * 流程：
  *   1. 前置检查（版本号、图标、工作区状态）
- *   2. 跑完整的测试流程（可用 --skip-tests 跳过，仅限调试）
+ *   2. 跑测试（默认**只跑相对上一版有改动的区域**；--full-tests 才跑完整流程）
  *   3. electron-builder 打包便携版
  *   4. **纯净数据**：生成一个全新空库放进 Release/data，
  *      确保发布出去的软件不含开发期的专辑、标签、封面、收藏等记录
  *   5. 校验产物（文件大小、图标、空库）
  *
  * 用法：
- *   node tools/release/build.mjs                 # 打包 + 测试
+ *   node tools/release/build.mjs                 # 打包 + 只测改动区域（默认）
+ *   node tools/release/build.mjs --full-tests    # 打包 + 完整测试流程（用户明确要求时才用）
  *   node tools/release/build.mjs --skip-tests    # 跳过测试（调试用）
  *   node tools/release/build.mjs --no-clean      # 保留 Release 目录里已有的产物
+ *
+ * 测试范围的规则（2026-10-11 与用户约定）：
+ *   · 发布默认只验证「相对上一个发布标签有改动」的功能区域 —— 靠 `run.mjs --changed --since=<上一版标签>`
+ *     按 manifest 的文件覆盖表自动挑区域，没改动的功能不重复跑。
+ *   · **只有用户明确要求**时才跑完整测试（--full-tests）。跑之前先按 docs/测试流程.md §4.4
+ *     检查一遍测试内容、剔除重复项，再开跑。
  */
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -57,18 +64,58 @@ if (!fs.existsSync(path.join(ROOT, 'node_modules', 'electron', 'dist'))) {
 }
 log('  ✓ Electron 运行时存在');
 
-/* ------------------------------------------------------------ 2. 完整测试 */
+/* ------------------------------------------------------------ 2. 测试 */
+
+/**
+ * 上一个发布标签：`git tag` 里版本号最大的 `Luna-v*`，排除本次要发的版本。
+ * 用它做 `--since` 基准，就能得到「相对上一版有改动」的文件集合。
+ */
+function previousReleaseTag(currentVersion) {
+  const r = spawnSync('git', ['tag', '--list', 'Luna-v*', '--sort=-v:refname'], {
+    cwd: ROOT, encoding: 'utf8',
+  });
+  if (r.status !== 0) return null;
+  const tags = String(r.stdout ?? '').split('\n').map((s) => s.trim()).filter(Boolean);
+  return tags.find((t) => t !== `Luna-v${currentVersion}`) ?? null;
+}
 
 if (has('--skip-tests')) {
-  step(2, '完整测试流程 —— 已跳过（--skip-tests）');
-  log('  ⚠ 发布前强烈建议跑完整测试：pnpm test:full');
-} else {
-  step(2, '完整测试流程（发布前必须全绿）');
+  step(2, '测试流程 —— 已跳过（--skip-tests）');
+  log('  ⚠ 仅限调试：正式发布不要跳过');
+} else if (has('--full-tests')) {
+  // 用户明确要求时才跑：跑之前先按 docs/测试流程.md §4.4 复核一遍测试内容、剔除重复项
+  step(2, '完整测试流程（--full-tests：用户明确要求）');
+  log('  ⚠ 提醒：跑完整流程前应先复核测试内容、剔除重复项（docs/测试流程.md §4.4）');
   const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'check', 'run.mjs'), '--full'], {
     cwd: ROOT, stdio: 'inherit',
   });
   if (r.status !== 0) fail('测试未通过，已中止发布。');
   log('\n  ✓ 完整测试流程通过');
+} else {
+  const prevTag = previousReleaseTag(fullVersion);
+  /*
+   * 自动判定是**文件级**的：改动一旦落在公共文件（public/app.js、styles.css）上，
+   * 映射出来的区域会接近全量，达不到"只测改动功能"的目的。
+   * 因此支持 --areas=<列表> 由人按**本次真正改动的功能**明确指定（推荐）。
+   */
+  const areasArg = argv.find((a) => a.startsWith('--areas='))?.slice('--areas='.length);
+  if (areasArg) {
+    step(2, `指定区域测试（--areas=${areasArg}）`);
+    const r = spawnSync(process.execPath,
+      [path.join(ROOT, 'tools', 'check', 'run.mjs'), `--area=${areasArg}`], { cwd: ROOT, stdio: 'inherit' });
+    if (r.status !== 0) fail('指定区域的测试未通过，已中止发布。');
+    log('\n  ✓ 指定区域测试通过');
+    log('    需要全面回归时：node tools/release/build.mjs --full-tests');
+  } else {
+    step(2, prevTag ? `按改动测试（相对上一版 ${prevTag}）` : '按改动测试（未找到上一版标签，退回"相对工作区改动"）');
+    const args = [path.join(ROOT, 'tools', 'check', 'run.mjs'), '--changed'];
+    if (prevTag) args.push(`--since=${prevTag}`);
+    const r = spawnSync(process.execPath, args, { cwd: ROOT, stdio: 'inherit' });
+    if (r.status !== 0) fail('改动区域的测试未通过，已中止发布。');
+    log('\n  ✓ 改动区域测试通过（未改动的功能按约定不重复跑）');
+    log('    改动集中在公共文件、自动范围过宽时，用 --areas=区域1,区域2 明确指定');
+    log('    需要全面回归时：node tools/release/build.mjs --full-tests');
+  }
 }
 
 /* ------------------------------------------------------------ 3. 清理产物 */
