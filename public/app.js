@@ -1144,13 +1144,17 @@ async function prefetchWholeAlbum(album) {
     const { result, tag } = await api('/api/archive/prefetch', {
       method: 'POST', body: { albumId: album.id, mode: 'album' },
     });
+    // 歌词/台本成员随预读一起落盘，成功时如实告诉用户
+    const lyricPart = result.lyrics?.done
+      ? `，含 ${result.lyrics.done} 个歌词/台本文件`
+      : (result.lyrics?.failed ? `，${result.lyrics.failed} 个歌词文件未能预读` : '');
     if (!result.total) {
       toast('该专辑没有包内曲目，无需预读');
     } else if (result.failed) {
       const first = result.items.find((i) => !i.ok);
       toast(`预读完成 ${result.done}/${result.total}，部分未能完成：${first?.reason ?? first?.code ?? ''}`, true);
     } else {
-      toast(`已预读 ${result.done} 条曲目（${fmtBytes(result.bytes)}）`
+      toast(`已预读 ${result.done} 条曲目（${fmtBytes(result.bytes)}）${lyricPart}`
         + `${tag ? `，已打标签「${tag.name}」` : ''}`);
     }
   } catch (err) {

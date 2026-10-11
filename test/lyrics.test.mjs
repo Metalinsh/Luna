@@ -18,11 +18,109 @@ before(async () => {
 });
 
 after(() => {
-  fs.rmSync(dataDir, { recursive: true, force: true });
-  fs.rmSync(musicDir, { recursive: true, force: true });
+  /*
+   * lyrics.mjs 现在会读 `archive_members` 清单（压缩包歌词匹配），
+   * 因此本测试会间接打开临时库的 SQLite 句柄；Windows 上句柄未释放时
+   * 删目录会 EPERM —— 清理失败不该让整份测试判负。
+   * （与 gallery.test.mjs 同一处理方式。）
+   */
+  for (const dir of [dataDir, musicDir]) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  }
 });
 
-/* ---------------------------------------------------------------- 编码嗅探 */
+/* ------------------------------------------------- 压缩包成员的歌词匹配 */
+
+test('压缩包：包内 .vtt 按「完整音频名 + .vtt」匹配（实测 RJ01307571 命名）', async () => {
+  const store = await import('../server/db.mjs');
+  const archiveId = store.upsertArchive({
+    path: 'E:\\Music\\ASMR\\含字幕包.zip', format: 'zip', entryCount: 4,
+  }, [
+    { name: '1.正篇/mp3/01.开场.mp3', kind: 'audio', size: 1000 },
+    { name: '1.正篇/mp3/01.开场.mp3.vtt', kind: 'other', size: 100 },
+    { name: '1.正篇/mp3/02.正文.mp3', kind: 'audio', size: 2000 },
+    { name: '1.正篇/mp3/02.正文.mp3.vtt', kind: 'other', size: 200 },
+  ]);
+  const track = {
+    id: 9001,
+    archive_id: archiveId,
+    member_path: '1.正篇/mp3/01.开场.mp3',
+    path: `E:\\Music\\ASMR\\含字幕包.zip\u00001.正篇/mp3/01.开场.mp3`,
+    filename: '01.开场.mp3',
+    track_no: 1,
+  };
+  const found = lyrics.findArchiveLyricsMember(track, [track]);
+  assert.equal(found?.level, 'l1v');
+  assert.equal(found?.memberPath, '1.正篇/mp3/01.开场.mp3.vtt');
+
+  // 另一条曲目各取各的，不串台
+  const other = { ...track, id: 9002, member_path: '1.正篇/mp3/02.正文.mp3', filename: '02.正文.mp3', track_no: 2 };
+  const found2 = lyrics.findArchiveLyricsMember(other, [other]);
+  assert.equal(found2?.memberPath, '1.正篇/mp3/02.正文.mp3.vtt');
+});
+
+test('压缩包：同目录同名 .lrc 走 L1，且不跨目录匹配', async () => {
+  const store = await import('../server/db.mjs');
+  const archiveId = store.upsertArchive({
+    path: 'E:\\Music\\ASMR\\目录隔离.zip', format: 'zip', entryCount: 5,
+  }, [
+    { name: 'A/01.mp3', kind: 'audio', size: 10 },
+    { name: 'A/01.lrc', kind: 'other', size: 1 },
+    { name: 'B/01.mp3', kind: 'audio', size: 10 },
+    { name: 'B/01.lrc', kind: 'other', size: 1 },
+    { name: 'readme.txt', kind: 'other', size: 1 },
+  ]);
+  const a = { id: 9101, archive_id: archiveId, member_path: 'A/01.mp3', filename: '01.mp3', track_no: 1 };
+  const b = { id: 9102, archive_id: archiveId, member_path: 'B/01.mp3', filename: '01.mp3', track_no: 1 };
+  assert.equal(lyrics.findArchiveLyricsMember(a, [a, b])?.memberPath, 'A/01.lrc');
+  assert.equal(lyrics.findArchiveLyricsMember(b, [a, b])?.memberPath, 'B/01.lrc');
+});
+
+test('压缩包：只有 readme/台本时不会误配到曲目上', async () => {
+  const store = await import('../server/db.mjs');
+  const archiveId = store.upsertArchive({
+    path: 'E:\\Music\\ASMR\\无字幕.zip', format: 'zip', entryCount: 4,
+  }, [
+    { name: '音声/tr01.mp3', kind: 'audio', size: 10 },
+    { name: '音声/tr02.mp3', kind: 'audio', size: 10 },
+    { name: 'りどみ.txt', kind: 'other', size: 1 },
+    { name: '音声/使用方法.txt', kind: 'other', size: 1 },
+  ]);
+  const t = { id: 9201, archive_id: archiveId, member_path: '音声/tr01.mp3', filename: 'tr01.mp3', track_no: 1 };
+  assert.equal(lyrics.findArchiveLyricsMember(t, [t]), null, '读我/说明文件不能当歌词');
+});
+
+test('压缩包：整专辑共用 album.lrc 也能命中', async () => {
+  const store = await import('../server/db.mjs');
+  const archiveId = store.upsertArchive({
+    path: 'E:\\Music\\ASMR\\整专共用.zip', format: 'zip', entryCount: 3,
+  }, [
+    { name: '碟/01.mp3', kind: 'audio', size: 10 },
+    { name: '碟/02.mp3', kind: 'audio', size: 10 },
+    { name: '碟/album.lrc', kind: 'other', size: 1 },
+  ]);
+  const t = { id: 9301, archive_id: archiveId, member_path: '碟/01.mp3', filename: '01.mp3', track_no: 1 };
+  const found = lyrics.findArchiveLyricsMember(t, [t]);
+  assert.equal(found?.level, 'shared');
+  assert.equal(found?.memberPath, '碟/album.lrc');
+});
+
+test('压缩包：非包内曲目（没有 archive_id）直接返回 null', () => {
+  assert.equal(lyrics.findArchiveLyricsMember({ member_path: 'A/01.mp3' }, []), null);
+  assert.equal(lyrics.findArchiveLyricsMember(null, []), null);
+});
+
+test('匹配阶梯：纯函数版本与磁盘口径一致（L1 优先于 L1v 与 L3）', () => {
+  const files = ['01.开场.mp3.lrc', '01.开场.lrc', '01.开场.mp3.vtt', '无关文件.txt'];
+  const hit = lyrics.matchLyricName({ files, stem: '01.开场', filename: '01.开场.mp3', trackNo: 1 });
+  assert.equal(hit.name, '01.开场.lrc', 'L1（同名 .lrc）优先');
+  const noSameName = lyrics.matchLyricName({
+    files: ['01.开场.mp3.vtt', '无关文件.txt'], stem: '01.开场', filename: '01.开场.mp3', trackNo: 1,
+  });
+  assert.equal(noSameName.name, '01.开场.mp3.vtt', '没有同名时用 L1v');
+  assert.equal(noSameName.level, 'l1v');
+});
+
 
 test('编码：UTF-8 BOM 被正确剥离并识别', () => {
   const buf = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('[00:01.00]你好', 'utf8')]);

@@ -168,6 +168,52 @@ try {
   await ev(`localStorage.removeItem('npCoverWidth'); localStorage.removeItem('lyricFontSize');
     document.querySelector('#npClose')?.click(); true`);
   console.log('  （已复位封面宽度与歌词字号）');
+
+  /*
+   * 压缩包歌词：包内字幕（实测 `<音频名>.mp3.vtt`）必须能识别，
+   * 并且**随预读一起落盘**。只对单条曲目做预读，副作用是几 MB 缓存。
+   */
+  console.log('\n— 压缩包歌词：识别 + 随预读落盘 —');
+  const albums = (await j('/api/albums?limit=300&kind=voice')).albums ?? [];
+  let sample = null;
+  for (const a of albums) {
+    const d = await j(`/api/albums/${a.id}`);
+    for (const row of d.tracks ?? []) {
+      for (const v of row.variants ?? []) {
+        if (v.source_kind !== 'archive_member' || v.file_kind === 'video') continue;
+        const lx = await j(`/api/tracks/${v.track_id}/lyrics`);
+        if (lx.available && lx.source === 'archive') {
+          sample = { variant: v, lyrics: lx };
+          break;
+        }
+      }
+      if (sample) break;
+    }
+    if (sample) break;
+  }
+
+  if (!sample) {
+    console.log('  （库里没有「包内带字幕」的压缩包曲目，跳过 —— 不算失败）');
+  } else {
+    ok('包内字幕能被识别为歌词', sample.lyrics.available === true && sample.lyrics.lines.length > 0,
+      `${sample.lyrics.level} · ${sample.lyrics.lines.length} 行 · ${sample.lyrics.path}`);
+    ok('歌词来源标记为压缩包', sample.lyrics.source === 'archive', sample.lyrics.source);
+
+    const pref = await (await fetch(`${API}/api/archive/prefetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trackId: sample.variant.track_id }),
+    })).json();
+    const ly = pref.result?.lyrics;
+    ok('预读单曲时会连歌词一起预读', ly?.total >= 1 && ly?.done >= 1,
+      `歌词 ${ly?.done ?? 0}/${ly?.total ?? 0} · ${ly?.bytes ?? 0} 字节`);
+    ok('预读项标明匹配到的级别', (ly?.items ?? []).length > 0
+      && (ly.items).every((i) => typeof i.level === 'string'),
+    (ly?.items ?? []).map((i) => i.level).join(','));
+
+    const after = await j(`/api/tracks/${sample.variant.track_id}/lyrics`);
+    ok('预读后歌词仍可读', after.available === true, `${after.lines.length} 行 · ${after.path}`);
+  }
 } catch (err) {
   console.error('验证异常：', err.message);
   fail += 1;

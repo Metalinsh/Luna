@@ -90,11 +90,11 @@ export const AREAS = [
   {
     id: 'lyrics',
     title: '歌词与字幕',
-    desc: 'LRC/VTT/SRT/ASS 识别与解析、台本镜像目录、单曲详情布局、字号 A+/A-',
-    unit: [],
+    desc: 'LRC/VTT/SRT/ASS 识别与解析、台本镜像目录、单曲详情布局、字号 A+/A-、压缩包内字幕的识别与随预读落盘',
+    unit: ['test/lyrics.test.mjs'],
     ui: ['check/lyrics.mjs'],
     app: true,
-    covers: ['server/lyrics.mjs', 'public/app.js', 'public/styles.css'],
+    covers: ['server/lyrics.mjs', 'server/index.mjs', 'public/app.js', 'public/styles.css'],
   },
   {
     id: 'player',

@@ -10,6 +10,9 @@ import path from 'node:path';
 
 import { parseFile } from 'music-metadata';
 
+import * as store from './db.mjs';
+import { probeZip, findEntry, readEntryData, splitVirtualPath } from './zip-reader.mjs';
+
 export const LYRICS_CACHE_LIMIT = 50;
 const cache = new Map(); // key: `${filePath}:${mtimeMs}` → 解析结果
 
@@ -400,6 +403,81 @@ async function findMirroredScript(audioDir, stem, filename) {
  * 找出该曲目的歌词/字幕文件。
  * 层级：l1 同目录同名 → l1v 完整文件名+.vtt → l2 音轨号 → l3 相似度 → script 镜像台本 → shared 整专辑 → txt 纯文本
  */
+/**
+ * 歌词匹配阶梯（磁盘目录与压缩包成员目录**共用同一套规则**）。
+ *
+ * 只依赖「同一目录下有哪些文件名」，因此两个来源的匹配口径完全一致：
+ *   L1   同目录同名（同步格式优先，`.txt` 记为 txt 级）
+ *   L1v  完整音频文件名 + 扩展名（实测 `01.xxx.mp3.vtt`，RJ01307571）
+ *   L2   去掉音轨号前缀；或直接用音轨号命名（01.lrc / 1.lrc）
+ *   L3   相似度 ≥0.8，且排除已被同专辑其它曲目精确占用的名字
+ *
+ * @returns {{name:string, level:string, score?:number}|null}
+ */
+export function matchLyricName({
+  files, stem, filename, trackNo = null, claimed = new Set(),
+}) {
+  if (!files?.length) return null;
+  const byLower = new Map(files.map((f) => [String(f).toLowerCase(), String(f)]));
+  const pick = (name) => byLower.get(String(name).toLowerCase()) ?? null;
+  const hasLyricExt = (f) => LYRIC_EXTS.includes(path.extname(f).toLowerCase());
+
+  // L1：同目录同名（任意支持的扩展名，同步格式优先）
+  for (const ext of LYRIC_EXTS) {
+    const hit = pick(`${stem}${ext}`);
+    if (hit) return { name: hit, level: ext === '.txt' ? 'txt' : 'l1' };
+  }
+
+  // L1v：完整音频文件名 + 扩展名（实测 <音频名>.wav.vtt / <音频名>.mp3.vtt）
+  for (const ext of LYRIC_EXTS) {
+    const hit = pick(`${filename}${ext}`);
+    if (hit) return { name: hit, level: 'l1v' };
+  }
+
+  // L2：去掉音轨号前缀；或直接用音轨号命名（01.lrc / 1.lrc）
+  const stripped = String(stem).replace(/^\d+[\s._\-]*/, '');
+  const numbered = [stripped, trackNo != null ? String(trackNo) : null,
+    trackNo != null ? String(trackNo).padStart(2, '0') : null].filter(Boolean);
+  for (const candidate of numbered) {
+    for (const ext of LYRIC_EXTS) {
+      const hit = pick(`${candidate}${ext}`);
+      if (hit) return { name: hit, level: 'l2' };
+    }
+  }
+  const byNumber = files.find((f) => {
+    if (!hasLyricExt(f)) return false;
+    const n = leadingNumber(f);
+    return n !== null && trackNo != null && n === Number(trackNo);
+  });
+  if (byNumber) return { name: byNumber, level: 'l2' };
+
+  // L3：相似度匹配（阈值 0.8），排除已被其他曲目精确占用的文件
+  let best = null;
+  for (const file of files) {
+    if (!hasLyricExt(file)) continue;
+    if (claimed.has(file.toLowerCase())) continue;
+    const score = similarity(file, stem);
+    if (score >= 0.8 && (!best || score > best.score)) best = { file, score };
+  }
+  if (best) return { name: best.file, level: 'l3', score: best.score };
+
+  return null;
+}
+
+/** 整专辑共用歌词：album.lrc 或与专辑同名的 .lrc（磁盘与压缩包共用） */
+export function matchSharedLyric({ files, album = null }) {
+  if (!files?.length) return null;
+  const byLower = new Map(files.map((f) => [String(f).toLowerCase(), String(f)]));
+  for (const candidate of ['album', album ?? '']) {
+    if (!candidate) continue;
+    for (const ext of LYRIC_EXTS) {
+      const hit = byLower.get(`${candidate}${ext}`.toLowerCase());
+      if (hit) return { name: hit, level: 'shared' };
+    }
+  }
+  return null;
+}
+
 export async function findLyricsFile(track, allTracks = []) {
   const dir = track.dir ?? path.dirname(track.path);
   const filename = track.filename ?? path.basename(track.path);
@@ -413,41 +491,8 @@ export async function findLyricsFile(track, allTracks = []) {
 
   const files = entries.filter((e) => e.isFile()).map((e) => e.name);
   const byLower = new Map(files.map((f) => [f.toLowerCase(), f]));
-  const pick = (name) => {
-    const hit = byLower.get(name.toLowerCase());
-    return hit ? path.join(dir, hit) : null;
-  };
 
-  // L1：同目录同名（任意支持的扩展名，同步格式优先）
-  for (const ext of LYRIC_EXTS) {
-    const hit = pick(`${stem}${ext}`);
-    if (hit) return { path: hit, level: ext === '.txt' ? 'txt' : 'l1' };
-  }
-
-  // L1v：完整音频文件名 + 扩展名（实测 <音频名>.wav.vtt / <音频名>.mp3.vtt）
-  for (const ext of LYRIC_EXTS) {
-    const hit = pick(`${filename}${ext}`);
-    if (hit) return { path: hit, level: 'l1v' };
-  }
-
-  // L2：去掉音轨号前缀；或直接用音轨号命名（01.lrc / 1.lrc）
-  const stripped = stem.replace(/^\d+[\s._\-]*/, '');
-  const numbered = [stripped, track.track_no != null ? String(track.track_no) : null,
-    track.track_no != null ? String(track.track_no).padStart(2, '0') : null].filter(Boolean);
-  for (const candidate of numbered) {
-    for (const ext of LYRIC_EXTS) {
-      const hit = pick(`${candidate}${ext}`);
-      if (hit) return { path: hit, level: 'l2' };
-    }
-  }
-  const byNumber = files.find((f) => {
-    if (!LYRIC_EXTS.includes(path.extname(f).toLowerCase())) return false;
-    const n = leadingNumber(f);
-    return n !== null && track.track_no != null && n === Number(track.track_no);
-  });
-  if (byNumber) return { path: path.join(dir, byNumber), level: 'l2' };
-
-  // L3：相似度匹配（阈值 0.8），排除已被其他曲目精确占用的文件
+  // L3 用：已被其他曲目精确占用的文件名
   const claimed = new Set();
   for (const other of allTracks) {
     if (other.id === track.id) continue;
@@ -456,14 +501,15 @@ export async function findLyricsFile(track, allTracks = []) {
       if (byLower.has(`${otherBase}${ext}`.toLowerCase())) claimed.add(`${otherBase}${ext}`.toLowerCase());
     }
   }
-  let best = null;
-  for (const file of files) {
-    if (!LYRIC_EXTS.includes(path.extname(file).toLowerCase())) continue;
-    if (claimed.has(file.toLowerCase())) continue;
-    const score = similarity(file, stem);
-    if (score >= 0.8 && (!best || score > best.score)) best = { file, score };
+
+  const matched = matchLyricName({ files, stem, filename, trackNo: track.track_no, claimed });
+  if (matched) {
+    return {
+      path: path.join(dir, matched.name),
+      level: matched.level,
+      ...(matched.score != null ? { score: matched.score } : {}),
+    };
   }
-  if (best) return { path: path.join(dir, best.file), level: 'l3', score: best.score };
 
   // script：镜像目录里的台本（可能没有扩展名一致的同步格式）
   const mirrored = await findMirroredScript(dir, stem, filename);
@@ -472,21 +518,61 @@ export async function findLyricsFile(track, allTracks = []) {
     return { path: mirrored, level: 'script', unsynced: ext === '.txt' };
   }
 
-  // 整专辑共用：album.lrc 或与专辑同名的 .lrc
-  for (const candidate of ['album', track.album ?? '']) {
-    if (!candidate) continue;
-    for (const ext of LYRIC_EXTS) {
-      const hit = pick(`${candidate}${ext}`);
-      if (hit) return { path: hit, level: 'shared' };
-    }
-  }
+  const shared = matchSharedLyric({ files, album: track.album });
+  if (shared) return { path: path.join(dir, shared.name), level: shared.level };
 
   return null;
 }
 
+/**
+ * 压缩包成员的歌词匹配：在**同一成员目录**内按与磁盘完全相同的阶梯找。
+ *
+ * 纯计算（只读 `archive_members` 清单），不解压任何数据；真正的读取交给
+ * `readArchiveLyricsMember()` —— 预读过的直接读缓存文件，没预读的现场解出这一个成员。
+ *
+ * @returns {{memberPath:string, level:string, score?:number}|null}
+ */
+export function findArchiveLyricsMember(track, allTracks = []) {
+  const archiveId = Number(track?.archive_id);
+  const memberPath = String(track?.member_path ?? splitVirtualPath(track?.path)?.memberPath ?? '')
+    .replace(/\\/g, '/');
+  if (!archiveId || !memberPath) return null;
+  const dir = path.posix.dirname(memberPath);
+  const filename = path.posix.basename(memberPath);
+  const stem = stripAudioExt(filename);
+
+  const inDir = (p) => path.posix.dirname(String(p).replace(/\\/g, '/')) === dir;
+  const files = store.listArchiveMembers(archiveId)
+    .map((m) => String(m.member_path ?? '').replace(/\\/g, '/'))
+    .filter((p) => p && p !== memberPath && inDir(p))
+    .map((p) => path.posix.basename(p));
+  if (!files.length) return null;
+
+  const byLower = new Set(files.map((f) => f.toLowerCase()));
+  const claimed = new Set();
+  for (const other of allTracks ?? []) {
+    if (other.id === track.id || Number(other.archive_id) !== archiveId) continue;
+    const otherName = String(other.member_path ?? '').replace(/\\/g, '/');
+    if (!inDir(otherName)) continue;
+    const otherStem = stripAudioExt(path.posix.basename(otherName));
+    for (const ext of LYRIC_EXTS) {
+      const candidate = `${otherStem}${ext}`.toLowerCase();
+      if (byLower.has(candidate)) claimed.add(candidate);
+    }
+  }
+
+  const matched = matchLyricName({ files, stem, filename, trackNo: track.track_no, claimed })
+    ?? matchSharedLyric({ files, album: track.album });
+  if (!matched) return null;
+  return {
+    memberPath: dir === '.' ? matched.name : `${dir}/${matched.name}`,
+    level: matched.level,
+    ...(matched.score != null ? { score: matched.score } : {}),
+  };
+}
+
 /** 内嵌歌词（ID3 USLT/SYLT、Vorbis LYRICS、MP4 ©lyr） */
-export async function readEmbeddedLyrics(filePath) {
-  try {
+export async function readEmbeddedLyrics(filePath) {  try {
     const { common } = await parseFile(filePath, { duration: false, skipCovers: true });
     const lyrics = common.lyrics;
     if (!Array.isArray(lyrics) || !lyrics.length) return null;
@@ -508,6 +594,62 @@ export async function readEmbeddedLyrics(filePath) {
   }
 }
 
+/**
+ * 读取压缩包内的歌词成员。
+ *
+ * 优先读**预读过的缓存文件**（预读专辑时歌词一并落盘，打开歌词零解压）；
+ * 没预读的则现场解出这一个成员 —— 歌词只有几十 KB，代价可忽略，
+ * 因此「不预读也能看到歌词」，预读只是让它更快。
+ */
+export async function readArchiveLyricsMember(track, found) {
+  const archiveId = Number(track?.archive_id);
+  const memberPath = found?.memberPath;
+  if (!archiveId || !memberPath) return null;
+  const level = found.level ?? 'l1';
+
+  const empty = (error) => ({
+    available: false, source: null, level: null, path: memberPath,
+    encoding: null, synced: false, meta: {}, lines: [], ...(error ? { error } : {}),
+  });
+
+  const archive = store.getArchiveById(archiveId);
+  if (!archive) return empty('ARCHIVE_MISSING');
+
+  // 1) 已预读：直接走缓存文件（沿用 mtime 内存缓存与解析器选择）
+  const entry = store.getCacheEntry(archiveId, memberPath);
+  if (entry?.file_path) {
+    try {
+      await fsp.access(entry.file_path);
+      store.touchCacheEntry(archiveId, memberPath);
+      const cached = await readLyricsFile(entry.file_path, 'archive', level);
+      if (cached.available) return cached;
+    } catch { /* 缓存文件不在 / 读失败 → 走现场解压 */ }
+  }
+
+  // 2) 现场解出该成员
+  try {
+    const info = await probeZip(archive.path);
+    const member = findEntry(info.entries, memberPath);
+    if (!member) return empty('MEMBER_MISSING');
+    const buffer = await readEntryData(archive.path, member);
+    const { text, encoding } = sniffDecode(buffer);
+    const ext = path.posix.extname(memberPath).toLowerCase();
+    const parsed = parseSubtitle(text, ext);
+    const format = ['.vtt', '.srt', '.ass', '.ssa', '.lrc'].includes(ext) ? ext.slice(1) : 'txt';
+    return {
+      available: parsed.lines.length > 0,
+      source: 'archive',
+      level,
+      path: memberPath,
+      encoding,
+      format,
+      ...parsed,
+    };
+  } catch (err) {
+    return empty(err.code ?? err.message);
+  }
+}
+
 /* -------------------------------------------------------------- 主入口 */
 
 /**
@@ -523,13 +665,37 @@ export async function getLyricsForTrack(track, allTracks = []) {
     if (result.available) return result;
   }
 
+  /*
+   * 压缩包成员：磁盘那套 readdir 对虚拟路径无效（成员不在文件系统里）。
+   * 因此在磁盘匹配之前，先按**包内成员清单**走同一套阶梯匹配，
+   * 命中后读缓存文件或现场解出该成员。
+   */
+  const isVirtualMember = track.source_kind === 'archive_member'
+    && String(track.path ?? '').includes('\u0000');
+  if (isVirtualMember) {
+    const found = findArchiveLyricsMember(track, allTracks);
+    if (found) {
+      const result = await readArchiveLyricsMember(track, found);
+      if (result?.available) return result;
+    }
+  }
+
   const found = await findLyricsFile(track, allTracks);
   if (found) {
     const result = await readLyricsFile(found.path, found.level === 'txt' ? 'txt' : 'lrc', found.level);
     if (result.available) return result;
   }
 
-  const embedded = await readEmbeddedLyrics(track.path);
+  /*
+   * 内嵌歌词：压缩包成员要先落到缓存才能解析。
+   * 预读过的曲目因此也能用上包内曲目的内嵌歌词（此前一律读不到）。
+   */
+  let embeddedPath = track.path;
+  if (isVirtualMember && track.archive_id && track.member_path) {
+    const entry = store.getCacheEntry(track.archive_id, track.member_path);
+    if (entry?.file_path) embeddedPath = entry.file_path;
+  }
+  const embedded = await readEmbeddedLyrics(embeddedPath);
   if (embedded) {
     const parsed = parseLrc(embedded.raw);
     return {

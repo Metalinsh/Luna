@@ -1475,6 +1475,38 @@ app.post('/api/archive/prefetch', asyncRoute(async (req, res) => {
     }
   }
 
+  /*
+   * 歌词/台本成员一并预读。
+   *
+   * 歌词文件（`.lrc` 以及实测常见的 `<音频名>.mp3.vtt`）就在包内同目录，
+   * 不预读的话每次打开歌词都要现场解压；预读后直接从缓存读。
+   * 歌词失败不影响「已预读」判定 —— 音频才是能不能播的关键。
+   */
+  const lyricTargets = new Map();
+  for (const t of tracks) {
+    if (!t.archive_id || !t.member_path) continue;
+    const found = lyricsApi.findArchiveLyricsMember(t, tracks);
+    if (!found) continue;
+    const key = `${t.archive_id}\u0000${found.memberPath}`;
+    if (lyricTargets.has(key)) continue;
+    lyricTargets.set(key, { archive_id: t.archive_id, member_path: found.memberPath, level: found.level });
+  }
+  const lyricItems = [];
+  let lyricDone = 0;
+  let lyricFailed = 0;
+  let lyricBytes = 0;
+  for (const member of lyricTargets.values()) {
+    const r = await collection.ensureMemberCached(member, { protect });
+    if (r.ok) {
+      lyricDone += 1;
+      lyricBytes += r.bytes;
+      lyricItems.push({ memberPath: member.member_path, level: member.level, ok: true, cached: r.cached, bytes: r.bytes });
+    } else {
+      lyricFailed += 1;
+      lyricItems.push({ memberPath: member.member_path, level: member.level, ok: false, code: r.code, reason: r.reason });
+    }
+  }
+
   // 整张预读**全部成功**才打「已预读」标签（收入「风格」分类，专辑墙可直接筛）
   let tag = null;
   if (tagAlbumId && tracks.length && failed === 0) {
@@ -1489,6 +1521,11 @@ app.post('/api/archive/prefetch', asyncRoute(async (req, res) => {
     result: {
       ok: failed === 0, total: tracks.length, done, failed, bytes,
       ms: Date.now() - t0, label, items,
+      // 随预读一起落盘的歌词/台本成员（失败不影响 overall ok）
+      lyrics: {
+        total: lyricTargets.size, done: lyricDone, failed: lyricFailed,
+        bytes: lyricBytes, items: lyricItems,
+      },
     },
     tag,
   });
@@ -1507,7 +1544,22 @@ app.post('/api/albums/:id/cache/clear', asyncRoute(async (req, res) => {
   if (!album) return res.status(404).json({ error: '专辑不存在' });
 
   const tracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
-  const result = await collection.clearAlbumCache(tracks);
+  /*
+   * 歌词成员是随预读一起落盘的，清缓存时必须一并清掉 ——
+   * 否则「已清除该专辑缓存」之后，磁盘上仍留着它的歌词文件。
+   * 复用 clearAlbumCache 的口径：只删缓存目录内的文件。
+   */
+  const lyricMembers = [];
+  for (const t of tracks) {
+    if (!t.archive_id || !t.member_path) continue;
+    const found = lyricsApi.findArchiveLyricsMember(t, tracks);
+    if (found) {
+      lyricMembers.push({
+        source_kind: 'archive_member', archive_id: t.archive_id, member_path: found.memberPath,
+      });
+    }
+  }
+  const result = await collection.clearAlbumCache([...tracks, ...lyricMembers]);
 
   let untagged = 0;
   const tag = tagsApi.findTagByName(PREFETCHED_TAG);
