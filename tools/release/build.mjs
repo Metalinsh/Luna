@@ -236,17 +236,53 @@ fs.rmSync(verifyTmp, { recursive: true, force: true });
 step(7, '生成发布压缩包');
 const zipPath = path.join(RELEASE, zipName);
 fs.rmSync(zipPath, { force: true });
-// Windows 10+ 自带 bsdtar，比 Compress-Archive 快很多
-const t = spawnSync('tar', ['-a', '-c', '-f', zipPath, appDirName], {
-  cwd: RELEASE, stdio: 'inherit',
-});
-if (t.status !== 0 || !fs.existsSync(zipPath)) {
-  log('  ⚠ tar 打包失败，回退到 Compress-Archive');
+
+/**
+ * 优先用 **Windows 自带的 bsdtar**（`%SystemRoot%\System32\tar.exe`，libarchive）。
+ *
+ * ⚠ 不能直接用 PATH 上的 `tar`：多数环境里它是 **GNU tar**，而 GNU tar **不会写 zip** ——
+ *   `-a` 只认 gz/bz2/xz 等后缀，给它 `.zip` 既不报错也不压缩，直接产出**改了名的 tar**，
+ *   而退出码仍是 0（实测：产物头是 `sub/` 而不是 `PK\x03\x04`）。
+ *   另外绝对路径里的盘符会被它当成「远程主机:路径」（`tar: Cannot connect to E:`）。
+ *   两者叠加的结果就是：要么白跑一趟再回退，要么**静默发出一个假 zip**。
+ *
+ * 因此这里固定用 bsdtar 的绝对路径，并且打包后**校验 ZIP 魔数**，不信任退出码。
+ */
+const BSDTAR = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
+
+/** 真 ZIP 以 'PK' 开头（bsdtar/GNU tar 的 tar 头则是文件名，绝不会是 PK） */
+function isRealZip(p) {
+  try {
+    const fd = fs.openSync(p, 'r');
+    const head = Buffer.alloc(2);
+    fs.readSync(fd, head, 0, 2, 0);
+    fs.closeSync(fd);
+    return head[0] === 0x50 && head[1] === 0x4b;
+  } catch { return false; }
+}
+
+/** 回退：PowerShell 的 Compress-Archive（慢，但一定是真 ZIP） */
+function zipWithCompressArchive() {
+  fs.rmSync(zipPath, { force: true });   // 清掉可能留下的假 zip
   const ps = spawnSync('powershell.exe', ['-NoProfile', '-Command',
     `Compress-Archive -Path '${path.join(RELEASE, appDirName)}' -DestinationPath '${zipPath}' -Force`],
   { cwd: RELEASE, stdio: 'inherit' });
-  if (ps.status !== 0 || !fs.existsSync(zipPath)) fail('压缩包生成失败。');
+  return ps.status === 0 && fs.existsSync(zipPath) && isRealZip(zipPath);
 }
+
+let zipped = false;
+if (fs.existsSync(BSDTAR)) {
+  // -f 传相对名即可（cwd 已是 RELEASE），顺带避开盘符解析问题
+  const t = spawnSync(BSDTAR, ['-a', '-c', '-f', zipName, appDirName], {
+    cwd: RELEASE, stdio: 'inherit',
+  });
+  zipped = t.status === 0 && isRealZip(zipPath);
+  if (!zipped) log('  ⚠ bsdtar 未成功产出 ZIP，回退到 Compress-Archive');
+} else {
+  log(`  ⚠ 未找到 Windows 自带 tar（${BSDTAR}），回退到 Compress-Archive`);
+}
+
+if (!zipped && !zipWithCompressArchive()) fail('压缩包生成失败。');
 log(`  ✓ ${zipName}  ${(fs.statSync(zipPath).size / 1024 / 1024).toFixed(1)} MB`);
 
 log('\n' + '═'.repeat(70));
