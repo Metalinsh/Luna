@@ -1659,7 +1659,7 @@ async function loadTagsView() {
         分类决定它在专辑墙上方显示在「风格 / 社团 / CV」哪一栏</span>
     </div>
     <div style="display:flex;gap:8px">
-      <input type="text" id="newTagName" placeholder="新建标签…" style="background:#0c0c11;border:1px solid var(--line-strong);border-radius:10px;padding:9px 12px;color:var(--fg);outline:none;flex:1;max-width:320px" />
+      <input type="text" id="newTagName" placeholder="新建标签…" style="background:var(--bg-l0);border:1px solid var(--line-strong);border-radius:10px;padding:9px 12px;color:var(--fg);outline:none;flex:1;max-width:320px" />
       <select id="newTagCat" class="tag-cat" title="新标签的分类">
         ${TAG_CATEGORY_META.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}
       </select>

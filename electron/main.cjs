@@ -37,19 +37,57 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (err) => log('未处理的 Promise 拒绝:', err));
 
 /**
- * 应用图标。打包后图标已嵌入 exe，但开发模式与任务栏仍需要从磁盘读取。
- * 优先用 256px 的 PNG，缺失时退回 exe 自带的图标。
+ * 图标文件查找。三种布局都要覆盖：
+ *   1. 开发模式：项目根目录的 build/
+ *   2. resources/app/build/  —— build/ 被打进 files 时
+ *   3. resources/build/      —— extraResources 拷贝（**发布包走这条**）
+ *
+ * ⚠ 曾经只找 icon.png 且漏了第 3 条，导致发布版里**一张图标都找不到**，
+ *   托盘于是拿到空图 → 任务栏托盘区一个空白图标（v1.2 实测缺陷）。
  */
-function appIconPath() {
-  const candidates = [
-    path.join(appRoot(), 'build', 'icon.png'),
-    path.join(__dirname, '..', 'build', 'icon.png'),
-    path.join(process.resourcesPath ?? '', 'build', 'icon.png'),
-  ];
-  for (const p of candidates) {
-    try { if (p && fs.existsSync(p)) return p; } catch { /* 忽略 */ }
+function iconFile(names = ['icon.png']) {
+  const roots = [appRoot(), path.join(__dirname, '..'), process.resourcesPath ?? ''];
+  for (const root of roots) {
+    for (const name of names) {
+      const p = root ? path.join(root, 'build', name) : null;
+      try { if (p && fs.existsSync(p)) return p; } catch { /* 忽略 */ }
+    }
   }
   return undefined;
+}
+
+/**
+ * 应用图标。打包后图标已嵌入 exe，但**托盘**必须自己给一张图，
+ * 开发模式下窗口图标也需要从磁盘读取。
+ */
+function appIconPath() {
+  return iconFile(['icon.png']);
+}
+
+/**
+ * 托盘图标：优先多尺寸 ICO（内含 16/24/32…，Windows 会挑最合适的一档，高 DPI 下不糊），
+ * 退回 PNG，最后退回 exe 自身图标。
+ *
+ * 全都拿不到时返回 null —— 宁可让窗口正常关闭，也不要留一个空白图标让用户找不到窗口。
+ */
+function loadTrayIcon() {
+  const file = iconFile(['icon.ico', 'icon.png']);
+  if (file) {
+    try {
+      const img = nativeImage.createFromPath(file);
+      if (!img.isEmpty()) {
+        return { image: file.endsWith('.ico') ? img : img.resize({ width: 16, height: 16 }), from: file };
+      }
+      log('托盘图标文件读取为空:', file);
+    } catch (err) {
+      log('读取托盘图标失败:', err);
+    }
+  }
+  try {
+    const fromExe = nativeImage.createFromPath(process.execPath);   // 打包后图标已嵌入 exe
+    if (!fromExe.isEmpty()) return { image: fromExe, from: `${process.execPath}（exe 内嵌图标）` };
+  } catch { /* 忽略 */ }
+  return null;
 }
 
 log('=== Luna 主进程启动 ===', {
@@ -114,14 +152,18 @@ function showMainWindow() {
 /** 托盘图标：只在真的需要（用户开了开关）时才创建，避免给不需要的人留一个图标 */
 function ensureTray() {
   if (tray) return tray;
+  const icon = loadTrayIcon();
+  if (!icon) {
+    log('找不到任何可用图标，放弃创建托盘（开关打开时也不收窗口，避免藏起窗口后找不回来）');
+    return null;
+  }
   try {
-    const iconPath = appIconPath();
-    const image = iconPath ? nativeImage.createFromPath(iconPath) : nativeImage.createEmpty();
-    tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: 16, height: 16 }));
+    tray = new Tray(icon.image);
   } catch (err) {
     log('创建托盘失败:', err);
     return null;
   }
+  log('托盘已创建，图标来源:', icon.from);
   tray.setToolTip('Luna · 本地音乐与音声库');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '显示主窗口', click: () => showMainWindow() },

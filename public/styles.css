@@ -118,7 +118,7 @@
 :root[data-mode="light"] {
   --bg-l0: #eef0f4; --bg-l1: #ffffff; --bg-l2: #f4f5f8;
   --line: rgba(0, 0, 0, 0.10); --line-strong: rgba(0, 0, 0, 0.18);
-  --fg: #1b1c22; --fg-dim: #565a66; --fg-faint: #868b99;
+  --fg: #1b1c22; --fg-dim: #565a66; --fg-faint: #6b7080;
   color-scheme: light;
   /* 叠加基色翻黑，浮层阴影也要减弱，否则浅底上像糊了一团 */
   --mix-fg: 0, 0, 0;
@@ -267,7 +267,7 @@ input, select { font: inherit; }
   display: inline-flex; align-items: center; gap: 7px;
   transition: background .15s, border-color .15s, transform .1s;
 }
-.btn:hover { background: #23232e; }
+.btn:hover { background: rgba(var(--mix-fg), .09); }
 .btn:active { transform: translateY(1px); }
 .btn-primary {
   background: linear-gradient(135deg, var(--accent), #5b4bd6);
@@ -350,7 +350,14 @@ select {
   box-shadow: var(--shadow-2);
 }
 .album-cover img { width: 100%; height: 100%; object-fit: cover; display: block; position: relative; z-index: 1; }
-.album-cover .placeholder {
+/*
+ * 封面占位（拿不到封面时显示专辑名首字）：
+ * 必须**绝对定位铺满容器**，否则它会参与正常流、把 <img> 顶下去 ——
+ * 实测详情页就是因为这条规则只写了 .album-cover，导致封面上方多出一个首字符。
+ * 同时维护 .album-cover 与 .detail-cover 两个容器。
+ */
+.album-cover .placeholder,
+.detail-cover .placeholder {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   font-size: 40px; font-weight: 700; color: var(--cover-ph-fg); z-index: 0;
   background: var(--cover-ph);
@@ -582,7 +589,7 @@ input[type="range"]::-webkit-slider-thumb {
 .dlg h3 { margin: 0; font-size: 17px; }
 .dlg .hint { margin: 0; color: var(--fg-dim); font-size: 12.5px; line-height: 1.6; }
 .dlg input[type="text"] {
-  background: #0c0c11; border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--bg-l0); border: 1px solid var(--line-strong); border-radius: 10px;
   padding: 11px 13px; color: var(--fg); outline: none;
 }
 .dlg input[type="text"]:focus { border-color: rgba(125,108,245,.7); }
@@ -728,7 +735,7 @@ body.is-selecting .select-mark { display: flex; }
   text-align: left; border: 1px solid var(--line); border-radius: 13px;
   background: var(--bg-elev); padding: 13px 15px; cursor: pointer; transition: all .15s;
 }
-.wb-group:hover { border-color: var(--line-strong); background: #1a1a23; }
+.wb-group:hover { border-color: var(--line-strong); background: var(--bg-l2); }
 .wb-group.is-active { border-color: rgba(125,108,245,.6); background: var(--accent-soft); }
 .wb-group .wb-count { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .wb-group .wb-label { color: var(--fg-dim); font-size: 12.5px; margin-top: 3px; }
@@ -766,7 +773,7 @@ body.is-selecting .select-mark { display: flex; }
 .tag-row .tag-swatch { width: 12px; height: 12px; border-radius: 4px; flex: none; cursor: pointer; }
 .tag-row .tag-name { font-weight: 600; font-size: 14px; min-width: 0; }
 .tag-row .tag-name input {
-  background: #0c0c11; border: 1px solid var(--line-strong); border-radius: 7px;
+  background: var(--bg-l0); border: 1px solid var(--line-strong); border-radius: 7px;
   padding: 4px 8px; color: var(--fg); font: inherit;
 }
 .tag-row .tag-stats { color: var(--fg-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -1002,7 +1009,7 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 .field label { font-size: 12px; color: var(--fg-faint); letter-spacing: .04em; }
 .field-row { display: flex; gap: 8px; align-items: center; }
 .field input[type="text"], .field input[type="number"] {
-  flex: 1; background: #0c0c11; border: 1px solid var(--line-strong); border-radius: 9px;
+  flex: 1; background: var(--bg-l0); border: 1px solid var(--line-strong); border-radius: 9px;
   padding: 9px 11px; color: var(--fg); outline: none; min-width: 0;
 }
 .field input:focus { border-color: rgba(125,108,245,.7); }
@@ -1033,7 +1040,7 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 }
 .track-edit-row .idx { color: var(--fg-faint); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .track-edit-row input {
-  background: #0c0c11; border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--bg-l0); border: 1px solid var(--line-strong); border-radius: 8px;
   padding: 7px 9px; color: var(--fg); outline: none; min-width: 0; font-size: 13px;
 }
 .track-edit-row input.is-dirty { border-color: rgba(240,184,102,.65); background: rgba(240,184,102,.06); }
@@ -1348,4 +1355,96 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 .pf-progress-text { display: flex; flex-direction: column; gap: 2px; }
 .pf-progress-text b { font-size: 12.5px; font-weight: 600; }
 .pf-progress-text span { font-size: 11px; color: var(--fg-faint); }
+
+/* ==================================================================
+ * 浅色模式的可见度修正（用户试用反馈）
+ *
+ * 深色主题下这些位置靠「浅色文字 + 半透明深底」取得对比，
+ * 换成浅色底之后同样的写法就变成「浅紫/浅灰压在浅底上」，必须单独处理。
+ * 只在 data-mode="light" 下生效，深色主题完全不受影响。
+ * ================================================================== */
+
+/* 1) 专辑墙多选：封面上的选择按钮改成**白色不透明**圆钮。
+ *    原来用的 rgba(0,0,0,.45) 半透明深底，压在明亮封面上几乎看不见。 */
+:root[data-mode="light"] .album-card .select-mark {
+  background: #fff;
+  border-color: rgba(0, 0, 0, .38);
+  color: rgba(0, 0, 0, .28);            /* 未选中：淡勾，提示这里可以点 */
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .28);
+}
+:root[data-mode="light"] .album-card.is-selected .select-mark {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+/* 顶栏「选择」按钮：同一个入口，浅色下改成白底 + 深色字 */
+:root[data-mode="light"] #selectModeBtn {
+  background: #fff; border-color: rgba(0, 0, 0, .22); color: var(--fg);
+}
+:root[data-mode="light"] #selectModeBtn:hover {
+  background: #fff; border-color: var(--accent); color: var(--accent);
+}
+:root[data-mode="light"] #selectModeBtn.is-active {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+/* 2) 侧栏选中项 + 3) 专辑墙标签选中：文字回到正文色（近黑）。
+ *    深色主题仍用 #cdc6ff 提亮，浅色主题必须压深。 */
+:root[data-mode="light"] .nav-item.is-active,
+:root[data-mode="light"] .tag-chip.is-active {
+  color: var(--fg);
+}
+:root[data-mode="light"] .tag-chip.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* 4) 专辑详情页的次要文字：浅色下统一提到正文色，不再用浅灰 */
+:root[data-mode="light"] #albumDetail :is(
+  .detail-kind,
+  .detail-meta,
+  .detail-artist,
+  .credit-label,
+  .voice-notes,
+  .voice-section-title,
+  .tag-count
+) { color: var(--fg); }
+:root[data-mode="light"] #albumDetail .track-row.is-head { color: var(--fg); }
+
+/* 详情页提示条里的加粗文字（深色主题用浅琥珀 #ffd08a，浅底上会糊掉） */
+:root[data-mode="light"] .src-warn b { color: var(--warn); }
+
+/* 「关键缺失」小胶囊：浅红字压在浅红底上同样过淡 */
+:root[data-mode="light"] .miss-chip.is-critical {
+  background: rgba(192, 57, 43, .12);
+  color: #a4262c;
+  border-color: rgba(192, 57, 43, .34);
+}
+
+/* ------------------------------------------------------------------
+ * 同一类问题的其余落点（都是「深色主题下用浅紫/浅红提亮」的写法，
+ * 换到浅色底就变成浅色压浅色）。一并按主题语义色收敛。
+ * ------------------------------------------------------------------ */
+
+/* 浅紫 → 主题强调色（选中的播放模式、批量条、进行中的任务、正在播放的曲目、
+   标签弹窗里已选中的标签） */
+:root[data-mode="light"] .bulkbar span,
+:root[data-mode="light"] .jobbar-text,
+:root[data-mode="light"] .track-row.is-playing .t-title,
+:root[data-mode="light"] .tag-pill.is-on { color: var(--accent); }
+
+/* 批量条里的音声专属按钮：浅青字改深青 */
+:root[data-mode="light"] #bulkArtistBtn,
+:root[data-mode="light"] #bulkCircleBtn { color: var(--accent-2); }
+
+/* 视频版 chip 的粉色：浅底上要压深，否则白底粉字看不清 */
+:root[data-mode="light"] .ver-chip.is-video { color: #b0326f; border-color: rgba(176, 50, 111, .4); }
+
+/* 浅红 → 主题危险色（错误提示、关键缺失、写任务失败等） */
+:root[data-mode="light"] .wb-group .wb-level.is-critical,
+:root[data-mode="light"] .jobbar.is-error .jobbar-text,
+:root[data-mode="light"] .drawer-impact.is-error,
+:root[data-mode="light"] .field .clear-btn:hover,
+:root[data-mode="light"] .field .clear-btn.is-on,
+:root[data-mode="light"] .job-history-row .jh-status.is-failed,
+:root[data-mode="light"] .set-note.is-error { color: var(--danger); }
 
