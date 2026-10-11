@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const ROOT = 'E:\\Work\\本地专辑管理软件';
+const ROOT = process.cwd();
 const API = 'http://127.0.0.1:8799';
 const CDP = 'http://127.0.0.1:9360';
 

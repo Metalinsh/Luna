@@ -10,7 +10,7 @@ import path from 'node:path';
 
 const CDP = 'http://127.0.0.1:9360';
 const API = 'http://127.0.0.1:8799';
-const SHOTS = 'E:\\Work\\本地专辑管理软件\\screenshots';
+const SHOTS = path.join(process.cwd(), 'screenshots');
 
 let pass = 0; let fail = 0;
 const ok = (n, c, e = '') => {
@@ -63,7 +63,7 @@ try {
   ok('存在测试样本 RJ01002989', Boolean(target), target?.rj_code);
 
   const { DatabaseSync } = await import('node:sqlite');
-  const dbFile = 'E:\\Work\\本地专辑管理软件\\data\\library.db';
+  const dbFile = path.join(process.cwd(), 'data', 'library.db');
   const resetState = () => {
     const d = new DatabaseSync(dbFile);
     d.prepare(`UPDATE albums SET album_artist = '逢坂成美', album_artist_source = 'tag',

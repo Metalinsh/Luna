@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 const BASE = process.env.LUNA_BASE || 'http://127.0.0.1:8799';
 const PORT = 9345;
 const PROFILE = path.join(process.env.TEMP, `luna-ui-${Date.now()}`);
-const SHOTS = 'E:\\Work\\本地专辑管理软件\\screenshots';
+const SHOTS = path.join(process.cwd(), 'screenshots');
 
 const EDGE = [
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',

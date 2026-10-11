@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const CDP = 'http://127.0.0.1:9360';
-const SHOTS = 'E:\\Work\\本地专辑管理软件\\screenshots';
+const SHOTS = path.join(process.cwd(), 'screenshots');
 
 let pass = 0; let fail = 0;
 const ok = (n, c, e = '') => {

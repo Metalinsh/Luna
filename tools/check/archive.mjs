@@ -413,8 +413,10 @@ try {
   const archiveAlbums = [];
   for (const a of coverCandidates) {
     const d = await (await fetch(`${BASE}/api/albums/${a.id}`)).json();
-    const firstPath = d.tracks?.[0]?.path ?? '';
-    if (firstPath.includes('\u0000')) archiveAlbums.push({ album: a });
+    // 判据用 source_kind：专辑详情接口并不返回 path（曾经按 path 里有无 NUL 判断，
+    // 于是这里恒为空数组、整段检查形同虚设）
+    const variants = d.tracks?.[0]?.variants ?? [];
+    if (variants.some((v) => v.source_kind === 'archive_member')) archiveAlbums.push({ album: a });
   }
   let checkedWithImages = 0;
   const missingCovers = [];
