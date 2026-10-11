@@ -57,6 +57,12 @@
   --fg-faint: #6a6a78;
   --accent: #7d6cf5;
   --accent-soft: rgba(125, 108, 245, 0.16);
+  /*
+   * 强调色的**文字**版本（选中态按钮文字、当前歌词的译文行）。
+   * 直接用 --accent 当文字色在浅色模式下对比度不够，写死 #cdc6ff 又只在深色下成立；
+   * 这里按 45% 强调色 + 正文色混合，主题与深浅模式一换就自动重算。
+   */
+  --accent-strong-fg: color-mix(in srgb, var(--accent) 45%, var(--fg));
   --accent-2: #43dfb8;
   --warn: #f0b866;
   --ok: #4ad991;
@@ -882,7 +888,26 @@ body.is-selecting .select-mark { display: flex; }
 
 .nowplaying {
   position: fixed; inset: 0; z-index: 60;
-  background: radial-gradient(120% 90% at 12% 0%, #1a1a26 0%, #0b0b0f 60%);
+  /*
+   * 大块面基色 + 自定义背景图，与 .main 同一套口径。
+   *
+   * 以前这里写死了一层深色渐变（#1a1a26 → #0b0b0f），于是单曲详情页
+   * 对**深浅模式 / 背景图 / 背景透明度三样全都不响应**：浅色模式下仍是黑底、
+   * 选了背景图也看不见、透明度调节更是完全无效。
+   *
+   * ⚠ 必须做成**同一元素的两个背景层**（基色在上、图在下）：
+   *   1) 本浮层在 .app 之外（.app 到 </main> 就闭合了），拿不到 .app::before 那层图；
+   *   2) 用 ::before 也做不出「图在下、基色在上」—— ::before 永远画在元素自身
+   *      background 之上，图会盖住基色，透明度设置就失去意义了。
+   * 100% 时基色盖住图、0 时全透看图，与主内容区的观感一致。
+   */
+  background-color: transparent;
+  background-image:
+    linear-gradient(var(--bg-surface), var(--bg-surface)),
+    var(--bg-image, none);
+  background-size: auto, cover;
+  background-position: 0 0, center;
+  background-repeat: no-repeat, no-repeat;
   display: flex; flex-direction: column; padding: 34px 40px 110px;
 }
 .np-close {
@@ -901,7 +926,8 @@ body.is-selecting .select-mark { display: flex; }
 .np-bigcover {
   aspect-ratio: 1; width: 100%; max-height: 58vh; border-radius: 18px;
   background: var(--cover-ph) center/cover no-repeat;
-  box-shadow: 0 26px 60px rgba(0,0,0,.6); flex-shrink: 0;
+  /* 走 --shadow-2：浅色模式下会自动减弱，否则浅底上像糊了一团 */
+  box-shadow: var(--shadow-2); flex-shrink: 0;
   align-self: flex-start; max-width: 100%;
 }
 .np-big-title { font-size: 30px; font-weight: 700; line-height: 1.22; }
@@ -909,7 +935,7 @@ body.is-selecting .select-mark { display: flex; }
 .np-big-credit .credit-label { color: var(--fg-faint); }
 .np-big-album { color: var(--fg-faint); font-size: 12.5px; margin-top: 6px; }
 .np-modes { display: flex; gap: 8px; flex-wrap: wrap; }
-.np-modes .btn.is-on { background: var(--accent-soft); border-color: rgba(125,108,245,.6); color: #cdc6ff; }
+.np-modes .btn.is-on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong-fg); }
 
 /* 封面区域宽度拖动手柄 */
 .np-split { align-self: stretch; cursor: col-resize; position: relative; border-radius: 99px; }
@@ -941,9 +967,9 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
   transition: color .2s, background .2s, font-size .12s;
 }
 .lyric-line:hover { background: rgba(var(--mix-fg),.04); color: var(--fg-dim); }
-.lyric-line.is-current { color: #fff; font-weight: 700; background: rgba(125,108,245,.14); }
+.lyric-line.is-current { color: var(--fg); font-weight: 700; background: var(--accent-soft); }
 .lyric-line .lyric-trans { display: block; font-size: calc(var(--lyric-size, 17px) * .8); font-weight: 400; color: var(--fg-dim); margin-top: 3px; }
-.lyric-line.is-current .lyric-trans { color: #cdc6ff; }
+.lyric-line.is-current .lyric-trans { color: var(--accent-strong-fg); }
 .lyrics-empty { color: var(--fg-faint); text-align: center; padding: 60px 0; font-size: 14px; }
 .lyrics-unsynced { color: var(--fg-faint); font-size: 12px; margin-bottom: 14px; }
 
