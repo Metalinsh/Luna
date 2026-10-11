@@ -318,3 +318,54 @@ test('列表：每张专辑带封面地址字段', () => {
   assert.ok(albums.every((a) => 'cover_url' in a));
   assert.ok(albums.some((a) => a.cover_url));
 });
+
+/* ------------------------------------ 从音乐库移除专辑 + 扫描自动忽略 */
+
+test('移除：deleteAlbumDeep 清掉曲目、版本、标签关联与专辑行', () => {
+  const made = addTrack({ album: '待移除专辑', artist: '移除测试', trackNo: 1 });
+  const tag = tags.ensureTag('移除用标签');
+  tags.applyAlbumTags([made.albumId], { add: [tag.id] });
+  assert.ok(store.getAlbumById(made.albumId), '前置：专辑存在');
+  assert.equal(tags.getAlbumTags(made.albumId).length, 1, '前置：标签已关联');
+
+  const info = store.deleteAlbumDeep(made.albumId);
+
+  assert.equal(info.tracks, 1, '应删掉 1 条曲目');
+  assert.equal(store.getAlbumById(made.albumId), null, '专辑行已删除');
+  assert.equal(store.listAlbumTracks(made.albumId).length, 0, '曲目已清空');
+  assert.equal(tags.getAlbumTags(made.albumId).length, 0, '标签关联已解除');
+});
+
+test('移除：排除清单按 album_key 与目录匹配，重复移除只留一条', () => {
+  const dir = 'E:\\Music\\移除测试库\\专辑A';
+  const albumKey = 'alb\u0000移除测试\u0000专辑A';
+  store.addExclusion({ kind: 'music', albumKey, rootPath: dir, title: '专辑A', trackCount: 3 });
+
+  const idx = store.exclusionIndex();
+  assert.equal(idx.size, 1);
+  assert.ok(idx.byKey(albumKey), '按 album_key 命中');
+  assert.ok(idx.byKey(albumKey.toUpperCase()), '键匹配大小写不敏感');
+  assert.ok(idx.byPath(dir), '按目录兜底命中');
+  assert.ok(idx.byPath(dir.toLowerCase()), '路径匹配大小写不敏感');
+  assert.ok(!idx.byPath('E:\\Music\\别的目录'), '别的目录不命中');
+
+  // 同一专辑再次移除：更新记录而不是新增
+  store.addExclusion({ kind: 'music', albumKey, rootPath: dir, title: '专辑A（改名）', trackCount: 5 });
+  const rows = store.listExclusions().filter((r) => r.album_key === albumKey);
+  assert.equal(rows.length, 1, '同一专辑只留一条');
+  assert.equal(rows[0].track_count, 5, '再次移除会更新记录');
+  assert.equal(rows[0].title, '专辑A（改名）');
+  assert.equal(store.countExclusions(), 1);
+});
+
+test('移除：恢复（删掉排除记录）后清单清空，排除缓存重建为空', () => {
+  const before = store.listExclusions();
+  assert.ok(before.length >= 1, '前置：清单里有记录');
+  const n = store.deleteExclusions([before[0].id]);
+  assert.equal(n, 1);
+  assert.equal(store.countExclusions(), before.length - 1);
+
+  store.clearExclusions();
+  assert.equal(store.countExclusions(), 0);
+  assert.equal(store.exclusionIndex().size, 0, '清空后不再命中任何专辑');
+});

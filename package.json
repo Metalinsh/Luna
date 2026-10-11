@@ -1,6 +1,6 @@
 {
   "name": "luna-media-library",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "Luna —— 本地音乐专辑与音声（ASMR）作品管理：扫描入库、专辑墙、标签检索、版本切换播放、安全写回与压缩包只读挂载",
   "type": "module",
@@ -13,12 +13,10 @@
     "dev": "node --watch server/index.mjs",
     "scan": "node server/cli-scan.mjs",
     "electron": "electron .",
-
     "test": "node tools/check/run.mjs --changed",
     "test:unit": "node tools/check/run.mjs --unit",
     "test:full": "node tools/check/run.mjs --full",
     "test:list": "node tools/check/run.mjs --list",
-
     "release": "node tools/release/build.mjs",
     "dist": "node tools/release/build.mjs"
   },

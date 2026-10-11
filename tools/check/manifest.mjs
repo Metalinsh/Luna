@@ -50,12 +50,15 @@ export const AREAS = [
   },
   {
     id: 'bulk',
-    title: '多选与批量填写',
-    desc: '选择按钮样式、批量填艺术家/社团（仅 ASMR 生效）',
-    unit: [],
+    title: '多选、批量填写与从库中移除',
+    desc: '选择按钮样式、批量填艺术家/社团（仅 ASMR 生效）、多选后「从库中移除」（只删索引不碰文件 + 确认文案 + 设置里的恢复入口）',
+    unit: ['test/albums-tags.test.mjs'],
     ui: ['check/bulk.mjs'],
     app: true,
-    covers: ['public/app.js', 'public/index.html', 'server/index.mjs'],
+    covers: [
+      'public/app.js', 'public/index.html', 'public/styles.css',
+      'server/index.mjs', 'server/db.mjs', 'server/scanner.mjs',
+    ],
   },
   {
     id: 'detail',

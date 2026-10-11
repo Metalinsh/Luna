@@ -2950,6 +2950,41 @@ function bindEvents() {
     openTagDialog([...state.selected], [], { bulk: true });
   });
 
+  /**
+   * 批量「从库中移除」：只删索引，**不动任何本地文件**；
+   * 同时写入排除清单，以后扫描音乐库会自动跳过这些专辑。
+   */
+  $('#bulkRemoveBtn').addEventListener('click', async () => {
+    const ids = [...state.selected];
+    if (!ids.length) { toast('请先选择专辑', true); return; }
+
+    const ok = await askConfirm({
+      title: `从音乐库移除 ${ids.length} 张专辑`,
+      text: `只会把选中的 ${ids.length} 张专辑从 Luna 的索引里移除，不会删除或修改任何本地文件。\n`
+        + '专辑的标签、收藏等库内记录会一并移除（不可恢复）。\n'
+        + '以后扫描音乐库时会自动忽略它们，避免又被扫回来；'
+        + '需要找回时可在「设置 → 已移除的专辑」里恢复后重新扫描。',
+      okLabel: '从库中移除',
+      danger: true,
+    });
+    if (!ok) return;
+
+    try {
+      const res = await api('/api/albums/remove', { method: 'POST', body: { ids } });
+      toast(`已从音乐库移除 ${res.albums} 张专辑（${res.tracks} 条曲目），本地文件未改动`
+        + '；后续扫描会自动忽略它们');
+      state.selected.clear();
+      state.selecting = false;
+      await Promise.all([
+        loadAlbums(), loadLibraries(), loadTagBar(), updateFavoriteBadges(),
+        refreshIncompleteBadge(),   // 移除后「待完善」计数可能变化
+      ]);
+      syncSelectionUi();
+    } catch (err) {
+      toast(`移除失败：${err.message}`, true);
+    }
+  });
+
   /** 批量填写（仅音声发行生效） */
   const bulkVoiceMeta = async (field) => {
     if (!state.selected.size) { toast('请先选择专辑', true); return; }
@@ -3756,7 +3791,7 @@ const PREFETCH_LABELS = [
 ];
 const GIB = 1024 ** 3;
 
-const settingsState = { config: null, cache: null };
+const settingsState = { config: null, cache: null, exclusions: [] };
 
 const bgImageUrl = (p) => (p ? `/api/local-image?path=${encodeURIComponent(p)}` : '');
 
@@ -3821,6 +3856,17 @@ async function loadCacheStatus() {
   return settingsState.cache;
 }
 
+/** 「已移除的专辑」清单：扫描时会自动跳过这些专辑，这里是唯一的恢复入口 */
+async function loadExclusions() {
+  try {
+    const { exclusions } = await api('/api/exclusions');
+    settingsState.exclusions = exclusions ?? [];
+  } catch {
+    settingsState.exclusions = [];
+  }
+  return settingsState.exclusions;
+}
+
 function settingsMarkup() {
   const cfg = settingsState.config ?? {};
   const arch = cfg.archive ?? { prefetch: 'next', cacheDir: '', maxBytes: 20 * GIB };
@@ -3831,6 +3877,7 @@ function settingsMarkup() {
   const desktop = cfg.desktop ?? { minimizeToTray: false };
   // 浏览器里运行时没有托盘可言，如实说明（避免用户以为设置没生效）
   const desktopShell = /electron/i.test(navigator.userAgent);
+  const exclusions = settingsState.exclusions ?? [];
 
   const used = Number(cache.bytes ?? 0);
   const max = Number(cache.maxBytes ?? arch.maxBytes ?? 0);
@@ -3966,7 +4013,51 @@ function settingsMarkup() {
         </div>
       </div>
     </section>
+
+    <section class="set-sec">
+      <h4>已移除的专辑</h4>
+      ${excludedSectionMarkup(exclusions)}
+    </section>
   `;
+}
+
+/** 「已移除的专辑」列表：恢复后需重新扫描才会回到专辑墙，文案里写明 */
+function excludedSectionMarkup(exclusions) {
+  if (!exclusions.length) {
+    return `
+      <div class="set-row">
+        <div class="set-label">（空）</div>
+        <div class="set-control">
+          <div class="set-note">
+            没有被移除的专辑。在专辑墙进入多选、选中若干张后点「从库中移除」，
+            即可把它们移出音乐库 —— <b>只会删索引，不碰本地文件</b>。
+          </div>
+        </div>
+      </div>`;
+  }
+  const rows = exclusions.map((x) => `
+    <div class="set-row">
+      <div class="set-label" title="${esc(x.root_path ?? '')}">${esc(x.title || '(无标题)')}</div>
+      <div class="set-control">
+        <div class="set-inline">
+          <span class="set-note">${Number(x.track_count) || 0} 条曲目 ·
+            ${new Date(Number(x.removed_at) || Date.now()).toLocaleDateString('zh-CN')}</span>
+          <button class="btn btn-ghost" data-restore="${x.id}">恢复</button>
+        </div>
+        <div class="set-note" style="word-break:break-all">${esc(x.root_path ?? '')}</div>
+      </div>
+    </div>`).join('');
+  return `
+    ${rows}
+    <div class="set-row">
+      <div class="set-label">全部恢复</div>
+      <div class="set-control">
+        <div class="set-inline">
+          <button class="btn btn-ghost" id="setRestoreAll">全部恢复（${exclusions.length} 张）</button>
+          <span class="set-note">恢复后需要重新扫描音乐库，这些专辑才会回到专辑墙。</span>
+        </div>
+      </div>
+    </div>`;
 }
 
 function renderSettings() {
@@ -3978,7 +4069,7 @@ function renderSettings() {
 
 async function refreshSettings({ reloadConfig = true } = {}) {
   if (reloadConfig || !settingsState.config) await loadSettingsConfig();
-  await loadCacheStatus();
+  await Promise.all([loadCacheStatus(), loadExclusions()]);
   renderSettings();
 }
 
@@ -4040,6 +4131,40 @@ async function saveDesktopSetting(minimizeToTray) {
 
 /** 设置抽屉内控件的事件（每次重绘都要重新绑） */
 function bindSettingsBody() {
+  // 「已移除的专辑」：逐条恢复 / 全部恢复（恢复后需重新扫描才会回墙）
+  $$('#settingsBody [data-restore]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await api('/api/exclusions/restore', {
+          method: 'POST', body: { ids: [Number(btn.dataset.restore)] },
+        });
+        toast(r.note ?? '已恢复');
+        await refreshSettings({ reloadConfig: false });
+      } catch (err) {
+        toast(`恢复失败：${err.message}`, true);
+      }
+    });
+  });
+
+  $('#setRestoreAll')?.addEventListener('click', async () => {
+    const n = (settingsState.exclusions ?? []).length;
+    if (!n) return;
+    const okRestore = await askConfirm({
+      title: `恢复全部 ${n} 张已移除的专辑`,
+      text: '恢复后，这些专辑会在重新扫描音乐库时重新入库。'
+        + '（它们的标签、收藏等库内记录在移除时已经删除，无法恢复。）',
+      okLabel: '全部恢复',
+    });
+    if (!okRestore) return;
+    try {
+      const r = await api('/api/exclusions/restore', { method: 'POST', body: { all: true } });
+      toast(r.note ?? '已恢复');
+      await refreshSettings({ reloadConfig: false });
+    } catch (err) {
+      toast(`恢复失败：${err.message}`, true);
+    }
+  });
+
   $$('#settingsBody [data-tray-pick]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const on = btn.dataset.trayPick === '1';

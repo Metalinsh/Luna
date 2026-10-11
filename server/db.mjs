@@ -15,7 +15,7 @@ import {
   DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -277,6 +277,33 @@ function createV7Tables() {
   `);
 }
 
+/**
+ * V10 表：「已移除的专辑」排除清单。
+ *
+ * 用户在专辑墙上把专辑移出音乐库后，这里留一条记录，**以后扫描时自动跳过**，
+ * 否则下次扫描会把文件重新扫回来 —— 那等于"移除"没生效。
+ *
+ * 关键点：排除记录**按内容标识**匹配，不能挂 album_id（专辑行本身已被删除）：
+ *   · 音声发行 → `voiceAlbumKey(release_root)`，兜底用发行根路径
+ *   · 普通专辑 → `albumKeyOf(...)`，兜底用曲目所在目录
+ * 同时存 root_path/title，供「设置 → 已移除的专辑」列表展示与恢复。
+ */
+function createV10Tables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS album_exclusions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind        TEXT NOT NULL DEFAULT 'music',
+      album_key   TEXT NOT NULL,
+      root_path   TEXT,
+      title       TEXT,
+      track_count INTEGER NOT NULL DEFAULT 0,
+      removed_at  INTEGER NOT NULL,
+      UNIQUE(kind, album_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_album_exclusions_key ON album_exclusions(album_key);
+  `);
+}
+
 function addV2Columns() {
   const wanted = {
     libraries: [['display_name', 'TEXT']],
@@ -529,6 +556,7 @@ function migrate() {
   addV6Columns();
   createV7Tables();
   addV8Columns();
+  createV10Tables();
 
   let version;
   if (hadMeta) {
@@ -550,9 +578,11 @@ function migrate() {
   } else if (version < SCHEMA_VERSION) {
     // v2..v8 → v9：只补新表与新列，无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = version >= 8
-      ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道`
-      : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道`;
+    migrationReport.note = version >= 9
+      ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
+      : version >= 8
+        ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
+        : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
   }
 
   if (version < 8) {
@@ -563,6 +593,10 @@ function migrate() {
   if (version < 9) {
     const cleaned = deleteMistakenImageTracks();
     migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}已清理 ${cleaned.removed} 条被误收录的图片轨道（连带 ${cleaned.emptyVersions} 个空版本）`;
+  }
+
+  if (version < 10) {
+    migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}「已移除的专辑」排除清单已就绪（当前 0 条）`;
   }
 
   setMeta('schema_version', String(SCHEMA_VERSION));
@@ -860,8 +894,87 @@ export function deleteAlbumIfEmpty(albumId) {
   if (left > 0) return false;
   db.prepare('DELETE FROM album_tags WHERE album_id = ?').run(Number(albumId));
   db.prepare('DELETE FROM album_ignore WHERE album_id = ?').run(Number(albumId));
+  db.prepare('DELETE FROM album_versions WHERE album_id = ?').run(Number(albumId));
   db.prepare('DELETE FROM albums WHERE id = ?').run(Number(albumId));
   return true;
+}
+
+/**
+ * 把一张专辑**整块**从索引里删掉（本地文件一概不动）：
+ * 曲目 → 版本 → 标签关联 → 豁免项 → 专辑行。
+ *
+ * 与 deleteAlbumIfEmpty 的区别：那个只在"已经没有曲目"时才删壳，
+ * 这个连曲目一起清（用户主动"移出音乐库"）。
+ * 返回被删除的曲目数，供界面汇报。
+ */
+export function deleteAlbumDeep(albumId) {
+  const id = Number(albumId);
+  const tracks = db.prepare('DELETE FROM tracks WHERE album_id = ?').run(id).changes;
+  db.prepare('DELETE FROM album_versions WHERE album_id = ?').run(id);
+  db.prepare('DELETE FROM album_tags WHERE album_id = ?').run(id);
+  db.prepare('DELETE FROM album_ignore WHERE album_id = ?').run(id);
+  db.prepare('DELETE FROM albums WHERE id = ?').run(id);
+  return { tracks };
+}
+
+/* ------------------------------------------------- 已移除的专辑（排除清单） */
+
+/** 排除清单（新的在前），供「设置 → 已移除的专辑」展示与恢复 */
+export function listExclusions() {
+  return db.prepare('SELECT * FROM album_exclusions ORDER BY removed_at DESC, id DESC').all();
+}
+
+export function countExclusions() {
+  return db.prepare('SELECT COUNT(*) AS n FROM album_exclusions').get().n;
+}
+
+/** 写入/更新一条排除记录（同一专辑重复移除只留一条） */
+export function addExclusion({ kind = 'music', albumKey, rootPath = null, title = null, trackCount = 0 }) {
+  if (!albumKey) return null;
+  db.prepare(`
+    INSERT INTO album_exclusions (kind, album_key, root_path, title, track_count, removed_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(kind, album_key) DO UPDATE SET
+      root_path = excluded.root_path,
+      title = excluded.title,
+      track_count = excluded.track_count,
+      removed_at = excluded.removed_at
+  `).run(String(kind), String(albumKey), rootPath ? String(rootPath) : null,
+    title ? String(title) : null, Number(trackCount) || 0, now());
+  return db.prepare('SELECT * FROM album_exclusions WHERE kind = ? AND album_key = ?')
+    .get(String(kind), String(albumKey)) ?? null;
+}
+
+export function deleteExclusions(ids) {
+  const list = (ids ?? []).map(Number).filter(Number.isFinite);
+  if (!list.length) return 0;
+  const stmt = db.prepare('DELETE FROM album_exclusions WHERE id = ?');
+  let n = 0;
+  for (const id of list) n += stmt.run(id).changes;
+  return n;
+}
+
+export function clearExclusions() {
+  return db.prepare('DELETE FROM album_exclusions').run().changes;
+}
+
+/**
+ * 扫描时的排除判定：把整张排除表读成两个集合，循环里 O(1) 判断。
+ * album_key 兜底路径匹配：标签被改过导致键变化时，仍按目录/发行根拦住。
+ */
+export function exclusionIndex() {
+  const rows = db.prepare('SELECT kind, album_key, root_path FROM album_exclusions').all();
+  const keys = new Set();
+  const paths = new Set();
+  for (const r of rows) {
+    if (r.album_key) keys.add(String(r.album_key).toLowerCase());
+    if (r.root_path) paths.add(String(r.root_path).toLowerCase());
+  }
+  return {
+    size: rows.length,
+    byKey: (key) => Boolean(key) && keys.has(String(key).toLowerCase()),
+    byPath: (p) => Boolean(p) && paths.has(String(p).toLowerCase()),
+  };
 }
 
 /** 专辑合并：source 并入 target（标签并集、豁免并集、封面补缺），随后删除空壳 source */

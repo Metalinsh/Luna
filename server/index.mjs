@@ -27,7 +27,7 @@ const VIDEO_MIME = {
 import * as writeJobs from './write-jobs.mjs';
 import * as writers from './writers.mjs';
 import {
-  scanState, startScan, cancelScan, isScanning, lastScanReport,
+  scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
 } from './scanner.mjs';
 
 ensureDirs();
@@ -847,6 +847,72 @@ app.post('/api/albums/tags/bulk', (req, res) => {
   });
   scheduleAssetBackup('album-tags-bulk');
   res.json({ ...result, albums: ids.length });
+});
+
+/* ------------------------------------------------------ 从音乐库移除专辑 */
+
+/**
+ * 把选中的专辑**移出音乐库**：只删索引，**绝不触碰本地文件**。
+ *
+ * 同时写一条排除记录（`album_exclusions`），下次扫描时自动跳过 ——
+ * 否则文件还在库里，重扫就又回来了，"移除"等于没生效。
+ * 排除记录可在「设置 → 已移除的专辑」里恢复。
+ */
+app.post('/api/albums/remove', (req, res) => {
+  const ids = (req.body?.ids ?? []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) return badRequest(res, '未选择专辑');
+
+  const removed = [];
+  let tracks = 0;
+  for (const id of ids) {
+    const album = store.getAlbumById(id);
+    if (!album) continue;
+
+    // 排除记录的内容标识：音声用发行根，普通专辑用曲目所在目录
+    const albumTracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
+    const trackCount = albumTracks.length;
+    const rootPath = album.is_voice
+      ? (album.release_root ?? null)
+      : (albumTracks.find((t) => t.dir)?.dir ?? null);
+    const albumKey = album.album_key
+      || (album.is_voice && album.release_root ? store.voiceAlbumKey(album.release_root) : null);
+
+    store.addExclusion({
+      kind: album.is_voice ? 'voice' : 'music',
+      albumKey,
+      rootPath,
+      title: album.display_title ?? album.title ?? '',
+      trackCount,
+    });
+
+    const info = store.deleteAlbumDeep(id);
+    tracks += info.tracks;
+    removed.push({ id, title: album.display_title ?? album.title ?? '', tracks: info.tracks });
+  }
+
+  resetExclusionCache();
+  scheduleAssetBackup('albums-remove');
+  res.json({ ok: true, removed, albums: removed.length, tracks, wrote_files: false });
+});
+
+/** 「已移除的专辑」清单（设置页展示/恢复用） */
+app.get('/api/exclusions', (req, res) => {
+  res.json({ exclusions: store.listExclusions(), total: store.countExclusions() });
+});
+
+/** 恢复：删掉排除记录，专辑会在**下次扫描**时重新入库 */
+app.post('/api/exclusions/restore', (req, res) => {
+  const all = req.body?.all === true;
+  const restored = all ? store.clearExclusions() : store.deleteExclusions(req.body?.ids ?? []);
+  if (!restored) return badRequest(res, '没有可恢复的条目');
+  resetExclusionCache();
+  scheduleAssetBackup('albums-restore');
+  res.json({
+    ok: true,
+    restored,
+    total: store.countExclusions(),
+    note: '已恢复。重新扫描音乐库后这些专辑会回到专辑墙。',
+  });
 });
 
 /* ------------------------------------------------------------- completeness */

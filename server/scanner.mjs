@@ -114,6 +114,11 @@ export const scanState = {
   archivesUnsupported: 0,
   archivesEncrypted: 0,
   archivesRemoved: 0,
+  /**
+   * 被「已移除的专辑」排除清单拦下的发行/专辑数（用户主动移出音乐库的，
+   * 后续扫描必须自动跳过，否则移除等于没生效）。
+   */
+  excludedSkipped: 0,
   archiveEntries: 0,
   archiveTracks: 0,
   archiveBytes: 0,
@@ -150,6 +155,7 @@ function resetState() {
     archivesUnsupported: 0,
     archivesEncrypted: 0,
     archivesRemoved: 0,
+    excludedSkipped: 0,
     archiveEntries: 0,
     archiveTracks: 0,
     archiveBytes: 0,
@@ -187,6 +193,7 @@ function persistLastScan() {
       archivesUnsupported: scanState.archivesUnsupported,
       archivesEncrypted: scanState.archivesEncrypted,
       archivesRemoved: scanState.archivesRemoved,
+      excludedSkipped: scanState.excludedSkipped,
       archiveEntries: scanState.archiveEntries,
       archiveTracks: scanState.archiveTracks,
       archiveBytes: scanState.archiveBytes,
@@ -503,6 +510,11 @@ async function ingestMusicArchiveMembers({ archivePath, archiveId, members, libr
         continue;
       }
       const tags = readArchiveTags(vpath, file);
+      // 已移除的专辑：包内成员同样跳过
+      if (isExcludedAlbum({ album: tags.album, dir: tags.dir })) {
+        scanState.excludedSkipped += 1;
+        continue;
+      }
       /**
        * albumArtist / artist 一律传 null：albumKeyOf 会退回「按 dir 归组」，
        * 于是同一目录下的包内曲目必然落进同一张专辑。
@@ -577,6 +589,7 @@ async function ingestMusicArchiveMembers({ archivePath, archiveId, members, libr
 export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
   if (isWriting()) throw new Error('正在写回文件，请稍后再试');
   if (!releaseRoot) throw new Error('缺少发行根路径');
+  resetExclusionCache();
   const seen = new Set();
   const known = { archives: new Map() };
   // 发行根本身是压缩包时，走包内挂载；否则按目录重扫
@@ -591,6 +604,37 @@ export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
 }
 
 /**
+ * 「已移除的专辑」排除缓存。
+ *
+ * 一次扫描里读一次排除表即可（扫描期间不会有移除动作），
+ * 循环里只做 Set 命中判断，避免逐文件查库。
+ * 移除/恢复之后与每次扫描开始前显式失效。
+ */
+let exclusionCache = null;
+function exclusions() {
+  if (!exclusionCache) exclusionCache = store.exclusionIndex();
+  return exclusionCache;
+}
+
+export function resetExclusionCache() {
+  exclusionCache = null;
+}
+
+/** 该发行是否已被用户移出音乐库（album_key 或发行根路径任一匹配） */
+function isExcludedRelease(root) {
+  const ex = exclusions();
+  if (!ex.size) return false;
+  return ex.byKey(store.voiceAlbumKey(root)) || ex.byPath(root);
+}
+
+/** 该普通专辑是否已被移出音乐库（album_key 或所在目录任一匹配） */
+function isExcludedAlbum({ album, albumArtist = null, artist = null, dir = null }) {
+  const ex = exclusions();
+  if (!ex.size) return false;
+  return ex.byKey(albumKeyOf({ album, albumArtist, artist, dir })) || ex.byPath(dir);
+}
+
+/**
  * 把一个音声发行解析并写入三层模型：
  *   专辑卡片（kind=voice）→ 版本（album_versions）→ 轨道（tracks）
  *
@@ -601,6 +645,12 @@ export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
  * 且 readTags 应传 false —— P1 不对压缩包做任何解压。
  */
 async function ingestRelease({ root, libraryId, seen, files = null, readTags = true, known = null }) {
+  // 已移除的发行：直接跳过（连解析都不做）。用户主动移出音乐库的，扫描不该把它捡回来。
+  if (isExcludedRelease(root)) {
+    scanState.excludedSkipped += 1;
+    return { tracks: 0, skipped: true, skippedReason: 'excluded' };
+  }
+
   const existingAlbum = store.findVoiceAlbum(root);
   const decisions = existingAlbum
     ? store.getMergeDecisions(existingAlbum.id)
@@ -885,6 +935,7 @@ export async function waitForScan() {
 
 async function runScan({ libraryIds }) {
   resetState();
+  resetExclusionCache();   // 每次扫描重新读「已移除的专辑」清单
 
   let libraries = store.listLibraries();
   if (Array.isArray(libraryIds) && libraryIds.length) {
@@ -994,6 +1045,18 @@ async function runScan({ libraryIds }) {
         try {
           const fstat = await fsp.stat(file);
           const existing = store.findTrackByPath(file);
+
+          /*
+           * 已移除的专辑：先按**目录**做一次零成本拦截（移除时记的 root_path 就是专辑目录），
+           * 命中的文件连标签都不解析；解析后再按 album_key 兜一次，
+           * 覆盖「同一专辑跨多个目录」的情况。
+           */
+          if (exclusions().byPath(path.dirname(file))) {
+            scanState.excludedSkipped += 1;
+            if (existing) store.deleteTrackByPath(file); // 自愈：索引里若还留着就清掉
+            continue;
+          }
+
           if (existing && existing.size === fstat.size && existing.mtime === Math.round(fstat.mtimeMs)) {
             seen.add(file);
             scanState.skipped += 1;
@@ -1001,6 +1064,11 @@ async function runScan({ libraryIds }) {
           }
 
           const tags = await readTags(file);
+          if (isExcludedAlbum({ album: tags.album, albumArtist: tags.albumArtist, artist: tags.artist, dir: tags.dir })) {
+            scanState.excludedSkipped += 1;
+            if (existing) store.deleteTrackByPath(file);
+            continue;
+          }
 
           // 专辑实体化：决定归属（可能新建 / 改名延续 / 合并）
           const resolved = store.resolveAlbumForTrack({

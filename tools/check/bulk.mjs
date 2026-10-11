@@ -175,6 +175,82 @@ try {
     await post(`/api/albums/${albumId}/circle`, { circle });
   }
   console.log('  （已按原值还原社团）');
+
+  /*
+   * 需求3：从库中移除（多选）。
+   * 只验证「入口、样式、确认文案、设置里的恢复入口」，**不真的执行移除** ——
+   * 移除会改动用户索引，验证脚本不该碰。数据层由 test/albums-tags.test.mjs 覆盖。
+   */
+  console.log('\n— 需求3：多选「从库中移除」（只验证入口与文案，不执行移除）—');
+  const all = (await j('/api/albums?limit=100')).albums;
+  await selectCards([all[0].id, all[1].id]);
+
+  const removeUi = await ev(`(() => {
+    const b = document.querySelector('#bulkRemoveBtn');
+    const cs = getComputedStyle(b);
+    return {
+      exists: !!b,
+      text: b?.textContent?.trim() ?? '',
+      title: b?.getAttribute('title') ?? '',
+      hidden: b?.hidden === true,
+      danger: b?.classList.contains('btn-danger') === true,
+      color: cs.color,
+      count: document.querySelector('#bulkCount')?.textContent?.trim() ?? '',
+    };
+  })()`);
+  ok('批量条里有「从库中移除」按钮', removeUi.exists && removeUi.text === '从库中移除', removeUi.text);
+  ok('按钮在选中专辑后可见', removeUi.hidden === false, removeUi.count);
+  ok('按钮用危险色样式（区分于普通操作）', removeUi.danger === true, removeUi.color);
+  ok('悬浮说明写清「不删除本地文件 + 扫描会忽略」',
+    /不删除/.test(removeUi.title) && /忽略/.test(removeUi.title), removeUi.title);
+  await shot('v13-bulk-remove.png');
+
+  const confirmUi = await ev(`(async () => {
+    document.querySelector('#bulkRemoveBtn').click();
+    await new Promise(z => setTimeout(z, 700));
+    const dlg = document.querySelector('#confirmDialog');
+    const out = {
+      opened: dlg?.open === true,
+      title: document.querySelector('#confirmTitle')?.textContent ?? '',
+      text: document.querySelector('#confirmText')?.textContent ?? '',
+      okLabel: document.querySelector('#confirmOk')?.textContent ?? '',
+      okDanger: document.querySelector('#confirmOk')?.classList.contains('btn-danger') === true,
+    };
+    // 取消，绝不真的移除
+    document.querySelector('#confirmCancel').click();
+    await new Promise(z => setTimeout(z, 400));
+    out.cancelled = dlg?.open !== true;
+    return out;
+  })()`);
+  ok('点按钮弹出确认框', confirmUi.opened === true, confirmUi.title);
+  ok('确认框写明不删除本地文件', /不会删除或修改任何本地文件/.test(confirmUi.text));
+  ok('确认框写明后续扫描会忽略、可在设置恢复',
+    /自动忽略/.test(confirmUi.text) && /已移除的专辑/.test(confirmUi.text));
+  ok('确认按钮是危险色且文案明确', confirmUi.okDanger === true && confirmUi.okLabel === '从库中移除', confirmUi.okLabel);
+  ok('取消后对话框关闭（未执行移除）', confirmUi.cancelled === true);
+  const stillThere = (await j('/api/albums?limit=100')).albums.length;
+  ok('取消后专辑数量未变化', stillThere === all.length, `${all.length} → ${stillThere}`);
+
+  console.log('\n— 需求3b：设置里有「已移除的专辑」恢复入口 —');
+  const exApi = await j('/api/exclusions');
+  ok('排除清单接口可用', Array.isArray(exApi.exclusions) && typeof exApi.total === 'number', `total=${exApi.total}`);
+  const setSec = await ev(`(async () => {
+    document.querySelector('#bulkExitBtn')?.click();
+    document.querySelector('#settingsBtn').click();
+    await new Promise(z => setTimeout(z, 1800));
+    const secs = [...document.querySelectorAll('#settingsBody .set-sec')];
+    const sec = secs.find(s => /已移除的专辑/.test(s.querySelector('h4')?.textContent ?? ''));
+    const txt = sec?.textContent ?? '';
+    document.querySelector('#settingsCloseBtn')?.click();
+    await new Promise(z => setTimeout(z, 300));
+    return {
+      hasSection: !!sec,
+      sections: secs.map(s => s.querySelector('h4')?.textContent?.trim() ?? ''),
+      mentionsFiles: /不碰本地文件/.test(txt) || /不会删除/.test(txt) || /只删索引/.test(txt),
+    };
+  })()`);
+  ok('设置面板新增「已移除的专辑」分段', setSec.hasSection === true, setSec.sections.join(' / '));
+  ok('分段文案说明只删索引、不碰本地文件', setSec.mentionsFiles === true);
 } catch (err) {
   console.error('验证异常：', err.message);
   fail += 1;
