@@ -150,7 +150,14 @@ try {
     trayActive: document.querySelector('[data-tray-pick].is-active')?.dataset.trayPick ?? null,
   }))()`);
   ok('抽屉已打开且遮罩可见', panel.open && panel.backdrop);
-  ok('三个分段：压缩包 + 外观 + 桌面', panel.sections.length === 3, panel.sections.join(' / '));
+  /*
+   * 分段随版本增加：压缩包（P2）+ 外观 + 桌面 + 已移除的专辑（v1.2.2 新增）。
+   * 这里断言"必需的几段都在"，而不是死等某个总数 —— 加分段不该让这条失败。
+   */
+  const needSections = ['压缩包', '外观', '桌面', '已移除的专辑'];
+  const missing = needSections.filter((n) => !panel.sections.some((s) => String(s).includes(n)));
+  ok(`设置分段包含 ${needSections.join(' + ')}`, missing.length === 0,
+    missing.length ? `缺少 ${missing.join('/')}；实际 ${panel.sections.join(' / ')}` : panel.sections.join(' / '));
   ok('桌面分段提供「退出程序 / 最小化到托盘」两个选项',
     panel.trayPicks.length === 2
     && panel.trayPicks.map((p) => p[0]).join(',') === '0,1'
@@ -234,13 +241,24 @@ try {
   console.log('\n— 深/浅色模式 —');
   const modeSegs = await cdp.eval(`[...document.querySelectorAll('[data-mode-pick]')].map((b) => b.dataset.modePick)`);
   ok('提供深色/浅色两个选项', modeSegs.join(',') === 'dark,light', modeSegs.join(','));
-  ok('默认高亮当前模式', await cdp.eval(`document.querySelector('[data-mode-pick].is-active')?.dataset.modePick`) === 'dark',
+
+  /*
+   * 先把模式**显式切回深色**再验翻转。
+   * 不能假设"打开时就是深色"：用户平时可能把界面调成浅色并保存（实测就踩过 ——
+   * 用户开着浅色模式报可见度问题），那样「切到浅色」根本不会发生颜色变化，
+   * 断言会假失败。
+   */
+  await cdp.eval(`document.querySelector('[data-mode-pick="dark"]').click()`);
+  await sleep(700);
+  ok('高亮与当前模式一致（切到深色后高亮深色）',
+    await cdp.eval(`document.querySelector('[data-mode-pick].is-active')?.dataset.modePick`) === 'dark',
     String(await cdp.eval(`document.querySelector('[data-mode-pick].is-active')?.dataset.modePick`)));
 
   const darkProbe = await cdp.eval(`(() => {
     const cs = getComputedStyle(document.documentElement);
     return { mode: document.documentElement.dataset.mode, fg: cs.getPropertyValue('--fg').trim(), mix: cs.getPropertyValue('--mix-fg').trim() };
   })()`);
+  ok('深色模式生效（data-mode=dark）', darkProbe.mode === 'dark', darkProbe.mode);
   await cdp.eval(`document.querySelector('[data-mode-pick="light"]').click()`);
   await sleep(900);
   const lightProbe = await cdp.eval(`(() => {

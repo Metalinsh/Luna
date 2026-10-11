@@ -182,8 +182,34 @@ try {
    * 移除会改动用户索引，验证脚本不该碰。数据层由 test/albums-tags.test.mjs 覆盖。
    */
   console.log('\n— 需求3：多选「从库中移除」（只验证入口与文案，不执行移除）—');
-  const all = (await j('/api/albums?limit=100')).albums;
-  await selectCards([all[0].id, all[1].id]);
+  /*
+   * 必须用**当前墙上真实渲染出来的**卡片：此前用 /api/albums 的前两张，
+   * 而墙上当时可能还带着库筛选（或只渲染了一部分），点击落空 → 选择为 0 →
+   * 按钮的处理器正确地拒绝并提示"请先选择专辑"，于是确认框根本没弹，断言假失败。
+   * 先确认"确实选中了"，再点按钮。
+   */
+  /*
+   * 需求2d 的批量填写在成功后会把 `state.selecting` 置回 false（并刷新专辑墙），
+   * 因此这里**必须先重新进入多选模式**，否则点卡片是"打开详情页"而不是"选中"，
+   * 选择数永远是 0，按钮的处理器会正确地拒绝并提示"请先选择专辑" → 断言假失败。
+   */
+  const inSelectMode = await ev(`(async () => {
+    if (!document.body.classList.contains('is-selecting')) {
+      document.querySelector('#selectModeBtn').click();
+      await new Promise(z => setTimeout(z, 500));
+    }
+    return document.body.classList.contains('is-selecting');
+  })()`);
+  ok('已处于多选模式（点卡片即选中）', inSelectMode === true);
+  await ev(`location.hash = '#/'; true`);
+  await sleep(1200);
+
+  const wallIds = await ev(`[...document.querySelectorAll('#albumGrid .album-card')]
+    .map((c) => Number(c.dataset.id)).filter(Boolean).slice(0, 2)`);
+  ok('墙上至少有 2 张可点的专辑', wallIds.length === 2, `取到 ${wallIds.length} 张`);
+  const albumsBefore = (await j('/api/albums?limit=100')).albums.length;
+  const picked = await selectCards(wallIds);
+  ok('前置：确实选中 2 张（否则后面不会弹确认框）', /已选\s*2\s*张/.test(picked.count), picked.count);
 
   const removeUi = await ev(`(() => {
     const b = document.querySelector('#bulkRemoveBtn');
@@ -229,7 +255,7 @@ try {
   ok('确认按钮是危险色且文案明确', confirmUi.okDanger === true && confirmUi.okLabel === '从库中移除', confirmUi.okLabel);
   ok('取消后对话框关闭（未执行移除）', confirmUi.cancelled === true);
   const stillThere = (await j('/api/albums?limit=100')).albums.length;
-  ok('取消后专辑数量未变化', stillThere === all.length, `${all.length} → ${stillThere}`);
+  ok('取消后专辑数量未变化', stillThere === albumsBefore, `${albumsBefore} → ${stillThere}`);
 
   console.log('\n— 需求3b：设置里有「已移除的专辑」恢复入口 —');
   const exApi = await j('/api/exclusions');

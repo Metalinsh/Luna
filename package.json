@@ -1,6 +1,6 @@
 {
   "name": "luna-media-library",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "Luna —— 本地音乐专辑与音声（ASMR）作品管理：扫描入库、专辑墙、标签检索、版本切换播放、安全写回与压缩包只读挂载",
   "type": "module",

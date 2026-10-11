@@ -30,9 +30,15 @@ const has = (f) => argv.includes(f);
 
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const fullVersion = pkg.version;                       // 唯一来源：package.json
-const shortVersion = fullVersion.split('.').slice(0, 2).join('.'); // 1.1.0 → 1.1
-const appDirName = `Luna_v${shortVersion}`;            // 发布目录名
-const zipName = `Luna_v${shortVersion}.zip`;           // 发布压缩包名
+/**
+ * 产物用**完整版本号**命名（Luna_v1.2.3 / Luna_v1.2.3.zip）。
+ *
+ * 曾经只取次版本号（1.2.2 → Luna_v1.2），好处是补丁版路径不变，
+ * 坏处是补丁版会把上一版的目录与压缩包**原地覆盖**，用户手里两份不同
+ * 版本的包无法并存、也看不出自己拿的是哪一版。自 v1.2.3 起改为全版本号。
+ */
+const appDirName = `Luna_v${fullVersion}`;             // 发布目录名
+const zipName = `Luna_v${fullVersion}.zip`;            // 发布压缩包名
 
 const log = (...a) => console.log(...a);
 const step = (n, t) => log(`\n${'─'.repeat(70)}\n${n}. ${t}\n${'─'.repeat(70)}`);
@@ -42,7 +48,7 @@ function fail(msg) { console.error(`\n✗ ${msg}`); process.exit(1); }
 /* ------------------------------------------------------------ 1. 前置检查 */
 
 step(1, '前置检查');
-log(`  版本：${fullVersion}（产物名 Luna_v${shortVersion}.exe）`);
+log(`  版本：${fullVersion}（产物名 Luna_v${fullVersion}.exe）`);
 if (!fs.existsSync(path.join(ROOT, 'build', 'icon.ico'))) fail('缺少 build/icon.ico，请先运行图标生成。');
 if (!fs.existsSync(path.join(ROOT, 'build', 'icon.png'))) fail('缺少 build/icon.png。');
 log('  ✓ 图标资源齐备');
@@ -78,7 +84,8 @@ if (!has('--no-clean')) {
     if (fs.existsSync(p)) { fs.rmSync(p, { recursive: true, force: true }); removed += 1; }
   }
   for (const f of fs.readdirSync(RELEASE)) {
-    if (/^Luna[_-].*\.(exe|zip)$/i.test(f) || f === appDirName) {
+    // 旧产物：Luna_v*.exe / Luna_v*.zip，以及任何 Luna_vX.Y[.Z] 发布目录
+    if (/^Luna[_-].*\.(exe|zip)$/i.test(f) || /^Luna_v[\d.]+$/i.test(f)) {
       fs.rmSync(path.join(RELEASE, f), { recursive: true, force: true });
       removed += 1;
     }
@@ -196,7 +203,7 @@ if (t.status !== 0 || !fs.existsSync(zipPath)) {
 log(`  ✓ ${zipName}  ${(fs.statSync(zipPath).size / 1024 / 1024).toFixed(1)} MB`);
 
 log('\n' + '═'.repeat(70));
-log(`Luna v${shortVersion} 发布完成`);
+log(`Luna v${fullVersion} 发布完成`);
 log('═'.repeat(70));
 log(`  程序目录：${path.relative(ROOT, appDir)}`);
 log(`  发布压缩包：${path.relative(ROOT, zipPath)}`);
