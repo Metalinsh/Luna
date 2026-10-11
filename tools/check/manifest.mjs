@@ -117,9 +117,9 @@ export const AREAS = [
   {
     id: 'archive',
     title: '压缩包只读挂载',
-    desc: 'ZIP 清单解析与编码嗅探、压缩包入库与角标、包内曲目禁播告知、预读专辑/清除缓存与「已预读」标签',
-    // 单元测试已覆盖 zip-reader；界面检查只验「扫出来的包在界面上表现正确」
-    unit: ['test/zip-reader.test.mjs'],
+    desc: 'ZIP 清单解析与编码嗅探、压缩包入库与角标、包内曲目禁播告知、预读专辑/清除缓存与「已预读」标签、包内封面提取（与音声共用 pickCover 口径）',
+    // 单元测试覆盖 zip-reader 与压缩包封面挑选；界面检查只验「扫出来的包在界面上表现正确」
+    unit: ['test/zip-reader.test.mjs', 'test/archive-cover.test.mjs'],
     ui: ['check/archive.mjs'],
     app: true,
     covers: [

@@ -11,7 +11,7 @@ import * as store from './db.mjs';
 import * as tagsApi from './tags.mjs';
 import { collectOrphanCovers, albumsWithMissingCoverFiles, detectImageMime, pruneEmptyAlbums } from './maintenance.mjs';
 import { isWriting, cleanupTempFiles } from './write-jobs.mjs';
-import { analyzeRelease, locateRelease, VIDEO_EXT, baseNameOf, extractTrackNo, displayTitleOf } from './asmr.mjs';
+import { analyzeRelease, locateRelease, VIDEO_EXT, baseNameOf, extractTrackNo, displayTitleOf, pickCover } from './asmr.mjs';
 import {
   isArchiveName, looksLikeZip, probeZip, summarizeArchive,
   virtualPath, splitVirtualPath, isVirtualPath, readEntryData, findEntry,
@@ -832,6 +832,60 @@ async function coverFromDirectory(dir) {
   return null;
 }
 
+/**
+ * 压缩包封面挑选（纯函数，便于单测）：在包内图片成员里为某张专辑挑一张。
+ *
+ * 与音声发行共用 `pickCover` 口径（先「封面」类目录 → 再 cover/package 类文件名
+ * → 最后退回体积最大的一张），因此两类专辑的选图逻辑一致。
+ *
+ * 候选范围：**该专辑虚拟目录的子树**（含 `封面/` 这类子目录）；
+ * 子树里一张图都没有时退回整包（根目录平铺的包，成员和图片都在包根）。
+ *
+ * @param {Array<{name:string,size:number,kind?:string}>} entries 压缩包条目清单
+ * @param {string} virtualDir 专辑的虚拟目录（含 NUL 分隔符的虚拟路径）
+ * @returns {object|null} 命中的条目
+ */
+export function pickArchiveCoverEntry(entries, virtualDir) {
+  const images = (entries ?? []).filter((e) => e.kind === 'image'
+    || /\.(jpe?g|png|webp)$/i.test(String(e.name ?? '')));
+  if (!images.length) return null;
+
+  const split = splitVirtualPath(virtualDir);
+  const relDir = split
+    ? String(split.memberPath).replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+    : '';
+  const inAlbumDir = (name) => {
+    const n = String(name).replace(/\\/g, '/');
+    if (!relDir) return true;               // 专辑就在包根目录：整包都是它的候选
+    return n.startsWith(`${relDir}/`);      // 含更深的子目录，如 `专辑/封面/01.jpg`
+  };
+
+  const scoped = images.filter((e) => inAlbumDir(e.name));
+  const pool = scoped.length ? scoped : images;
+  const picked = pickCover(pool.map((e) => ({
+    name: path.posix.basename(String(e.name)),
+    path: String(e.name),
+    size: Number(e.size) || 0,
+  })));
+  if (!picked) return null;
+  return pool.find((e) => String(e.name) === picked.path) ?? null;
+}
+
+/** 从压缩包里取该专辑的封面并落盘（解压的单张图片，不进缓存预算） */
+async function coverFromArchiveDir(virtualDir, known = null) {
+  const split = splitVirtualPath(virtualDir);
+  if (!split) return null;
+  let info = known?.archives?.get(split.archivePath)?.info;
+  if (!info) {
+    try { info = await probeZip(split.archivePath); } catch { return null; }
+  }
+  const entry = pickArchiveCoverEntry(info.entries, virtualDir);
+  if (!entry?.size) return null;
+  const buffer = await readEntryData(split.archivePath, entry);
+  if (!buffer?.length) return null;
+  return persistCoverImage(buffer, detectImageMime(buffer), 'folder');
+}
+
 /* ------------------------------------------------------------------- parsing */
 
 function firstString(value) {
@@ -1223,14 +1277,24 @@ async function recoverEmbeddedCovers() {
   }
 }
 
-/** 为「没有封面」的专辑再找一次同目录的 cover.jpg / folder.jpg 等 */
+/**
+ * 为「没有封面」的专辑再找一次封面：
+ *   · 磁盘专辑 → 同目录的 cover.jpg / folder.jpg 等（原有口径）
+ *   · 压缩包专辑 → 包内图片成员，按音声发行的 pickCover 口径挑一张
+ *
+ * 放在扫描的补充阶段而不是 ingest 里，是为了**顺带治愈既有库**：
+ * 增量扫描会跳过没变化的成员，只靠 ingest 的话，已经入库的压缩包专辑
+ * 永远等不到补封面这一步。
+ */
 async function backfillFolderCovers() {
   scanState.phase = '补充封面';
   const pending = store.albumsMissingCover();
   for (const row of pending) {
     if (scanState.cancelRequested) return;
     try {
-      const cover = await coverFromDirectory(row.dir);
+      const cover = isVirtualPath(row.dir)
+        ? await coverFromArchiveDir(row.dir)
+        : await coverFromDirectory(row.dir);
       if (!cover) continue;
       if (store.applyCover(row.id, cover)) scanState.coverExtracted += 1;
     } catch (err) {

@@ -403,6 +403,42 @@ try {
     console.log('  （库里还没有专辑被整张预读过，「已预读」标签尚未建立 —— 不算失败）');
   }
 
+  /*
+   * 包内封面：普通音乐专辑的压缩包必须和音声发行一样能取到封面。
+   * 判据不求人：专辑在画廊里**有图片**却没封面 = 回归。
+   * 只读，不改任何数据。
+   */
+  console.log('\n— 包内封面：有图的压缩包专辑必须有封面 —');
+  const coverCandidates = (await (await fetch(`${BASE}/api/albums?limit=300`)).json()).albums ?? [];
+  const archiveAlbums = [];
+  for (const a of coverCandidates) {
+    const d = await (await fetch(`${BASE}/api/albums/${a.id}`)).json();
+    const firstPath = d.tracks?.[0]?.path ?? '';
+    if (firstPath.includes('\u0000')) archiveAlbums.push({ album: a });
+  }
+  let checkedWithImages = 0;
+  const missingCovers = [];
+  for (const { album } of archiveAlbums) {
+    const g = await (await fetch(`${BASE}/api/albums/${album.id}/images`)).json();
+    if (!(g.images ?? []).length) continue;      // 包里本来就没图，跳过
+    checkedWithImages += 1;
+    if (!album.cover_url) missingCovers.push(album.album);
+  }
+  if (!checkedWithImages) {
+    console.log('  （库里没有「包内有图片」的压缩包专辑，跳过 —— 不算失败）');
+  } else {
+    ok(`包内有图的压缩包专辑都取到了封面（${checkedWithImages} 张）`, missingCovers.length === 0,
+      missingCovers.length ? `缺封面：${missingCovers.join(' | ')}` : '');
+  }
+  const coverSample = archiveAlbums.find((x) => x.album.cover_url);
+  if (coverSample) {
+    const r = await fetch(BASE + coverSample.album.cover_url);
+    const buf = Buffer.from(await r.arrayBuffer());
+    const magic = buf[0] === 0xff && buf[1] === 0xd8 ? 'JPEG' : buf[0] === 0x89 ? 'PNG' : '未知';
+    ok('压缩包封面可作为图片取回', r.status === 200 && buf.length > 1024 && magic !== '未知',
+      `${buf.length} 字节 · ${magic} · HTTP ${r.status}`);
+  }
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 } catch (err) {
   console.error('验证脚本异常：', err.message);
