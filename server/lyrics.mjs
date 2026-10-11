@@ -669,9 +669,13 @@ export async function getLyricsForTrack(track, allTracks = []) {
    * 压缩包成员：磁盘那套 readdir 对虚拟路径无效（成员不在文件系统里）。
    * 因此在磁盘匹配之前，先按**包内成员清单**走同一套阶梯匹配，
    * 命中后读缓存文件或现场解出该成员。
+   *
+   * 判据只看 `source_kind` / `archive_id` 这些**独立列**，不去嗅探 path 里的分隔符：
+   * 曾经用 `path.includes('\u0000')`，而 Electron 内置的 node:sqlite 读含 NUL 的
+   * TEXT 会从 NUL 处截断，桌面版因此恒为 false、包内歌词整体失效（v11 已修根因，
+   * 这里顺手把判定做成与分隔符无关，避免同类复发）。
    */
-  const isVirtualMember = track.source_kind === 'archive_member'
-    && String(track.path ?? '').includes('\u0000');
+  const isVirtualMember = track.source_kind === 'archive_member' && Boolean(track.archive_id);
   if (isVirtualMember) {
     const found = findArchiveLyricsMember(track, allTracks);
     if (found) {

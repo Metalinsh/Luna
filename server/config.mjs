@@ -177,11 +177,29 @@ export function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/**
+ * 持久化字符串里的**分层分隔符**（虚拟路径的「包 / 成员」边界、album_key 的各段边界）。
+ *
+ * ⚠️ 为什么不是 NUL（历史缺陷，v11 迁移修复）：
+ * Electron 37 内置的 Node 22.16 在通过 `node:sqlite` **读回含 NUL 的 TEXT 时会从
+ * NUL 处截断**（开发与测试用的系统 Node 24 不会）。于是桌面版把
+ * `E:\x.zip\0dir/01.mp3` 读成 `E:\x.zip`、把 `alb\0artist\0album` 读成 `alb`，
+ * 直接导致：包内歌词匹配失效（`isVirtualMember` 恒为 false）、
+ * 排除清单的按键匹配失效（`exclusionIndex` 是 JS Set 比较）。
+ *
+ * 这些判定都发生在 JS 里，SQL 侧的比较不受影响，所以问题只在桌面版显现、
+ * 测试全绿 —— 直到用户报上来。
+ *
+ * 选用 0x01(SOH)：Windows 文件名**禁止控制字符**，因此不会与真实路径歧义；
+ * 且实测在 Node 22.16 与 Node 24 两种运行时下都能完整往返。
+ */
+export const PERSIST_SEP = '\u0001';
+
 export function albumKeyOf({ album, albumArtist, artist, dir }) {
   const a = normalizeText(album);
-  if (!a) return `dir\u0000${String(dir ?? '').toLowerCase()}`;
+  if (!a) return `dir${PERSIST_SEP}${String(dir ?? '').toLowerCase()}`;
   const who = normalizeText(albumArtist) || normalizeText(artist);
-  return `alb\u0000${who.toLowerCase()}\u0000${a.toLowerCase()}`;
+  return `alb${PERSIST_SEP}${who.toLowerCase()}${PERSIST_SEP}${a.toLowerCase()}`;
 }
 
 export function encodeKey(key) {

@@ -12,10 +12,10 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText,
+  DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText, PERSIST_SEP,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -545,6 +545,59 @@ function categorizeExistingTags() {
   return { circle, artist };
 }
 
+/**
+ * V11：把库里所有**分层分隔符**从 NUL 改写为 `PERSIST_SEP`（0x01）。
+ *
+ * 为什么必须迁移（v1.2.3 实测缺陷）：
+ * Electron 37 内置 Node 22.16 的 `node:sqlite` 读回含 NUL 的 TEXT 时**从 NUL 处截断**
+ * （系统 Node 24 不会）。凡是在 JS 里检查这个分隔符的判定都会失效：
+ *   · `tracks.path` 只剩压缩包路径 → 包内歌词匹配整体不进入（isVirtualMember 恒 false）
+ *   · `tracks.dir`  只剩压缩包路径 → 压缩包专辑的封面补全走错分支
+ *   · `album_exclusions.album_key` 只剩 `alb`/`dir`/`voice` 前缀 → 排除清单按键匹配失效
+ * SQL 内部比较不受影响（字节完整），所以只有桌面版会犯病、单元测试全绿。
+ *
+ * 涉及的三张表都是**可重建的索引/派生数据**，不是用户资产（标签、收藏另存别处），
+ * 因此就地改写即可，无需备份重建。
+ */
+function migrateV11Separator() {
+  const tables = [
+    ['tracks', ['path', 'dir', 'album_key']],
+    ['albums', ['album_key']],
+    ['album_exclusions', ['album_key']],
+  ];
+  let changed = 0;
+  for (const [table, columns] of tables) {
+    if (!tableExists(table)) continue;
+    const existing = new Set(columnNames(table));
+    for (const column of columns) {
+      if (!existing.has(column)) continue;
+      /*
+       * 改写方式只有这一条是通的（三条路都实测过）：
+       *   · SQL `replace(col, char(0), char(1))` —— 对 NUL 完全无效：char(0) 被当成空串，
+       *     函数原样返回，行数却照记 → 迁移会被"标记完成但什么都没改"
+       *   · `substr`/`instr` 拼接 —— substr 同样在 NUL 处截断，尾部内容丢失
+       *   · JS 直接读 TEXT 再改写 —— TEXT 读回在 Electron(Node 22.16) 下**本来就被截断**
+       * 所以把列当 **BLOB** 读：BLOB 按字节走，不做 NUL 截断，天然保真；
+       * 0x00→0x01 是纯字节替换（UTF-8 多字节序列里不会出现 0x00，不会破坏编码），
+       * 再按 UTF-8 解码写回。写 TEXT 不受影响 —— 截断只发生在**读**的时候。
+       */
+      const rows = db.prepare(
+        `SELECT id, CAST(${column} AS BLOB) AS bytes FROM ${table}
+          WHERE instr(${column}, char(0)) > 0`,
+      ).all();
+      if (!rows.length) continue;
+      const update = db.prepare(`UPDATE ${table} SET ${column} = ? WHERE id = ?`);
+      for (const row of rows) {
+        const bytes = Buffer.from(row.bytes ?? []);
+        for (let i = 0; i < bytes.length; i += 1) if (bytes[i] === 0) bytes[i] = 1;
+        update.run(bytes.toString('utf8'), row.id);
+        changed += 1;
+      }
+    }
+  }
+  return { changed };
+}
+
 function migrate() {
   const hadTracks = tableExists('tracks');
   const hadMeta = tableExists('meta');
@@ -576,13 +629,15 @@ function migrate() {
     migrationReport.albums = result.groups;
     migrationReport.backup = result.backup;
   } else if (version < SCHEMA_VERSION) {
-    // v2..v8 → v9：只补新表与新列，无需重建专辑
+    // v2..v10 → v11：只补新表、新列与分隔符改写，无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = version >= 9
-      ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
-      : version >= 8
-        ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
-        : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
+    migrationReport.note = version >= 10
+      ? `v${version} → v${SCHEMA_VERSION}：库内分隔符升级（详见下条）`
+      : version >= 9
+        ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
+        : version >= 8
+          ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
+          : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
   }
 
   if (version < 8) {
@@ -597,6 +652,11 @@ function migrate() {
 
   if (version < 10) {
     migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}「已移除的专辑」排除清单已就绪（当前 0 条）`;
+  }
+
+  if (version < 11) {
+    const sep = migrateV11Separator();
+    migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}已把 ${sep.changed} 处 NUL 分隔符改写为 0x01（修复桌面版 node:sqlite 读取含 NUL 文本被截断，导致包内歌词匹配与「从库中移除」的按键匹配失效）`;
   }
 
   setMeta('schema_version', String(SCHEMA_VERSION));
@@ -1492,7 +1552,7 @@ export function syncCoverFlags() {
 
 /** 音声发行的专辑键：按发行根路径唯一 */
 export function voiceAlbumKey(releaseRoot) {
-  return `voice\u0000${String(releaseRoot).toLowerCase()}`;
+  return `voice${PERSIST_SEP}${String(releaseRoot).toLowerCase()}`;
 }
 
 export function findVoiceAlbum(releaseRoot) {

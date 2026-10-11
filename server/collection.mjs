@@ -18,7 +18,7 @@ import crypto from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 
 import { readConfig, resolveCacheDir, CACHE_DIR_NAME, DATA_DIR } from './config.mjs';
-import { probeZip, openEntryStream, findEntry } from './zip-reader.mjs';
+import { probeZip, openEntryStream, findEntry, isVirtualPath } from './zip-reader.mjs';
 import { pathLayers } from './asmr.mjs';
 import * as store from './db.mjs';
 
@@ -443,8 +443,10 @@ export async function resolvePlayableFile(track, opts = {}) {
   if (track?.source_kind !== 'archive_member') {
     return { ok: true, file: track.path, fromCache: false, bytes: track.size ?? 0 };
   }
-  // 已落盘（P3）的成员直接用真实路径
-  if (track.materialized_state === 'ready' && track.path && !String(track.path).includes('\u0000')) {
+  // 已落盘（P3）的成员：path 已重指向真实文件，直接用它。
+  // 判据走 isVirtualPath（认 PERSIST_SEP），**不能写死 NUL** —— 分隔符一换，
+  // 写死 NUL 的检查会反向误判，把压缩包路径当成真实文件路径返回。
+  if (track.materialized_state === 'ready' && track.path && !isVirtualPath(track.path)) {
     return { ok: true, file: track.path, fromCache: false, bytes: track.size ?? 0 };
   }
   const r = await ensureMemberCached(track, opts);

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { isUnderAsmrFolder } from '../server/scanner.mjs';
+import { PERSIST_SEP } from '../server/config.mjs';
 
 test('ASMR 判定：目录段精确匹配，与大小写无关', () => {
   const yes = [
@@ -16,9 +17,9 @@ test('ASMR 判定：目录段精确匹配，与大小写无关', () => {
     'E:\\ASMR\\单曲.flac',
     'D:/Music/asmr/album/track.wav',
     'D:/music/AsMr/x.m4a',
-    // 压缩包虚拟路径：NUL 之后是包内成员路径
-    'E:\\Music\\ASMR\\作品.zip\u0000作品/01.mp3',
-    'E:\\Music\\Album\\x.zip\u0000ASMR/作品/01.mp3',
+    // 压缩包虚拟路径：分隔符之后是包内成员路径
+    `E:\\Music\\ASMR\\作品.zip${PERSIST_SEP}作品/01.mp3`,
+    `E:\\Music\\Album\\x.zip${PERSIST_SEP}ASMR/作品/01.mp3`,
   ];
   for (const p of yes) {
     assert.equal(isUnderAsmrFolder(p), true, `应判为 ASMR：${p}`);
@@ -28,7 +29,7 @@ test('ASMR 判定：目录段精确匹配，与大小写无关', () => {
 test('ASMR 判定：非 ASMR 目录一律为否', () => {
   const no = [
     'E:\\Music\\Album\\a.flac',
-    'E:\\Music\\Album\\穢翼のユースティア ORIGINAL SOUND TRACK.zip\u0000穢翼/01.mp3',
+    `E:\\Music\\Album\\穢翼のユースティア ORIGINAL SOUND TRACK.zip${PERSIST_SEP}穢翼/01.mp3`,
     'E:\\Music\\游戏原声\\[RJ123456]作品\\01.mp3',
     // 只是前缀相同，不是同名的目录段
     'E:\\Music\\ASMRStuff\\a.mp3',

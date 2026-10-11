@@ -14,11 +14,14 @@ process.env.LAM_DATA_DIR = dataDir;
 let store;
 let tags;
 let completeness;
+let PERSIST_SEP;
 
 before(async () => {
   store = await import('../server/db.mjs');
   tags = await import('../server/tags.mjs');
   completeness = await import('../server/completeness.mjs');
+  // 分层分隔符取唯一事实来源（必须动态导入：本文件要先设好 LAM_DATA_DIR 再加载 config）
+  ({ PERSIST_SEP } = await import('../server/config.mjs'));
 });
 
 let trackSeq = 0;
@@ -72,7 +75,7 @@ test('改名：专辑实体延续（id 不变），标签与封面全部保留',
   assert.equal(resolved.action, 'renamed', '走"改名延续"分支');
   assert.equal(resolved.albumId, albumId, '专辑 id 不变');
   const album = store.getAlbumById(albumId);
-  assert.equal(album.album_key, 'alb\u0000radiohead\u0000ok computer', 'album_key 已更新');
+  assert.equal(album.album_key, `alb${PERSIST_SEP}radiohead${PERSIST_SEP}ok computer`, 'album_key 已更新');
   assert.equal(album.title, 'OK Computer');
   assert.deepEqual(tagNamesFor(albumId), ['待整理'], '标签仍在该专辑上');
   assert.equal(album.cover_hash, 'hash-rename', '封面仍在');
@@ -82,7 +85,7 @@ test('改名：tracks.album_key 同步为新键', () => {
   const album = store.db.prepare("SELECT id FROM albums WHERE title = 'OK Computer'").get();
   const rows = store.db.prepare('SELECT album_key FROM tracks WHERE album_id = ?').all(album.id);
   assert.ok(rows.length > 0);
-  for (const r of rows) assert.equal(r.album_key, 'alb\u0000radiohead\u0000ok computer');
+  for (const r of rows) assert.equal(r.album_key, `alb${PERSIST_SEP}radiohead${PERSIST_SEP}ok computer`);
 });
 
 /* ------------------------------------------------------------ 重聚合：合并 */
@@ -338,7 +341,7 @@ test('移除：deleteAlbumDeep 清掉曲目、版本、标签关联与专辑行'
 
 test('移除：排除清单按 album_key 与目录匹配，重复移除只留一条', () => {
   const dir = 'E:\\Music\\移除测试库\\专辑A';
-  const albumKey = 'alb\u0000移除测试\u0000专辑A';
+  const albumKey = `alb${PERSIST_SEP}移除测试${PERSIST_SEP}专辑A`;
   store.addExclusion({ kind: 'music', albumKey, rootPath: dir, title: '专辑A', trackCount: 3 });
 
   const idx = store.exclusionIndex();

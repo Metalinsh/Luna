@@ -540,17 +540,34 @@ test('防护：解压比异常（压缩炸弹）被拒绝', async () => {
 
 test('虚拟路径：合成与拆解可往返，且能被识别', () => {
   const vp = virtualPath('E:\\a\\b.zip', 'dir/01.mp3');
-  assert.ok(vp.includes(MEMBER_SEP), '含 NUL 分隔符');
+  assert.ok(vp.includes(MEMBER_SEP), '含分层分隔符');
   assert.equal(isVirtualPath(vp), true);
   assert.deepEqual(splitVirtualPath(vp), { archivePath: 'E:\\a\\b.zip', memberPath: 'dir/01.mp3' });
   assert.equal(isVirtualPath('E:\\a\\01.mp3'), false);
   assert.equal(splitVirtualPath('E:\\a\\01.mp3'), null);
 });
 
+/*
+ * 回归（v1.2.3 实测缺陷）：分隔符**绝不能再是 NUL**。
+ *
+ * Electron 37 内置 Node 22.16 的 `node:sqlite` 读回含 NUL 的 TEXT 时会从 NUL 处截断
+ * （系统 Node 24 不会）。虚拟路径与 album_key 若用 NUL，桌面版读回来就只剩压缩包路径
+ * /只剩 `alb` 前缀，于是包内歌词匹配恒不命中、排除清单的 JS Set 匹配恒不命中。
+ *
+ * ⚠ 这条断言在系统 Node 上**不会**因为「截断」而失败 —— 它直接禁止 NUL，
+ * 因为测试跑不到 Electron 的运行时，只能靠约定把它钉死。
+ */
+test('分隔符：不得使用 NUL，虚拟路径里也不得出现 NUL', () => {
+  assert.notEqual(MEMBER_SEP, '\u0000', 'NUL 在 Electron 的 node:sqlite 下会被截断，禁止使用');
+  assert.equal(MEMBER_SEP.charCodeAt(0), 1, '现行分隔符为 0x01（PERSIST_SEP）');
+  const vp = virtualPath('E:\\a\\b.zip', 'dir/01.mp3');
+  assert.ok(!vp.includes('\u0000'), '虚拟路径里不得出现 NUL');
+});
+
 test('虚拟路径：成员路径里的反斜杠与前导斜杠被归一化', () => {
   const vp = virtualPath('E:\\b.zip', '\\dir\\sub\\01.mp3');
   assert.deepEqual(splitVirtualPath(vp), { archivePath: 'E:\\b.zip', memberPath: 'dir/sub/01.mp3' });
-  // 普通磁盘路径不含 NUL，因此**不是**虚拟路径
+  // 普通磁盘路径不含分层分隔符，因此**不是**虚拟路径
   assert.equal(splitVirtualPath('C:/x/y.zip'), null);
   assert.equal(isVirtualPath('C:/x/y.zip'), false);
   // 空成员是合法虚拟路径

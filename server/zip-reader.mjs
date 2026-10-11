@@ -17,6 +17,8 @@ import zlib from 'node:zlib';
 import { Readable } from 'node:stream';
 import { TextDecoder } from 'node:util';
 
+import { PERSIST_SEP } from './config.mjs';
+
 /* ------------------------------------------------------------------ 常量 */
 
 export const ZIP_EXT = '.zip';
@@ -126,8 +128,14 @@ export function decodeEntryName(raw, utf8Flag = false) {
 
 /* --------------------------------------------------------------- 虚拟路径 */
 
-/** 压缩包内的成员分隔符（与 ZIP 规范一致） */
-export const MEMBER_SEP = '\u0000';
+/**
+ * 压缩包内的成员分隔符。
+ *
+ * ⚠️ **不是 NUL**：Electron 内置 Node 22.16 的 `node:sqlite` 读回含 NUL 的 TEXT
+ * 会从 NUL 处截断，虚拟路径存进库再读出来就只剩压缩包路径了（详见 config.mjs
+ * 里 `PERSIST_SEP` 的说明）。这里统一取 config 的那个常量，别再写死。
+ */
+export const MEMBER_SEP = PERSIST_SEP;
 
 /**
  * 合成虚拟路径：`<压缩包绝对路径>\0<成员相对路径>`。

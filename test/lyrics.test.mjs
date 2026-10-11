@@ -12,9 +12,12 @@ const musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lam-lyrics-music-'));
 process.env.LAM_DATA_DIR = dataDir;
 
 let lyrics;
+let PERSIST_SEP;
 
 before(async () => {
   lyrics = await import('../server/lyrics.mjs');
+  // 分层分隔符取唯一事实来源（必须动态导入：本文件要先设好 LAM_DATA_DIR 再加载 config）
+  ({ PERSIST_SEP } = await import('../server/config.mjs'));
 });
 
 after(() => {
@@ -45,7 +48,7 @@ test('压缩包：包内 .vtt 按「完整音频名 + .vtt」匹配（实测 RJ0
     id: 9001,
     archive_id: archiveId,
     member_path: '1.正篇/mp3/01.开场.mp3',
-    path: `E:\\Music\\ASMR\\含字幕包.zip\u00001.正篇/mp3/01.开场.mp3`,
+    path: `E:\\Music\\ASMR\\含字幕包.zip${PERSIST_SEP}1.正篇/mp3/01.开场.mp3`,
     filename: '01.开场.mp3',
     track_no: 1,
   };

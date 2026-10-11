@@ -9,6 +9,8 @@ import path from 'node:path';
 
 import { parseFile } from 'music-metadata';
 
+import { PERSIST_SEP } from './config.mjs';
+
 /* ------------------------------------------------------------------ 常量 */
 
 export const AUDIO_EXT = new Set(['.mp3', '.wav', '.flac', '.m4a', '.aac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif']);
@@ -73,11 +75,14 @@ export function baseNameOf(fileName) {
 /**
  * 把路径拆成「归档根 + 成员路径」两级段落。
  * 普通路径：archive = null，members = 各目录段。
- * 虚拟路径：archive = 压缩包路径，members = 包内成员段（NUL 之后）。
+ * 虚拟路径：archive = 压缩包路径，members = 包内成员段（分隔符之后）。
+ *
+ * 分隔符取 `PERSIST_SEP`，**不能用 NUL**：那是 v11 之前的历史值，
+ * 存进库再读出来会被 Electron 的 node:sqlite 截断（详见 config.mjs）。
  */
 export function pathLayers(filePath) {
   const s = String(filePath);
-  const i = s.indexOf('\u0000');
+  const i = s.indexOf(PERSIST_SEP);
   const archive = i >= 0 ? s.slice(0, i) : null;
   const rest = i >= 0 ? s.slice(i + 1) : (archive === null ? s : '');
   const members = rest.split(/[\\/]/).filter(Boolean);
@@ -103,7 +108,7 @@ export function locateRelease(filePath) {
   // 发行根 = 从头到「最外层 RJ 所在段」的完整路径；压缩包边界原样保留。
   const releaseRoot = first.layer === 'archive'
     ? archiveSegs.slice(0, first.index + 1).join(path.sep)
-    : `${archiveSegs.join(path.sep)}${isVirtual ? '\u0000' : ''}${members.slice(0, first.index + 1).join(path.sep)}`;
+    : `${archiveSegs.join(path.sep)}${isVirtual ? PERSIST_SEP : ''}${members.slice(0, first.index + 1).join(path.sep)}`;
 
   return {
     rjCode: first.code,
@@ -171,12 +176,12 @@ function isAlbumWrapper(segment, title) {
 /**
  * 发行根 → 作品名候选：剥掉 `[RJxxxxxxxx]` 前缀。
  *
- * 压缩包的发行根是 `.zip` 本身，要先剥扩展名；且虚拟路径带 NUL 分隔符，
+ * 压缩包的发行根是 `.zip` 本身，要先剥扩展名；且虚拟路径带分层分隔符，
  * 不能用 path.posix.basename —— 那会取到路径里那一段「ASMR」而不是包名。
  */
 export function releaseTitleOf(rootDir) {
   const s = String(rootDir ?? '');
-  const nul = s.indexOf('\u0000');
+  const nul = s.indexOf(PERSIST_SEP);
   const base = nul >= 0 ? s.slice(0, nul) : s;
   return titleFromFolder(path.basename(base).replace(/\.(zip|7z|rar|tar|gz|iso)$/i, ''));
 }
@@ -507,19 +512,19 @@ function walkFiles(root) {
  * 在解析到 NUL 时返回 '..'，会让整个三-层模型退化成「无版本」。
  * 这里改为纯字符串前缀裁剪，并把分隔符统一成 /，与 path.posix 系列配合使用。
  *
- * 还要在 NUL 处再切一刀：压缩包的虚拟路径是 `<包路径>\0<成员路径>`，
+ * 还要在分层分隔符处再切一刀：压缩包的虚拟路径是 `<包路径><分隔符><成员路径>`，
  * 切开后「压缩包本身」成为发行根之后的**第一个目录段**，
  * 于是包内唯一的顶层包装目录能被 R2 的专辑名包装规则正常识别。
  */
 function relOf(rootDir, filePath) {
   const root = String(rootDir);
   let s = String(filePath);
-  // 三种边界都要认：普通目录用 \ 或 /，压缩包虚拟路径用 NUL（`<包路径>\0<成员路径>`）
-  for (const sep of [path.sep, '/', '\u0000']) {
+  // 三种边界都要认：普通目录用 \ 或 /，压缩包虚拟路径用 PERSIST_SEP
+  for (const sep of [path.sep, '/', PERSIST_SEP]) {
     if (s.startsWith(`${root}${sep}`)) { s = s.slice(root.length + 1); break; }
   }
   return s
-    .split('\u0000')
+    .split(PERSIST_SEP)
     .flatMap((part) => part.split(/[\\/]/))
     .filter((x) => x.length > 0);
 }

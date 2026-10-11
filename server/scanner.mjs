@@ -32,12 +32,13 @@ const ASMR_FOLDER = 'asmr';
  * 规则（用户指定）：**音乐库文件夹名称为 ASMR 的，其中的专辑统一视为 ASMR；
  * 不在其中的专辑均非 ASMR。** 与是否带 RJ 号、是否压缩包都无关。
  *
- * 路径段一律按 `\`、`/` 以及压缩包虚拟路径分隔符（NUL）切开，
- * 因此 E:\Music\ASMR\[RJ…]\x.mp3 与 D:\ASMR\专辑.zip␀曲.mp3 都能命中。
+ * 路径段一律按 `\`、`/` 以及压缩包虚拟路径分隔符切开
+ * （现行分隔符 `PERSIST_SEP` = 0x01；0x00 是 v11 之前的旧值，一并容错），
+ * 因此 E:\Music\ASMR\[RJ…]\x.mp3 与 D:\ASMR\专辑.zip␁曲.mp3 都能命中。
  */
 export function isUnderAsmrFolder(p) {
   return String(p ?? '')
-    .split(/[\\/\u0000]+/)
+    .split(/[\\/\u0000\u0001]+/)
     .some((seg) => seg.toLowerCase() === ASMR_FOLDER);
 }
 
