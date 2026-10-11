@@ -23,9 +23,9 @@ V1.1 起还支持**压缩包只读挂载**：不解压也能把包内作品摆�
 
 | 产物 | 说明 |
 | --- | --- |
-| **`Release/Luna_v1.2/Luna.exe`** | 程序主文件（免安装目录版） |
-| `Release/Luna_v1.2/data/` | **全新空库**（纯净发布，不含任何开发期记录） |
-| `Release/Luna_v1.2.zip` | 整个程序目录打包，解压即用 |
+| **`Release/Luna_v1.2/Luna.exe`** | 程序主文件（免安装目录版，196 MB） |
+| `Release/Luna_v1.2/data/` | **全新空库**（纯净发布，不含任何开发期记录；schema v9） |
+| `Release/Luna_v1.2.zip` | 整个程序目录打包（120 MB），解压即用 |
 
 **便携的含义**：只要 `Luna.exe` 旁边有 `data/` 目录（含 `library.db`），它就用那份数据；
 没有则退回 `%APPDATA%\Luna\data`。发布包里已经带了干净的空库，所以

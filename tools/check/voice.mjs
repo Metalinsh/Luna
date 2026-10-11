@@ -111,12 +111,28 @@ try {
     voiceCards.map((c) => c.badges.find((b) => /版本/.test(b))).join(', '));
   const withBonus = voiceCards.filter((c) => c.badges.includes('含特典'));
   const withVideo = voiceCards.filter((c) => c.badges.includes('含视频版'));
-  ok('「含特典」角标只在有特典的发行上', withBonus.length === 1, `${withBonus.length} 张`);
-  ok('「含视频版」角标只在有视频的发行上', withVideo.length === 1, `${withVideo.length} 张`);
+  /**
+   * 角标要与接口的 has_bonus / has_video **逐张一致**，不写死张数 ——
+   * 用户会不断新增音声作品（实测新增的 RJ317041 确实带特典），写死「只有 1 张」会随库增长失效。
+   */
+  const apiVoice = (await (await fetch(BASE + '/api/albums?limit=100&kind=voice')).json()).albums;
+  const apiById = new Map(apiVoice.map((a) => [String(a.id), a]));
+  const bonusMismatch = voiceCards.filter((c) => c.badges.includes('含特典') !== (apiById.get(c.id)?.has_bonus === true));
+  const videoMismatch = voiceCards.filter((c) => c.badges.includes('含视频版') !== (apiById.get(c.id)?.has_video === true));
+  ok('「含特典」角标与接口 has_bonus 逐张一致', bonusMismatch.length === 0,
+    `${withBonus.length} 张带角标；不一致 ${bonusMismatch.map((c) => c.name).join(',') || '无'}`);
+  ok('「含视频版」角标与接口 has_video 逐张一致', videoMismatch.length === 0,
+    `${withVideo.length} 张带角标；不一致 ${videoMismatch.map((c) => c.name).join(',') || '无'}`);
   await cdp.shot('v3-voice-wall.png');
 
   console.log('\n— 打开有特典与视频的发行 —');
-  const target = voiceCards.find((c) => c.badges.includes('含特典'));
+  // 认准 RJ01182623（本区域后面的断言都基于它的形态），不再「取第一张带特典的卡片」
+  const targetApi = apiVoice.find((a) => a.rj_code === 'RJ01182623')
+    ?? apiVoice.find((a) => a.has_bonus && a.has_video);
+  const target = voiceCards.find((c) => String(c.id) === String(targetApi?.id))
+    ?? voiceCards.find((c) => c.badges.includes('含特典'));
+  ok('找到样本 RJ01182623 的卡片', Boolean(target) && String(target.id) === String(targetApi?.id),
+    `卡片 #${target?.id} · ${target?.name?.slice(0, 24)}`);
   await cdp.eval(`document.querySelector('.album-card[data-id="${target.id}"]').click()`);
   await sleep(1500);
 

@@ -997,11 +997,18 @@ function closeLightbox() {
 
 async function openAlbum(id, { push = true } = {}) {
   /**
-   * 从专辑墙进详情页前记下浏览进度（视图 + 滚动位置）。
+   * 从专辑墙进详情页前记下浏览进度（视图 + 滚动位置 + **当时的查询条件**）。
    * 返回时 route() 会用这份快照原地还原，见 state.wallSnapshot。
+   *
+   * 记下查询条件很关键：只有筛选/搜索完全没变时，「复用旧列表」才等价于「重新拉取」；
+   * 否则会把旧条件下的列表拿来糊弄新条件（例如在详情页改了搜索词，返回后看到的是旧结果）。
    */
   if (ALBUM_WALL_VIEWS.includes(state.view)) {
-    state.wallSnapshot = { view: state.view, scrollTop: $('#viewAlbums')?.scrollTop ?? 0 };
+    state.wallSnapshot = {
+      view: state.view,
+      scrollTop: $('#viewAlbums')?.scrollTop ?? 0,
+      query: albumQuery(0),
+    };
   }
 
   // 图片清单与专辑数据并行取；画廊失败不该拖垮详情页
@@ -3558,10 +3565,12 @@ async function route() {
   if (hash === '/incomplete') { showView('incomplete'); await loadIncomplete(); return; }
   if (hash === '/tags') { showView('tags'); await loadTagsView(); return; }
   if (hash === '/stats') { showView('stats'); await loadStats(); return; }
-  // 从专辑详情返回：**原地还原**之前的列表与滚动位置（不重新请求，避免从头加载）
-  if (state.wallSnapshot) {
-    const snap = state.wallSnapshot;
-    state.wallSnapshot = null;
+  // 从专辑详情返回：**原地还原**之前的列表与滚动位置（不重新请求）
+  // 两个前提：筛选条件与当时完全一致，且当时确实已经加载出内容 ——
+  // 否则老实重新拉，避免把空列表或旧条件下的列表糊弄给用户
+  const snap = state.wallSnapshot;
+  state.wallSnapshot = null;
+  if (snap && snap.query === albumQuery(0) && state.albums.length) {
     showView(snap.view ?? 'albums');
     await loadAlbums({ reuse: true });
     const box = $('#viewAlbums');
