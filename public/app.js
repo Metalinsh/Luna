@@ -2409,9 +2409,17 @@ function pollScan() {
         $('#scanBtn').disabled = false;
         await Promise.all([loadLibraries(), loadTagBar(), refreshCurrent()]);
         const report = lastReport ?? s;
+        const dlsiteHit = report.dlsiteMatched
+          ? `，DLsite 命中 ${report.dlsiteMatched} 张（补 ${report.dlsiteFilled ?? 0} 项 · 打标 ${report.dlsiteTagged ?? 0} 张`
+            + `${(report.dlsiteCorrected ?? 0) ? ` · 修正 ${report.dlsiteCorrected} 项` : ''}`
+            + `${(report.dlsiteRemoved ?? 0) ? ` · 撤旧标签 ${report.dlsiteRemoved}` : ''}）`
+          : '';
         toast(`扫描完成：新增 ${report.added}，更新 ${report.updated}，`
-          + `清理 ${report.removed ?? 0}，封面 ${report.coverExtracted ?? 0}`);
+          + `清理 ${report.removed ?? 0}，封面 ${report.coverExtracted ?? 0}${dlsiteHit}`);
         if (report.failed) toast(`有 ${report.failed} 个文件处理失败`, true);
+        if (report.dlsiteIndexMissing && (report.dlsiteMissed ?? 0) > 0) {
+          toast('未找到 DLsite 索引（Dlsite/rj_index.sqlite3），本次没有自动补社团 / 声优', true);
+        }
       }
     } catch (err) {
       clearInterval(state.scanTimer);

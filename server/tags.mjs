@@ -219,12 +219,16 @@ export function getTagsForAlbums(albumIds) {
  * 为若干专辑追加/移除标签。add 可传标签 id 或标签名（名字不存在则创建）。
  * 返回 { added, removed, created }
  *
+ * `source` 记录这条关联是怎么来的：`manual`（用户点的，默认）、`dlsite`（按 RJ 号
+ * 从 DLsite 索引自动补齐，v1.2.5）、`auto`（其它自动规则）。只影响展示与排查，
+ * 同一对 (专辑, 标签) 已存在时**保留原有来源**（INSERT OR IGNORE）。
+ *
  * **两套标签的关键落点**：每张专辑用它自己的 `kind` 去解析标签 ——
  *   · 传标签名时，在「该专辑所属的那一套」里找/建同名标签
  *   · 传标签 id 时，若该 id 属于另一套，则按名字在本文专辑那套里找/建同名标签
  * 因此批量勾选**混合种类**的专辑也安全：同名标签会自动落到各自那一套里。
  */
-export function applyAlbumTags(albumIds, { add = [], remove = [] } = {}) {
+export function applyAlbumTags(albumIds, { add = [], remove = [], source = 'manual' } = {}) {
   const ids = (albumIds ?? []).map(Number).filter(Number.isFinite);
   if (!ids.length) return { added: 0, removed: 0, created: 0 };
 
@@ -252,7 +256,7 @@ export function applyAlbumTags(albumIds, { add = [], remove = [] } = {}) {
   let removed = 0;
   let created = 0;
   const insert = db.prepare(`
-    INSERT OR IGNORE INTO album_tags (album_id, tag_id, source, added_at) VALUES (?, ?, 'manual', ?)
+    INSERT OR IGNORE INTO album_tags (album_id, tag_id, source, added_at) VALUES (?, ?, ?, ?)
   `);
   const del = db.prepare('DELETE FROM album_tags WHERE album_id = ? AND tag_id = ?');
 
@@ -270,7 +274,7 @@ export function applyAlbumTags(albumIds, { add = [], remove = [] } = {}) {
 
   for (const albumId of ids) {
     const kind = kindOf.get(albumId) ?? DEFAULT_TAG_KIND;
-    for (const spec of specs) added += insert.run(albumId, resolveTagId(spec, kind), t).changes;
+    for (const spec of specs) added += insert.run(albumId, resolveTagId(spec, kind), source, t).changes;
     for (const tagId of removeIds) removed += del.run(albumId, tagId).changes;
   }
   return { added, removed, created };

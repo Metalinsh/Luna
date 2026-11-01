@@ -9,6 +9,7 @@ import {
 } from './config.mjs';
 import * as store from './db.mjs';
 import * as tagsApi from './tags.mjs';
+import * as dlsite from './dlsite.mjs';
 import { collectOrphanCovers, albumsWithMissingCoverFiles, detectImageMime, pruneEmptyAlbums } from './maintenance.mjs';
 import { isWriting, cleanupTempFiles } from './write-jobs.mjs';
 import { analyzeRelease, locateRelease, VIDEO_EXT, baseNameOf, extractTrackNo, displayTitleOf, pickCover } from './asmr.mjs';
@@ -62,6 +63,173 @@ function syncAsmrTag(albumId, samplePath) {
   } catch (err) {
     pushError(`自动维护 ASMR 标签失败：${err.message}`);
   }
+}
+
+/**
+ * 按 RJ 号从 DLsite 索引补齐社团 / 声优，并打上同名标签（v1.2.5）。
+ *
+ * 输入是一条音声发行记录（`albums` 行，至少含 id / rj_code / circle / album_artist /
+ * artist_suggested）。磁盘目录与压缩包都适用：RJ 号在入库时就已由 `locateRelease`
+ * 解析进 `albums.rj_code`（虚拟路径同样支持）。
+ *
+ * 三条克制：
+ *   1. 索引里查不到就**什么都不做** —— 不猜、不做名称模糊匹配，留给用户手工填写；
+ *   2. 字段只填空位（见 db.fillAlbumCircleIfEmpty / fillAlbumArtistIfEmpty）；
+ *   3. 索引里长度超过标签上限的名称跳过建标签，但字段照填。
+ *
+ * 标签**只补一次**：把「RJ + 该打哪些标签」算成一个签名存进 meta，签名没变就不再补。
+ * 否则你在界面上删掉的社团 / CV 标签，下一轮扫描又会自己长回来。索引里社团或声优
+ * 名单一旦变化，签名随之变化，会按新数据重新补一次。
+ *
+ * 失败不抛错：索引文件放错位置、被替换中、数据损坏，都只是「这一张没补上」，
+ * 绝不能让整轮扫描挂掉。
+ */
+function applyDlsiteMetadata(album) {
+  if (!album?.id) return null;
+  const code = dlsite.normalizeRj(album.rj_code);
+  if (!code) return null;
+
+  const work = dlsite.lookupWork(code);
+  if (!work) {
+    scanState.dlsiteMissed += 1;
+    if (!dlsite.indexInfo().available) scanState.dlsiteIndexMissing = true;
+    return null;
+  }
+  scanState.dlsiteMatched += 1;
+
+  const plan = dlsite.planDlsiteFill(work, album, { maxTagName: tagsApi.MAX_TAG_NAME });
+  if (plan.circle.fill && store.fillAlbumCircleIfEmpty(album.id, plan.circle.value)) {
+    scanState.dlsiteFilled += 1;
+  }
+  if (plan.artist.fill && store.fillAlbumArtistIfEmpty(album.id, plan.artist.value)) {
+    scanState.dlsiteFilled += 1;
+  }
+
+  if (plan.skipped.length) scanState.dlsiteSkipped += plan.skipped.length;
+
+  const appliedKey = `dlsite_tags:${album.id}`;
+  const rawApplied = store.getMeta(appliedKey);
+  const previous = parseDlsiteSignature(rawApplied);
+
+  // 索引更新：把「当初按旧索引填进去、现在索引里已改掉」的值一并修正
+  if (previous) correctDlsiteFields(album, work, previous);
+
+  if (!plan.tags.length) return work;
+
+  // 「这批标签已经补过、且索引数据没变」→ 不再碰关联，尊重用户在界面上的删改
+  const signature = dlsiteTagSignature(code, plan.tags);
+  if (previous && rawApplied === signature) return work;
+
+  const tagIds = [];
+  for (const item of plan.tags) {
+    try {
+      const tag = tagsApi.ensureTag(item.name, item.category, 'voice');
+      if (tag?.id) tagIds.push(tag.id);
+    } catch {
+      scanState.dlsiteSkipped += 1;
+    }
+  }
+  const keep = [...new Set(tagIds)];
+  // 索引里已不存在的旧自动标签要撤掉，否则改名后会新旧两个社团标签并存
+  if (previous) scanState.dlsiteRemoved += store.removeDlsiteTagLinksExcept(album.id, keep);
+  if (keep.length) {
+    const res = tagsApi.applyAlbumTags([album.id], { add: keep, source: 'dlsite' });
+    if (res.added > 0) scanState.dlsiteTagged += 1;
+  }
+  // 名字超长被跳过的那些不进签名，免得每轮都重试
+  store.setMeta(appliedKey, signature);
+  return work;
+}
+
+/**
+ * 索引更新后的字段修正（v1.2.5）。
+ *
+ * 只修正**当初由索引填进去的**值：
+ *   · 社团：当前值等于上次补的社团名（说明是我们填的），才跟着新索引改；
+ *     用户手工改过、或本来就是别的值（例如测试残留）一律不动 —— 那是用户资产。
+ *   · 声优：只有 `album_artist_source='dlsite'` 才改，`manual` / `tag` 不动。
+ */
+function correctDlsiteFields(album, work, previous) {
+  const newCircle = String(work.circle ?? '').trim() || null;
+  const oldCircle = previous.tags.find((t) => t.category === 'circle')?.name ?? null;
+  if (newCircle && oldCircle && newCircle !== oldCircle
+      && String(album.circle ?? '').trim() === oldCircle) {
+    store.setAlbumCircle(album.id, newCircle);
+    scanState.dlsiteCorrected += 1;
+  }
+
+  const newActor = (work.voiceActors ?? [])[0] ?? null;
+  if (newActor && album.album_artist_source === 'dlsite'
+      && String(album.album_artist ?? '').trim() !== newActor
+      && store.updateDlsiteArtist(album.id, newActor)) {
+    scanState.dlsiteCorrected += 1;
+  }
+}
+
+/** 标签补齐的幂等签名：RJ + 要补的标签清单（JSON，标签名里有分隔符也不会串） */
+function dlsiteTagSignature(code, tags) {
+  const list = tags
+    .map((t) => [t.category, t.name])
+    .sort((a, b) => `${a[0]}\u0001${a[1]}`.localeCompare(`${b[0]}\u0001${b[1]}`));
+  return JSON.stringify({ rj: code, tags: list });
+}
+
+/**
+ * 解析历史签名。新格式是 JSON；v1.2.5 开发期的旧格式是 `v1|RJ|circle:名|artist:名`，
+ * 一并兼容（否则升级后的第一轮扫描识别不出「上次补了什么」，旧标签就撤不掉）。
+ */
+function parseDlsiteSignature(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  if (text.startsWith('{')) {
+    try {
+      const obj = JSON.parse(text);
+      const tags = Array.isArray(obj.tags)
+        ? obj.tags
+          .filter((t) => Array.isArray(t) && t.length === 2)
+          .map(([category, name]) => ({ category: String(category), name: String(name) }))
+        : [];
+      return { rj: obj.rj ?? null, tags };
+    } catch {
+      return null;
+    }
+  }
+  const parts = text.split('|');
+  if (parts[0] !== 'v1') return null;
+  const tags = [];
+  for (const seg of parts.slice(2)) {
+    const i = seg.indexOf(':');
+    if (i > 0) tags.push({ category: seg.slice(0, i), name: seg.slice(i + 1) });
+  }
+  return { rj: parts[1] ?? null, tags };
+}
+
+/**
+ * 扫描末尾的**统一补齐**：遍历库里所有带 RJ 号的音声发行，逐张查索引。
+ *
+ * 为什么要单独一趟、而不是只写在 ingestRelease 里：
+ *   压缩包自 v1.2.4 起按 `size + mtime` 增量跳过，**没变化的包根本不会走 ingestRelease**，
+ *   挂在入库流程里的补齐逻辑就对存量库完全不生效（实测：库里 11 张音声专辑有 9 张是压缩包）。
+ * 这一趟对已补过的专辑是幂等的（字段只填空白、标签按签名跳过），可以每次扫描都跑。
+ */
+export function applyDlsiteToVoiceAlbums() {
+  let rows = [];
+  try {
+    rows = store.listVoiceAlbumsWithRj();
+  } catch (err) {
+    pushError(`读取音声发行失败：${err.message}`);
+    return 0;
+  }
+  let matched = 0;
+  for (const row of rows) {
+    if (scanState.cancelRequested) break;
+    try {
+      if (applyDlsiteMetadata(row)) matched += 1;
+    } catch (err) {
+      pushError(`DLsite 元数据补齐失败：#${row.id}（${err.message}）`);
+    }
+  }
+  return matched;
 }
 
 const SKIP_DIRS = new Set([
@@ -125,6 +293,20 @@ export const scanState = {
   archiveTracks: 0,
   archiveBytes: 0,
   archiveMs: 0,
+  /**
+   * DLsite 索引（v1.2.5）：扫到的音声发行里有 RJ 号、且索引里有这条的「命中」数；
+   * 以及命中之后真正补上的字段数 / 打了标签的专辑数 / 因名称超长跳过的标签数。
+   */
+  dlsiteMatched: 0,
+  dlsiteMissed: 0,
+  dlsiteFilled: 0,
+  dlsiteTagged: 0,
+  dlsiteSkipped: 0,
+  /** 索引更新后跟着修正的字段数 / 撤掉的过期自动标签数 */
+  dlsiteCorrected: 0,
+  dlsiteRemoved: 0,
+  /** 有音声发行要查、但根本没找到索引文件（提示用户索引没放对位置） */
+  dlsiteIndexMissing: false,
   errors: [],
 };
 
@@ -164,6 +346,14 @@ function resetState() {
     archiveTracks: 0,
     archiveBytes: 0,
     archiveMs: 0,
+    dlsiteMatched: 0,
+    dlsiteMissed: 0,
+    dlsiteFilled: 0,
+    dlsiteTagged: 0,
+    dlsiteSkipped: 0,
+    dlsiteCorrected: 0,
+    dlsiteRemoved: 0,
+    dlsiteIndexMissing: false,
     errors: [],
   });
 }
@@ -203,6 +393,14 @@ function persistLastScan() {
       archiveTracks: scanState.archiveTracks,
       archiveBytes: scanState.archiveBytes,
       archiveMs: scanState.archiveMs,
+      dlsiteMatched: scanState.dlsiteMatched,
+      dlsiteMissed: scanState.dlsiteMissed,
+      dlsiteFilled: scanState.dlsiteFilled,
+      dlsiteTagged: scanState.dlsiteTagged,
+      dlsiteSkipped: scanState.dlsiteSkipped,
+      dlsiteCorrected: scanState.dlsiteCorrected,
+      dlsiteRemoved: scanState.dlsiteRemoved,
+      dlsiteIndexMissing: scanState.dlsiteIndexMissing,
       errors: scanState.errors.slice(0, 30),
     }));
   } catch {
@@ -629,6 +827,13 @@ export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
   let removed = 0;
   for (const p of store.trackPathsUnder(releaseRoot)) {
     if (!seen.has(p)) { store.deleteTrackByPath(p); removed += 1; }
+  }
+  // 单张重新解析同样要补 DLsite 元数据（压缩包被增量跳过时也照补）
+  try {
+    const album = store.findVoiceAlbum(releaseRoot);
+    if (album?.id) applyDlsiteMetadata(album);
+  } catch (err) {
+    pushError(`DLsite 元数据补齐失败：${releaseRoot}（${err.message}）`);
   }
   return { ...result, removed };
 }
@@ -1248,6 +1453,14 @@ async function runScan({ libraryIds }) {
   }
 
   if (!scanState.cancelRequested) {
+    // 0) 按 RJ 号从 DLsite 索引补齐社团 / 声优并打标签（v1.2.5）
+    scanState.phase = '补齐音声元数据';
+    try {
+      applyDlsiteToVoiceAlbums();
+    } catch (err) {
+      pushError(`DLsite 元数据补齐失败：${err.message}`);
+    }
+
     // 1) 校验封面文件是否存在，丢失的清空引用以便重新提取（自愈）
     scanState.phase = '校验封面文件';
     try {

@@ -17,6 +17,7 @@ import * as lyricsApi from './lyrics.mjs';
 import * as maintenance from './maintenance.mjs';
 import * as collection from './collection.mjs';
 import * as gallery from './gallery.mjs';
+import * as dlsite from './dlsite.mjs';
 import { analyzeRelease } from './asmr.mjs';
 
 /** 视频轨要用 video/* 才能被浏览器的 <video> 播放 */
@@ -72,6 +73,8 @@ app.get('/api/health', (req, res) => {
     dataDir: DATA_DIR,
     uptime: process.uptime(),
     migration: store.migrationReport,
+    // DLsite 索引（音声社团 / 声优自动补齐的数据源）：找不到时如实说明路径
+    dlsite: dlsite.indexInfo(),
   });
 });
 

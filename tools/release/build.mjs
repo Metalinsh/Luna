@@ -194,6 +194,24 @@ fs.mkdirSync(path.join(dataDir, 'undo'), { recursive: true });
 fs.rmSync(tmp, { recursive: true, force: true });
 log(`  ✓ 已写入纯净库：${path.relative(ROOT, dataDir)}`);
 
+/*
+ * DLsite 索引必须随包分发（v1.2.5，用户要求）。
+ *
+ * 放在 `data/Dlsite/` 而不是程序目录：`data/` 跟着用户走，升级时只覆盖程序文件、
+ * 索引与库一起保留；用户换新索引也只要替换这一个文件（Luna 只读，不写它）。
+ * 查找顺序见 server/dlsite.mjs：`data/Dlsite` 优先，程序目录 `Dlsite/` 兜底。
+ */
+step(5.1, '放入 DLsite 元数据索引');
+const indexSrc = path.join(ROOT, 'Dlsite', 'rj_index.sqlite3');
+if (!fs.existsSync(indexSrc)) {
+  fail(`缺少 ${path.relative(ROOT, indexSrc)}：发布包必须带上 DLsite 索引（否则自动补社团 / 声优不生效）。`);
+}
+const indexDir = path.join(dataDir, 'Dlsite');
+fs.mkdirSync(indexDir, { recursive: true });
+const indexDest = path.join(indexDir, 'rj_index.sqlite3');
+fs.copyFileSync(indexSrc, indexDest);
+log(`  ✓ 索引：${path.relative(ROOT, indexDest)}  ${(fs.statSync(indexDest).size / 1024 / 1024).toFixed(1)} MB`);
+
 /* ------------------------------------------------------------ 6. 校验产物 */
 
 step(6, '校验产物');
@@ -230,6 +248,18 @@ fs.copyFileSync(path.join(dataDir, 'library.db'), path.join(verifyTmp, 'library.
   if (!v.schema) fail('发布包的库缺少 schema_version。');
 }
 fs.rmSync(verifyTmp, { recursive: true, force: true });
+
+// DLsite 索引校验：必须存在、可读、有数据（发布包缺了它功能就是哑的）
+{
+  const { DatabaseSync } = await import('node:sqlite');
+  const packed = path.join(dataDir, 'Dlsite', 'rj_index.sqlite3');
+  if (!fs.existsSync(packed)) fail(`发布包缺少 ${path.relative(ROOT, packed)}`);
+  const db = new DatabaseSync(packed, { readOnly: true });
+  const works = db.prepare('SELECT COUNT(*) AS n FROM works').get().n;
+  db.close();
+  log(`  ✓ DLsite 索引校验：works ${works} 条`);
+  if (!works) fail('发布包里的 DLsite 索引是空的。');
+}
 
 /* ------------------------------------------------------------ 7. 压缩包 */
 
@@ -290,7 +320,7 @@ log(`Luna v${fullVersion} 发布完成`);
 log('═'.repeat(70));
 log(`  程序目录：${path.relative(ROOT, appDir)}`);
 log(`  发布压缩包：${path.relative(ROOT, zipPath)}`);
-log(`  数据目录：${path.relative(ROOT, dataDir)}（全新空库，首次启动即为干净状态）`);
+log(`  数据目录：${path.relative(ROOT, dataDir)}（全新空库，首次启动即为干净状态；含 DLsite 索引）`);
 log('\n  使用方式：解压压缩包到任意位置，双击 Luna.exe 即可；');
 log('            数据保存在程序目录下的 data/，整个文件夹可随 U 盘携带。');
 log('            删除 data/ 则退回使用 %APPDATA%\\luna-media-library\\data。');;

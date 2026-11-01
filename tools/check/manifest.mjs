@@ -72,11 +72,11 @@ export const AREAS = [
   {
     id: 'voice',
     title: '音声专辑',
-    desc: '版本与差分、特典、视频版、三层轨道模型、ASMR 自动打标、图片不进轨道',
+    desc: '版本与差分、特典、视频版、三层轨道模型、ASMR 自动打标、按 RJ 号从 DLsite 索引补社团 / 声优、图片不进轨道',
     unit: [],
     ui: ['check/voice.mjs', 'check/voice-fixes.mjs'],
     app: true,
-    covers: ['server/asmr.mjs', 'server/scanner.mjs', 'server/db.mjs', 'public/app.js', 'public/styles.css'],
+    covers: ['server/asmr.mjs', 'server/dlsite.mjs', 'server/scanner.mjs', 'server/db.mjs', 'public/app.js', 'public/styles.css'],
   },
   {
     id: 'artist',

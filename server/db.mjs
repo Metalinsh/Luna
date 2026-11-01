@@ -961,6 +961,24 @@ export function voiceAlbumsMatching(text, { excludeId = null } = {}) {
   return rows.filter((r) => r.id !== Number(excludeId));
 }
 
+/**
+ * 所有带 RJ 号的音声发行（v1.2.5，DLsite 索引补齐用）。
+ *
+ * 只取补齐需要的列：扫描末尾要遍历一遍做「按 RJ 补社团 / 声优」，
+ * 单独一趟的原因见 scanner.mjs 里的 applyDlsiteToVoiceAlbums。
+ */
+export function listVoiceAlbumsWithRj() {
+  return db.prepare(`
+    SELECT id, rj_code, COALESCE(circle, '') AS circle,
+           COALESCE(album_artist, '') AS album_artist,
+           COALESCE(album_artist_source, '') AS album_artist_source,
+           COALESCE(artist_suggested, '') AS artist_suggested
+    FROM albums
+    WHERE kind = 'voice' AND rj_code IS NOT NULL AND TRIM(rj_code) <> ''
+    ORDER BY id
+  `).all();
+}
+
 /** 批量写入社团（只写库，不动文件） */
 export function setAlbumCircleBulk(ids, circle) {
   const value = String(circle ?? '').trim() || null;
@@ -1038,6 +1056,72 @@ export function setAlbumCircle(albumId, circle) {
   db.prepare('UPDATE albums SET circle = ?, updated_at = ? WHERE id = ?')
     .run(value, now(), Number(albumId));
   return value;
+}
+
+/**
+ * 按 DLsite 索引**补齐**社团（v1.2.5）：只填空位。
+ * 已有值（手工填的、自动套用来的）一律不动 —— 这条规则与 luna_apply.sql 一致，
+ * 目的是让扫描能反复执行、每次都安全。返回是否真的写入了。
+ */
+export function fillAlbumCircleIfEmpty(albumId, circle) {
+  const value = String(circle ?? '').replace(/\s+/g, ' ').trim() || null;
+  if (!value) return false;
+  const info = db.prepare(`
+    UPDATE albums SET circle = ?, updated_at = ?
+    WHERE id = ? AND (circle IS NULL OR TRIM(circle) = '')
+  `).run(value, now(), Number(albumId));
+  return info.changes > 0;
+}
+
+/**
+ * 按 DLsite 索引**补齐**声优（v1.2.5）：只填空位。
+ *
+ * 两处克制：
+ *   · 已有 `album_artist` 就不填（含标签识别的结果，尊重扫描结论）；
+ *   · 有「待确认建议」时也不填 —— 那是界面正在问用户的问题，不该被自动值抢掉。
+ *
+ * 写入时把来源标成 `dlsite`：`upsertVoiceAlbum` 认这个来源为**锁定**，后续扫描不会覆盖它。
+ */
+export function fillAlbumArtistIfEmpty(albumId, artist) {
+  const value = String(artist ?? '').replace(/\s+/g, ' ').trim() || null;
+  if (!value) return false;
+  const info = db.prepare(`
+    UPDATE albums SET album_artist = ?, album_artist_source = 'dlsite', updated_at = ?
+    WHERE id = ?
+      AND (album_artist IS NULL OR TRIM(album_artist) = '')
+      AND (artist_suggested IS NULL OR TRIM(artist_suggested) = '')
+  `).run(value, now(), Number(albumId));
+  return info.changes > 0;
+}
+
+/**
+ * 索引更新后修正「当初由 DLsite 补进去的」声优（v1.2.5）：只动 `source='dlsite'` 的行。
+ * 手工填的（`manual`）、标签识别出的（`tag`）一律不碰。返回是否真的改了。
+ */
+export function updateDlsiteArtist(albumId, artist) {
+  const value = String(artist ?? '').replace(/\s+/g, ' ').trim() || null;
+  if (!value) return false;
+  const info = db.prepare(`
+    UPDATE albums SET album_artist = ?, updated_at = ?
+    WHERE id = ? AND album_artist_source = 'dlsite'
+  `).run(value, now(), Number(albumId));
+  return info.changes > 0;
+}
+
+/**
+ * 索引更新后清掉这张专辑上**过期的**自动标签（v1.2.5）。
+ *
+ * 只删 `source='dlsite'` 且不在保留名单里的关联：手工打的标签、其它规则来的标签
+ * 一律不动。返回删掉的关联数。
+ */
+export function removeDlsiteTagLinksExcept(albumId, keepTagIds) {
+  const keep = (keepTagIds ?? []).map(Number).filter(Number.isFinite);
+  const notIn = keep.length ? `AND at.tag_id NOT IN (${keep.map(() => '?').join(', ')})` : '';
+  const info = db.prepare(`
+    DELETE FROM album_tags AS at
+    WHERE at.album_id = ? AND at.source = 'dlsite' ${notIn}
+  `).run(Number(albumId), ...keep);
+  return info.changes;
 }
 
 export function setAlbumCompilation(albumId, flag) {
@@ -1693,20 +1777,25 @@ export function upsertVoiceAlbum({
   const nextTitle = titleSource === 'tag' && title ? title : (existing.title ?? title);
   // 用户手工填过艺术家 → 永不被扫描覆盖；
   // 否则每次扫描都按「曲目互证」的最新结论重算（错误的标签值会被清掉，转入 artist_suggested）
-  const manualArtist = existing.album_artist_source === 'manual';
+  //
+  // v1.2.5：`dlsite` 来源（按 RJ 号从 DLsite 索引自动补齐的声优）与手工值同样**锁定**。
+  // 否则下一轮扫描 analyzeRelease 拿不到标签艺术家（压缩包根本没读标签）就会把它清成 NULL，
+  // 索引文件一换、一删更是直接丢数据。
+  const lockedArtist = existing.album_artist_source === 'manual'
+    || existing.album_artist_source === 'dlsite';
   // 用户已对「标签建议」做过选择 → 不再重复提示
   const decided = Boolean(existing.artist_decision);
   db.prepare(`
     UPDATE albums SET title = ?, kind = 'voice',
       album_artist = CASE WHEN ? = 1 THEN album_artist ELSE ? END,
-      album_artist_source = CASE WHEN ? = 1 THEN 'manual'
+      album_artist_source = CASE WHEN ? = 1 THEN album_artist_source
                                  WHEN ? IS NOT NULL THEN 'tag'
                                  ELSE NULL END,
       artist_suggested = ?,
       rj_code = COALESCE(?, rj_code), release_root = ?, has_bonus = ?, has_video = ?, updated_at = ?
     WHERE id = ?
-  `).run(nextTitle, manualArtist ? 1 : 0, artist ?? null,
-    manualArtist ? 1 : 0, artist ?? null,
+  `).run(nextTitle, lockedArtist ? 1 : 0, artist ?? null,
+    lockedArtist ? 1 : 0, artist ?? null,
     decided ? null : (artistSuggested ?? existing.artist_suggested ?? null),
     rjCode, releaseRoot, hasBonus ? 1 : 0, hasVideo ? 1 : 0, t, existing.id);
   return existing.id;
