@@ -213,9 +213,13 @@
 </footer>
 
 <div class="nowplaying" id="nowPlaying" hidden>
-  <button class="np-close" id="npClose" title="关闭 (ESC)">
-    <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
-  </button>
+  <!-- 左上角「返回」：取代原来右上角的 ✕（用户要求），返回即回到进入本页前的那个视图 -->
+  <div class="np-topbar">
+    <button class="np-back" id="npBack" title="返回 (ESC)">
+      <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      返回
+    </button>
+  </div>
   <div class="np-grid" id="npGrid">
     <div class="np-left" id="npLeft">
       <div class="np-bigcover" id="npBigCover"></div>

@@ -259,6 +259,19 @@ input, select { font: inherit; }
   direction: rtl; text-align: left; color: var(--fg-dim);
 }
 .library-item .lib-count { color: var(--fg-faint); font-variant-numeric: tabular-nums; font-size: 11px; }
+/*
+ * 库类别徽标：ASMR / 普通。
+ * 专辑墙按所选音乐库的类别决定用哪一套标签，所以这个标记必须一眼可见。
+ */
+.library-item .lib-kind {
+  flex: none; padding: 1px 6px; border-radius: 6px; font-size: 10.5px;
+  border: 1px solid rgba(var(--mix-fg), .18); color: var(--fg-faint);
+  letter-spacing: .02em;
+}
+.library-item .lib-kind.is-voice {
+  border-color: rgba(125, 108, 245, .55); color: var(--accent-strong-fg);
+  background: var(--accent-soft);
+}
 .library-item .lib-del {
   border: 0; background: transparent; color: var(--fg-faint); padding: 2px; border-radius: 6px;
   opacity: 0; transition: opacity .15s, color .15s;
@@ -631,6 +644,15 @@ input[type="range"]::-webkit-slider-thumb {
 /* 表头行：清除筛选 + 标题 + 右侧封面尺寸 */
 .tagbar-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tagbar-title { font-size: 12px; color: var(--fg-faint); }
+/*
+ * 当前标签栏属于哪一套（普通专辑 / ASMR）。
+ * 两套标签相互独立，标出来才不会被误认为「标签丢了」。
+ */
+.tagbar-kind {
+  flex: none; padding: 2px 8px; border-radius: 99px;
+  border: 1px solid rgba(var(--mix-fg), .16);
+  font-size: 11px; color: var(--fg-dim); letter-spacing: .02em;
+}
 /* 每一栏：固定宽度的类目名 + 可换行的 chip 区 */
 .tagbar-row { display: flex; align-items: flex-start; gap: 10px; }
 .tagbar-label {
@@ -659,6 +681,18 @@ input[type="range"]::-webkit-slider-thumb {
 .tag-group-head { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 8px; }
 .tag-group-head h3 { margin: 0; font-size: 14px; }
 .tag-group-head span { font-size: 12px; color: var(--fg-faint); }
+
+/*
+ * 标签页的两大段：普通专辑 / ASMR。
+ * 两套标签相互独立，各自再按风格 / 社团 / CV 分组，用一条分割线划清边界。
+ */
+.tag-kind-block { margin-bottom: 26px; }
+.tag-kind-block + .tag-kind-block {
+  border-top: 1px solid var(--line); padding-top: 18px;
+}
+.tag-kind-head { display: flex; align-items: baseline; gap: 10px; }
+.tag-kind-head h2 { margin: 0; font-size: 17px; letter-spacing: .02em; }
+.tag-kind-head span { font-size: 12px; color: var(--fg-faint); }
 select.tag-cat { flex: none; padding: 3px 8px; border-radius: 8px; font-size: 12px; min-width: 72px; }
 
 .bulkbar {
@@ -908,14 +942,22 @@ body.is-selecting .select-mark { display: flex; }
   background-size: auto, cover;
   background-position: 0 0, center;
   background-repeat: no-repeat, no-repeat;
-  display: flex; flex-direction: column; padding: 34px 40px 110px;
+  display: flex; flex-direction: column; padding: 18px 40px 110px;
 }
-.np-close {
-  position: absolute; top: 20px; right: 24px; width: 36px; height: 36px;
-  border-radius: 10px; border: 1px solid var(--line); background: rgba(var(--mix-fg),.04);
-  color: var(--fg-dim); display: flex; align-items: center; justify-content: center;
+/*
+ * 左上角「返回」栏。
+ * 以前是右上角一个 36×36 的 ✕ 绝对定位；改成带文字的返回按钮后，
+ * 绝对定位会压住封面/歌词区，所以单独占一行（.np-grid 仍是 flex:1，不影响可拖动分栏）。
+ */
+.np-topbar { flex: none; display: flex; align-items: center; margin-bottom: 6px; }
+.np-back {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 13px 6px 9px; border-radius: 10px;
+  border: 1px solid var(--line); background: rgba(var(--mix-fg),.04);
+  color: var(--fg-dim); font-size: 13px; transition: color .15s, background .15s, border-color .15s;
 }
-.np-close:hover { color: var(--fg); background: rgba(var(--mix-fg),.09); }
+.np-back:hover { color: var(--fg); background: rgba(var(--mix-fg),.09); border-color: var(--line-strong); }
+.np-back svg { width: 16px; height: 16px; }
 .np-grid {
   display: grid;
   /* 左栏宽度由 --np-cover-w 控制：默认占窗口一半，可拖动调整 */

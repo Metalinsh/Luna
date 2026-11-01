@@ -134,6 +134,7 @@ try {
     const items = [...document.querySelectorAll('.library-item')];
     const names = items.map(i => i.querySelector('.lib-path')?.textContent?.trim());
     const beforeCount = document.querySelectorAll('.album-card').length;
+    const beforeActiveId = document.querySelector('.library-item.is-active')?.dataset.id ?? null;
     items.find(i => /ASMR/i.test(i.querySelector('.lib-path')?.textContent ?? '')).click();
     await new Promise(z => setTimeout(z, 1900));
 
@@ -143,6 +144,7 @@ try {
     return {
       names,
       beforeCount,
+      beforeActiveId,
       count: cards.length,
       activeNames: activeItems.map(i => i.querySelector('.lib-path')?.textContent?.trim()),
       titles: cards.map(c => c.querySelector('.album-name')?.textContent?.trim().slice(0, 12)),
@@ -152,10 +154,18 @@ try {
   // 期望值从接口现算，避免音声数量变化后测试失效
   const expected = await (await fetch(`${API}/api/albums?limit=100`)).json();
   const expVoice = expected.albums.filter((a) => a.is_voice).length;
-  const expTotal = expected.albums.length;
+  /*
+   * v1.2.4 起专辑墙**必须挂在一个音乐库上**，进入时显示的是上次选中的那个库
+   * （首次则是第一个库），不再有「全部库」视图 —— 这里按当前高亮的库现算期望张数。
+   */
+  const activeLibId = libs.beforeActiveId;   // 点击 ASMR **之前**高亮的库，对应 beforeCount
+  const expActiveLib = activeLibId
+    ? (await (await fetch(`${API}/api/albums?limit=100&libraryId=${activeLibId}`)).json()).albums.length
+    : 0;
 
   ok('侧栏有 Album / ASMR 两个库', libs.names?.length === 2, (libs.names ?? []).join(' / '));
-  ok('未筛选时显示全部', libs.beforeCount === expTotal, `${libs.beforeCount} 张（期望 ${expTotal}）`);
+  ok('专辑墙默认只显示当前所选库的专辑', libs.beforeCount === expActiveLib,
+    `${libs.beforeCount} 张（当前库 #${activeLibId} 期望 ${expActiveLib}，全库 ${expected.albums.length}）`);
   ok('点击 ASMR 后只显示音声专辑', libs.count === expVoice,
     `${libs.count} 张（期望 ${expVoice}）：${(libs.titles ?? []).join(' | ')}`);
   ok('被点击的库高亮且只有它高亮',

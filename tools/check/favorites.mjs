@@ -110,7 +110,15 @@ try {
   console.log('\n— 需求2：卡片显示「[社团] · 艺术家」 —');
   const card = await ev(`(async () => {
     location.hash = '#/';
-    await new Promise(z => setTimeout(z, 1600));
+    await new Promise(z => setTimeout(z, 1200));
+    /*
+     * 专辑墙按音乐库过滤（v1.2.4）：先切到该音声发行所属的 ASMR 库，
+     * 否则卡片不在墙上、断言会误判为「没有署名行」。
+     */
+    const libs = await fetch('/api/libraries').then(x => x.json());
+    const lib = libs.libraries.find(l => l.kind === 'voice') ?? libs.libraries[0];
+    document.querySelector('.library-item[data-id="' + lib.id + '"]')?.click();
+    await new Promise(z => setTimeout(z, 2200));
     const cards = [...document.querySelectorAll('.album-card')];
     const hit = cards.find(c => (c.querySelector('.album-credit')?.textContent ?? '').includes('上海飯店'));
     return {
@@ -155,6 +163,57 @@ try {
   ok('「喜欢的ASMR」只显示 1 张音声', views.asmr.cards.length === 1, views.asmr.cards.join(' | '));
   ok('「喜欢的专辑」只显示 1 张普通专辑', views.album.cards.length === 1, views.album.cards.join(' | '));
   await shot('v6-fav-asmr.png');
+
+  console.log('\n— 需求3c：收藏页的标签筛选与专辑墙互相独立 —');
+  /*
+   * 回归（v1.2.4 实测缺陷）：点导航时曾**先 loadAlbums() 再 showView()**，而
+   * activeTagFilter() 是靠 state.view 决定用哪一套筛选的 —— 首次进收藏页时视图
+   * 还停在专辑墙，于是把专辑墙的标签筛选套了进去：
+   * 「专辑墙筛了『已预读』，喜欢的ASMR 里没预读的那张就消失了」。
+   */
+  const isolate = await ev(`(async () => {
+    [...document.querySelectorAll('.nav-item')].find(b => b.dataset.view === 'albums').click();
+    await new Promise(z => setTimeout(z, 1600));
+    const libs = await fetch('/api/libraries').then(r => r.json());
+    const voiceLib = libs.libraries.find(l => l.kind === 'voice') ?? libs.libraries[0];
+    document.querySelector('.library-item[data-id="' + voiceLib.id + '"]')?.click();
+    await new Promise(z => setTimeout(z, 2000));
+
+    const chip = [...document.querySelectorAll('#tagBar .tagbar-chip[data-tag]')]
+      .find(c => c.textContent.includes('已预读'));
+    if (!chip) return { noChip: true };
+    chip.click();
+    await new Promise(z => setTimeout(z, 1700));
+    const wallFiltered = (document.querySelector('#resultCount')?.textContent ?? '').includes('标签筛选');
+
+    [...document.querySelectorAll('.nav-item')].find(b => b.dataset.view === 'favasmr').click();
+    await new Promise(z => setTimeout(z, 2000));
+    return {
+      noChip: false,
+      wallFiltered,
+      favCount: document.querySelectorAll('#albumGrid .album-card').length,
+      favResult: document.querySelector('#resultCount')?.textContent ?? '',
+      favActive: [...document.querySelectorAll('#tagBar .tagbar-chip[data-tag]')]
+        .filter(c => c.classList.contains('is-active')).length,
+    };
+  })()`);
+  const favApi = await j('/api/albums?limit=100&kind=voice&favorite=1');
+  ok('专辑墙可按「已预读」筛选', isolate.noChip === true || isolate.wallFiltered === true,
+    isolate.noChip ? '（该套标签里没有「已预读」，跳过）' : String(isolate.wallFiltered));
+  ok('收藏页不受专辑墙筛选影响', isolate.noChip === true || (
+    isolate.favCount === favApi.albums.length
+    && !/标签筛选/.test(isolate.favResult)
+    && isolate.favActive === 0
+  ), `收藏页 ${isolate.favCount} 张 / 接口 ${favApi.albums.length} 张 · ${isolate.favResult}`);
+
+  // 清掉专辑墙的筛选，避免影响后续断言
+  await ev(`(async () => {
+    [...document.querySelectorAll('.nav-item')].find(b => b.dataset.view === 'albums').click();
+    await new Promise(z => setTimeout(z, 1500));
+    document.querySelector('#tagBar [data-clear]')?.click();
+    await new Promise(z => setTimeout(z, 1200));
+    return true;
+  })()`);
 
   console.log('\n— 需求3b：单曲喜欢 → 喜欢的音乐；音声单曲不收录 —');
   const trackFav = await ev(`(async () => {

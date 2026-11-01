@@ -141,11 +141,19 @@ try {
   await shot('v7-track-row.png');
 
   console.log('\n— 需求3：多艺术家专辑显示完整 —');
-  await ev(`location.hash = '#/'`);
-  await sleep(2200);
   const multi = await ev(`(async () => {
     const r = await fetch('/api/albums?limit=100').then(x => x.json());
     const a = r.albums.find(x => /One by One/.test(x.album));
+    /*
+     * 专辑墙按音乐库过滤（v1.2.4）：先切到该专辑所属类别的库，
+     * 否则卡片根本不在墙上（墙上只有当前库的专辑）。
+     */
+    const libs = await fetch('/api/libraries').then(x => x.json());
+    const lib = libs.libraries.find(l => l.kind === (a.is_voice ? 'voice' : 'music')) ?? libs.libraries[0];
+    location.hash = '#/';
+    await new Promise(z => setTimeout(z, 1400));
+    document.querySelector('.library-item[data-id="' + lib.id + '"]')?.click();
+    await new Promise(z => setTimeout(z, 2200));
     const cards = [...document.querySelectorAll('.album-card')];
     const card = cards.find(c => (c.querySelector('.album-name')?.textContent ?? '').includes('One by One'));
     const d = await fetch('/api/albums/' + a.id).then(x => x.json());

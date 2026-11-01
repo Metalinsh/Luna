@@ -90,6 +90,15 @@ try {
   await cdp.send('Page.navigate', { url: BASE });
   await sleep(2500);
 
+  // 专辑墙现在必须选中一个音乐库（v1.2.4）：切到 ASMR 库后才有音声发行卡片
+  const libs = (await (await fetch(`${BASE}/api/libraries`)).json()).libraries;
+  const voiceLib = libs.find((l) => l.kind === 'voice') ?? libs[0];
+  await cdp.eval(`(async () => {
+    document.querySelector('.library-item[data-id="${voiceLib.id}"]')?.click();
+    await new Promise(z => setTimeout(z, 2200));
+    return true;
+  })()`);
+
   console.log('\n— 专辑墙 —');
   const cards = await cdp.eval(`(() => {
     const out = [];
@@ -103,8 +112,8 @@ try {
     return out;
   })()`);
   const voiceCards = cards.filter((c) => c.badges.some((b) => /版本/.test(b)));
-  // 期望张数从接口现算，避免用户新增音声作品后测试失效
-  const expVoice = (await (await fetch(BASE + '/api/albums?limit=100&kind=voice')).json()).albums.length;
+  // 期望张数从接口现算（限定在当前库内），避免用户新增音声作品后测试失效
+  const expVoice = (await (await fetch(`${BASE}/api/albums?limit=100&kind=voice&libraryId=${voiceLib.id}`)).json()).albums.length;
   ok('专辑墙出现全部音声发行卡片', voiceCards.length === expVoice,
     `找到 ${voiceCards.length} 张（期望 ${expVoice}）：${voiceCards.map((c) => c.badges.join('/')).join(' | ')}`);
   ok('卡片显示版本数角标', voiceCards.every((c) => c.badges.some((b) => /^\d+ 个版本$/.test(b))),
@@ -277,6 +286,41 @@ try {
   ok('该版本确实以 mp3 播放', mp3Head?.headers.get('content-type') === 'audio/mpeg',
     `${String(mp3Switch.src ?? '').split('/').pop()} · ${mp3Head?.headers.get('content-type')} · 激活=${mp3Switch.active}`);
   await cdp.shot('v3-voice-mp3-version.png');
+
+  console.log('\n— 版本 chip 播放后的切轨队列（上一首 / 下一首）—');
+  /*
+   * 回归（v1.2.4 实测缺陷）：点版本 chip 播放时，播放队列曾被写成**只有被点的那一行**，
+   * 于是上一首/下一首只能在原地打转 —— 用户看到的就是「按钮按了没反应」。
+   * 现在队列是整组轨道（正文 / 特典各自成组），以被点的那一行为起点。
+   * 这里用磁盘上的音声发行验证（与压缩包发行走同一个 chip 处理函数）。
+   */
+  const queueNav = await cdp.eval(`(async () => {
+    location.hash = '#/album/' + ${Number(mp3Album.id)};
+    await new Promise(res => setTimeout(res, 2000));
+    const rows = [...document.querySelectorAll('#voiceTrackTable .voice-row:not(.is-head)')];
+    const chip = rows[0]?.querySelector('.ver-chip:not([data-kind="video"])');
+    if (!chip) return { ok: false, reason: '没有可播放的版本 chip' };
+    chip.click();
+    await new Promise(res => setTimeout(res, 1500));
+    const t0 = document.querySelector('#npTitle')?.textContent?.trim() ?? '';
+    document.querySelector('#nextBtn').click();
+    await new Promise(res => setTimeout(res, 1500));
+    const t1 = document.querySelector('#npTitle')?.textContent?.trim() ?? '';
+    // 先回到本曲开头，避开「>3 秒则先归零」的分支
+    const audio = document.querySelector('audio');
+    if (audio) audio.currentTime = 0;
+    await new Promise(res => setTimeout(res, 300));
+    document.querySelector('#prevBtn').click();
+    await new Promise(res => setTimeout(res, 1500));
+    const t2 = document.querySelector('#npTitle')?.textContent?.trim() ?? '';
+    return { ok: true, t0, t1, t2 };
+  })()`);
+  ok('版本 chip 播放后「下一首」能切轨',
+    queueNav.ok === true && Boolean(queueNav.t1) && queueNav.t1 !== queueNav.t0,
+    queueNav.ok ? `${queueNav.t0} → ${queueNav.t1}` : queueNav.reason);
+  ok('「上一首」能切回上一首',
+    queueNav.ok === true && queueNav.t2 === queueNav.t0,
+    queueNav.ok ? `回到 ${queueNav.t2}` : queueNav.reason);
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 } catch (err) {

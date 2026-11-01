@@ -15,7 +15,7 @@ import {
   DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText, PERSIST_SEP,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -119,13 +119,17 @@ function createV2Tables() {
 
     CREATE TABLE IF NOT EXISTS tags (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      name        TEXT NOT NULL COLLATE NOCASE,
+      -- V12：**两套独立标签**（music 普通专辑 / voice ASMR），
+      -- 同名标签在两套里各有一份，互不影响；专辑墙按当前音乐库的类别只显示对应那套
+      kind        TEXT NOT NULL DEFAULT 'music',
       color       INTEGER NOT NULL DEFAULT 0,
       pinned      INTEGER NOT NULL DEFAULT 0,
       -- V8：标签分类（style 风格 / circle 社团 / artist CV），专辑墙按三类分栏展示
       category    TEXT NOT NULL DEFAULT 'style',
       created_at  INTEGER NOT NULL,
-      updated_at  INTEGER NOT NULL
+      updated_at  INTEGER NOT NULL,
+      UNIQUE(kind, name)
     );
 
     CREATE TABLE IF NOT EXISTS album_tags (
@@ -598,6 +602,98 @@ function migrateV11Separator() {
   return { changed };
 }
 
+/**
+ * V12：标签拆成「普通专辑 / ASMR」两套（`tags.kind`）。
+ *
+ * 背景：标签原先是一个**全局命名空间**（`name UNIQUE`），普通专辑与音声发行共用同一批标签，
+ * 于是给 ASMR 打的「萝莉 / 雌小鬼」会出现在普通专辑的标签栏里，反之亦然。
+ *
+ * 拆分规则（尽量不丢东西）：
+ *   · 只关联过音声发行 → `kind='voice'`；只关联过普通专辑 → `'music'`
+ *   · 两类都关联过 → **拆成两份**（属性完全相同），`album_tags` 按专辑类别各自指向
+ *   · 一条都没关联的 → 两套各留一份（宁可重复，也不让用户觉得标签凭空少了）
+ *
+ * 拆分后重复的那一份是新 id，因此 `album_tags` 必须整表重建。
+ * 标签是用户资产，这里只做「按类别归位」，不改任何名字、颜色、分类与置顶状态。
+ */
+function migrateV12TagKinds() {
+  if (columnNames('tags').includes('kind')) return { tags: 0, duplicated: 0, relinked: 0 };
+
+  const tags = db.prepare('SELECT * FROM tags').all();
+  const links = db.prepare(`
+    SELECT at.album_id, at.tag_id, at.source, at.added_at, COALESCE(a.kind, 'music') AS kind
+    FROM album_tags at LEFT JOIN albums a ON a.id = at.album_id
+  `).all();
+
+  // tag_id → 它关联到的专辑类别集合
+  const kindsByTag = new Map();
+  for (const l of links) {
+    const kind = l.kind === 'voice' ? 'voice' : 'music';
+    if (!kindsByTag.has(l.tag_id)) kindsByTag.set(l.tag_id, new Set());
+    kindsByTag.get(l.tag_id).add(kind);
+  }
+
+  db.exec(`
+    CREATE TABLE tags_v12 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL COLLATE NOCASE,
+      kind TEXT NOT NULL DEFAULT 'music',
+      color INTEGER NOT NULL DEFAULT 0,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      category TEXT NOT NULL DEFAULT 'style',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(kind, name)
+    );
+    CREATE TABLE album_tags_v12 (
+      album_id INTEGER NOT NULL,
+      tag_id INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      added_at INTEGER NOT NULL,
+      PRIMARY KEY (album_id, tag_id)
+    );
+  `);
+
+  const insertTag = db.prepare(`
+    INSERT INTO tags_v12 (name, kind, color, pinned, category, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  const newIdByOldAndKind = new Map();   // `${旧id}|${kind}` → 新 id
+  let duplicated = 0;
+  for (const t of tags) {
+    const known = kindsByTag.get(t.id) ?? new Set();
+    const kinds = known.size ? [...known] : ['music', 'voice'];
+    if (kinds.length > 1) duplicated += 1;
+    for (const kind of kinds) {
+      const info = insertTag.run(
+        t.name, kind, t.color ?? 0, t.pinned ?? 0, t.category ?? 'style',
+        t.created_at ?? now(), t.updated_at ?? now(),
+      );
+      newIdByOldAndKind.set(`${t.id}|${kind}`, info.lastInsertRowid);
+    }
+  }
+
+  const insertLink = db.prepare(`
+    INSERT OR IGNORE INTO album_tags_v12 (album_id, tag_id, source, added_at) VALUES (?, ?, ?, ?)
+  `);
+  let relinked = 0;
+  for (const l of links) {
+    const kind = l.kind === 'voice' ? 'voice' : 'music';
+    const newTagId = newIdByOldAndKind.get(`${l.tag_id}|${kind}`);
+    if (!newTagId) continue;
+    relinked += insertLink.run(l.album_id, newTagId, l.source ?? 'manual', l.added_at ?? now()).changes;
+  }
+
+  db.exec(`
+    DROP TABLE album_tags;
+    DROP TABLE tags;
+    ALTER TABLE tags_v12 RENAME TO tags;
+    ALTER TABLE album_tags_v12 RENAME TO album_tags;
+    CREATE INDEX IF NOT EXISTS idx_album_tags_tag ON album_tags(tag_id);
+  `);
+  return { tags: tags.length, duplicated, relinked };
+}
+
 function migrate() {
   const hadTracks = tableExists('tracks');
   const hadMeta = tableExists('meta');
@@ -629,15 +725,17 @@ function migrate() {
     migrationReport.albums = result.groups;
     migrationReport.backup = result.backup;
   } else if (version < SCHEMA_VERSION) {
-    // v2..v10 → v11：只补新表、新列与分隔符改写，无需重建专辑
+    // v2..v11 → v12：只补新表、新列与两类数据改写（分隔符、标签分套），无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = version >= 10
-      ? `v${version} → v${SCHEMA_VERSION}：库内分隔符升级（详见下条）`
-      : version >= 9
-        ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
-        : version >= 8
-          ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
-          : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
+    migrationReport.note = version >= 11
+      ? `v${version} → v${SCHEMA_VERSION}：标签拆分为「普通专辑 / ASMR」两套（详见下条）`
+      : version >= 10
+        ? `v${version} → v${SCHEMA_VERSION}：库内分隔符升级（详见下条）`
+        : version >= 9
+          ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
+          : version >= 8
+            ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
+            : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
   }
 
   if (version < 8) {
@@ -657,6 +755,11 @@ function migrate() {
   if (version < 11) {
     const sep = migrateV11Separator();
     migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}已把 ${sep.changed} 处 NUL 分隔符改写为 0x01（修复桌面版 node:sqlite 读取含 NUL 文本被截断，导致包内歌词匹配与「从库中移除」的按键匹配失效）`;
+  }
+
+  if (version < 12) {
+    const kinds = migrateV12TagKinds();
+    migrationReport.note = `${migrationReport.note ? `${migrationReport.note}；` : ''}标签已拆成「普通专辑 / ASMR」两套（共 ${kinds.tags} 个标签，其中 ${kinds.duplicated} 个按专辑类别拆分成两份，重建 ${kinds.relinked} 条专辑关联）`;
   }
 
   setMeta('schema_version', String(SCHEMA_VERSION));

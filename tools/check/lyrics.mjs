@@ -164,9 +164,34 @@ try {
   ok('字号已持久化', Number.isFinite(font.saved), `${font.saved}px`);
   await shot('v10-lyrics-font.png');
 
-  // 复位
-  await ev(`localStorage.removeItem('npCoverWidth'); localStorage.removeItem('lyricFontSize');
-    document.querySelector('#npClose')?.click(); true`);
+  // 复位（同时验证退出方式：左上角「返回」，返回后回到进入前的那个视图）
+  const exitUi = await ev(`(async () => {
+    localStorage.removeItem('npCoverWidth');
+    localStorage.removeItem('lyricFontSize');
+    const back = document.querySelector('#npBack');
+    const r = back?.getBoundingClientRect();
+    const viewBefore = document.querySelector('.view:not([hidden])')?.id ?? '';
+    const snapshot = {
+      backText: back?.textContent?.replace(/\\s+/g, ' ').trim() ?? '',
+      leftTop: Boolean(r) && r.left < window.innerWidth / 4 && r.top < window.innerHeight / 4,
+      closeGone: document.querySelector('#npClose') === null
+        && document.querySelectorAll('.np-close').length === 0,
+      viewBefore,
+    };
+    back?.click();
+    await new Promise(z => setTimeout(z, 1200));
+    return {
+      ...snapshot,
+      overlayHidden: document.querySelector('#nowPlaying').hidden,
+      viewAfter: document.querySelector('.view:not([hidden])')?.id ?? '',
+    };
+  })()`);
+  ok('单曲详情：退出改为左上角「返回」，右上角 ✕ 已移除',
+    exitUi.backText === '返回' && exitUi.leftTop === true && exitUi.closeGone === true,
+    `${JSON.stringify(exitUi.backText)} · 在左上=${exitUi.leftTop} · ✕已移除=${exitUi.closeGone}`);
+  ok('单曲详情：返回后回到进入前的那个视图',
+    exitUi.overlayHidden === true && exitUi.viewAfter === exitUi.viewBefore,
+    `${exitUi.viewBefore} → ${exitUi.viewAfter}`);
   console.log('  （已复位封面宽度与歌词字号）');
 
   /*

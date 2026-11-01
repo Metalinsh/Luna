@@ -227,6 +227,29 @@ try {
     return true;
   })()`);
 
+  /*
+   * v1.2.4 起专辑墙**必须挂在一个音乐库上**，因此「包内」角标的对照口径要收敛到当前库：
+   * 先找到 target 所在的库并切过去，再按该库里的压缩包专辑数对照。
+   */
+  const libsAll = (await (await fetch(`${BASE}/api/libraries`)).json()).libraries;
+  let targetLib = libsAll[0];
+  let withArchiveInLib = [];
+  for (const l of libsAll) {
+    const list = (await (await fetch(`${BASE}/api/albums?limit=200&libraryId=${l.id}`)).json()).albums;
+    if (list.some((a) => a.id === target.id)) {
+      targetLib = l;
+      withArchiveInLib = list.filter((a) => a.archive?.archives > 0);
+      break;
+    }
+  }
+  await cdp.eval(`(async () => {
+    location.hash = '#/';
+    await new Promise(z => setTimeout(z, 1500));
+    document.querySelector('.library-item[data-id="${targetLib.id}"]')?.click();
+    await new Promise(z => setTimeout(z, 2200));
+    return true;
+  })()`);
+
   console.log('\n— 专辑墙角标 —');
   const cards = await cdp.eval(`(() => {
     const out = [];
@@ -240,8 +263,8 @@ try {
     return out;
   })()`);
   const archivedCards = cards.filter((c) => c.badges.some((b) => b.includes('包内')));
-  ok('专辑墙出现「包内」角标', archivedCards.length === withArchiveAll.length,
-    `界面上 ${archivedCards.length} 张（接口 ${withArchiveAll.length} 张）`);
+  ok('专辑墙出现「包内」角标', archivedCards.length === withArchiveInLib.length,
+    `界面上 ${archivedCards.length} 张（当前库 #${targetLib.id} 接口 ${withArchiveInLib.length} 张）`);
   const only = archivedCards.every((c) => cards.filter((x) => x.id === c.id).length === 1);
   ok('角标只出现在压缩包专辑上', only && archivedCards.length < cards.length,
     `全部 ${cards.length} 张卡片中 ${archivedCards.length} 张带角标`);

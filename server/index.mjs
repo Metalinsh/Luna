@@ -28,6 +28,7 @@ import * as writeJobs from './write-jobs.mjs';
 import * as writers from './writers.mjs';
 import {
   scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
+  isUnderAsmrFolder,
 } from './scanner.mjs';
 
 ensureDirs();
@@ -86,7 +87,16 @@ app.get('/api/stats', (req, res) => {
 /* ---------------------------------------------------------------- libraries */
 
 app.get('/api/libraries', (req, res) => {
-  res.json({ libraries: store.listLibraries() });
+  /*
+   * 附带每个库的**类别**：music（普通专辑库）/ voice（ASMR 库）。
+   * 判定沿用扫描器那条既有规则（库目录名含 ASMR → 其专辑一律视为音声发行），
+   * 专辑墙据此决定显示哪一套标签（见 public/app.js 的 wallTagKind）。
+   */
+  const libraries = store.listLibraries().map((l) => ({
+    ...l,
+    kind: isUnderAsmrFolder(l.path) ? 'voice' : 'music',
+  }));
+  res.json({ libraries });
 });
 
 app.post('/api/libraries', asyncRoute(async (req, res) => {
@@ -447,12 +457,14 @@ function sameLoose(a, b) {
 /**
  * 取用（或新建）一个「与名称同名」的标签，并把它归入对应的分栏。
  * 名称不合法（空 / 超长）时如实说明原因，不静默失败。
+ *
+ * 社团 / 艺术家都是音声发行的概念，因此这里的标签落在 **ASMR 那一套**里。
  */
-function ensureNameTag(name, category = null) {
+function ensureNameTag(name, category = null, kind = 'voice') {
   const check = tagsApi.validateTagName(name);
   if (!check.ok) return { tag: null, reason: check.error };
   try {
-    return { tag: tagsApi.ensureTag(check.name, category), reason: null };
+    return { tag: tagsApi.ensureTag(check.name, category, kind), reason: null };
   } catch (err) {
     return { tag: null, reason: err.message };
   }
@@ -509,7 +521,7 @@ function autoLinkName(baseIds, value, field, { matchOthers = true } = {}) {
     }
   }
 
-  const { tag, reason } = ensureNameTag(name, field === 'circle' ? 'circle' : 'artist');
+  const { tag, reason } = ensureNameTag(name, field === 'circle' ? 'circle' : 'artist', 'voice');
   const targets = [...base, ...matched.map((a) => a.id)];
   if (tag?.id) tagsApi.applyAlbumTags(targets, { add: [tag.id] });
 
@@ -784,13 +796,24 @@ app.get('/api/tracks/:id/lyrics', asyncRoute(async (req, res) => {
 
 /* --------------------------------------------------------------------- tags */
 
+/** 只接受两套标签里的合法值；未给/非法 → null（= 两套都要，标签管理页用） */
+const tagKindParam = (value) => (tagsApi.TAG_KINDS.includes(String(value)) ? String(value) : null);
+
 app.get('/api/tags', (req, res) => {
-  res.json({ tags: tagsApi.listTags({ sort: String(req.query.sort ?? 'usage') }) });
+  res.json({
+    tags: tagsApi.listTags({
+      sort: String(req.query.sort ?? 'usage'),
+      kind: tagKindParam(req.query.kind),
+    }),
+  });
 });
 
 app.post('/api/tags', (req, res) => {
   try {
-    const tag = tagsApi.createTag(req.body?.name, req.body?.color, req.body?.category);
+    const tag = tagsApi.createTag(
+      req.body?.name, req.body?.color, req.body?.category,
+      tagsApi.normalizeTagKind(req.body?.kind),
+    );
     scheduleAssetBackup('tag-create');
     res.status(201).json({ tag });
   } catch (err) {
@@ -823,20 +846,31 @@ app.post('/api/tags/:id/merge', (req, res) => {
   const id = parseId(req.params.id);
   const targetId = parseId(req.body?.targetId);
   if (!id || !targetId) return badRequest(res, '无效的标签 ID');
-  const result = tagsApi.mergeTags(id, targetId);
-  scheduleAssetBackup('tag-merge');
-  res.json({ ...result, tags: tagsApi.listTags() });
+  try {
+    const result = tagsApi.mergeTags(id, targetId);
+    scheduleAssetBackup('tag-merge');
+    // 合并只可能发生在同一套里，返回那一套即可
+    res.json({ ...result, tags: tagsApi.listTags({ kind: result.source?.kind ?? null }) });
+  } catch (err) {
+    badRequest(res, err.message);
+  }
 });
 
 app.post('/api/albums/:id/tags', (req, res) => {
   const id = parseId(req.params.id);
   if (!id) return badRequest(res, '无效的专辑 ID');
-  if (!store.getAlbumById(id)) return res.status(404).json({ error: '专辑不存在' });
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
   const result = tagsApi.applyAlbumTags([id], {
     add: req.body?.add ?? [], remove: req.body?.remove ?? [],
   });
   scheduleAssetBackup('album-tags');
-  res.json({ ...result, tags: tagsApi.getAlbumTags(id), allTags: tagsApi.listTags() });
+  res.json({
+    ...result,
+    tags: tagsApi.getAlbumTags(id),
+    // 供标签选择弹窗刷新候选：只返回这张专辑所属的那一套
+    allTags: tagsApi.listTags({ kind: album.kind === 'voice' ? 'voice' : 'music' }),
+  });
 });
 
 app.post('/api/albums/tags/bulk', (req, res) => {
@@ -1508,12 +1542,14 @@ app.post('/api/archive/prefetch', asyncRoute(async (req, res) => {
   }
 
   // 整张预读**全部成功**才打「已预读」标签（收入「风格」分类，专辑墙可直接筛）
+  // 「已预读」在**两套标签里各有一份**，这里按被预读专辑的类别落位
   let tag = null;
   if (tagAlbumId && tracks.length && failed === 0) {
-    const t = tagsApi.ensureTag(PREFETCHED_TAG, 'style');
+    const tagKind = store.getAlbumById(tagAlbumId)?.kind === 'voice' ? 'voice' : 'music';
+    const t = tagsApi.ensureTag(PREFETCHED_TAG, 'style', tagKind);
     if (t?.id) {
       tagsApi.applyAlbumTags([tagAlbumId], { add: [t.id] });
-      tag = { id: t.id, name: t.name, category: t.category };
+      tag = { id: t.id, name: t.name, category: t.category, kind: t.kind };
     }
   }
 
@@ -1562,7 +1598,9 @@ app.post('/api/albums/:id/cache/clear', asyncRoute(async (req, res) => {
   const result = await collection.clearAlbumCache([...tracks, ...lyricMembers]);
 
   let untagged = 0;
-  const tag = tagsApi.findTagByName(PREFETCHED_TAG);
+  // 同上：按专辑类别找到它所属那套里的「已预读」
+  const clearKind = store.getAlbumById(id)?.kind === 'voice' ? 'voice' : 'music';
+  const tag = tagsApi.findTagByName(PREFETCHED_TAG, clearKind);
   if (tag?.id) untagged = tagsApi.applyAlbumTags([id], { remove: [tag.id] }).removed;
 
   res.json({ result, untagged, cache: await collection.cacheStatus() });

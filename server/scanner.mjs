@@ -51,7 +51,8 @@ export function isUnderAsmrFolder(p) {
 function syncAsmrTag(albumId, samplePath) {
   if (!albumId) return;
   try {
-    const asmrTag = tagsApi.ensureTag(ASMR_TAG_NAME);
+    // 「ASMR」是音声发行专用的标记标签，落在 **voice 那一套**里（两套标签互不串）
+    const asmrTag = tagsApi.ensureTag(ASMR_TAG_NAME, null, 'voice');
     if (!asmrTag?.id) return;
     const shouldTag = isUnderAsmrFolder(samplePath);
     tagsApi.applyAlbumTags([albumId], {
@@ -152,6 +153,8 @@ function resetState() {
     albumsMerged: 0,
     archivesFound: 0,
     archivesParsed: 0,
+    /** 未变化、整包跳过未被重新解析的压缩包数量（增量扫描的关键指标） */
+    archivesSkipped: 0,
     archivesFailed: 0,
     archivesUnsupported: 0,
     archivesEncrypted: 0,
@@ -190,6 +193,7 @@ function persistLastScan() {
       // 压缩包统计（P1）：让「为什么多了这些专辑」在扫描报告里可解释
       archivesFound: scanState.archivesFound,
       archivesParsed: scanState.archivesParsed,
+      archivesSkipped: scanState.archivesSkipped,
       archivesFailed: scanState.archivesFailed,
       archivesUnsupported: scanState.archivesUnsupported,
       archivesEncrypted: scanState.archivesEncrypted,
@@ -403,6 +407,31 @@ function readArchiveTags(vpath, file) {
  */
 async function ingestArchive({ archivePath, libraryId, seen, known }) {
   if (known.archives.has(archivePath)) return { skipped: 'already' };
+
+  /*
+   * 增量快路径：文件 size + mtime 都没变 → **整包跳过**。
+   *
+   * 以前每次扫描都无条件 probeZip + 重建 archive_members + 整包重新入库，
+   * 成本只与「全库压缩包数量 × 成员数」有关，与本次新增了几个无关 ——
+   * 用户只新丢进一个包，其它包也会被完整重扫一遍（实测 9 个包占一次扫描 90% 的时间）。
+   *
+   * ⚠ 跳过时必须把该包**已登记的曲目路径计入 seen**，
+   *   否则后面「清理失效条目」会把它们当成消失的曲目删掉。
+   * 只对之前解析成功过的包走快路径：失败/损坏的包每次都重试，便于自愈。
+   */
+  try {
+    const st = await fsp.stat(archivePath);
+    const prev = store.getArchiveByPath(archivePath);
+    const settled = prev && ['ready', 'partial', 'no_audio'].includes(String(prev.status));
+    if (settled && prev.file_size === st.size && prev.file_mtime === Math.round(st.mtimeMs)) {
+      known.archives.set(archivePath, { id: prev.id, info: null, unchanged: true });
+      for (const p of store.trackPathsInArchive(prev.id)) seen.add(p);
+      scanState.archivesSkipped += 1;
+      return { archiveId: prev.id, tracks: 0, skipped: 'unchanged' };
+    }
+  } catch {
+    /* stat 失败就当未命中快路径，交给 probeZip 给出准确错误 */
+  }
 
   let info;
   let summary;
@@ -724,6 +753,10 @@ async function ingestRelease({ root, libraryId, seen, files = null, readTags = t
         ? tagged.title
         : row.title;
 
+      // 增量口径与磁盘文件一致：已存在算「更新」，否则算「新增」
+      // （以前这里不看 existing，扫描报告每次都虚报「新增 N」）
+      const existed = Boolean(store.findTrackByPath(filePath));
+
       store.upsertTrack({
         path: filePath,
         dir: path.dirname(filePath),
@@ -763,6 +796,7 @@ async function ingestRelease({ root, libraryId, seen, files = null, readTags = t
         materializedState: src.materializedState,
       });
       trackCount += 1;
+      if (existed) scanState.updated += 1; else scanState.added += 1;
     }
   }
 
@@ -780,7 +814,6 @@ async function ingestRelease({ root, libraryId, seen, files = null, readTags = t
   }
 
   scanState.albumsCreated += existingAlbum ? 0 : 1;
-  scanState.added += trackCount;
 
   /**
    * 自动维护「ASMR」标签：**只按目录名判定**（见 isUnderAsmrFolder）。

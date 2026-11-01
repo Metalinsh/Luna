@@ -15,6 +15,22 @@ export const TAG_COLORS = 8;
 export const TAG_CATEGORIES = ['style', 'circle', 'artist'];
 export const DEFAULT_TAG_CATEGORY = 'style';
 
+/**
+ * 标签所属的**两套独立命名空间**（v1.2.4 起）：
+ *   music —— 普通音乐专辑；voice —— 音声（ASMR）发行
+ *
+ * 同名标签在两套里各存一份（`tags` 的唯一约束是 `(kind, name)`），
+ * 给 ASMR 打的「萝莉 / 雌小鬼」不会出现在普通专辑的标签栏里，反之亦然。
+ * 一套里能出现哪些标签，由**当前音乐库的类别**决定（见 public/app.js）。
+ */
+export const TAG_KINDS = ['music', 'voice'];
+export const DEFAULT_TAG_KIND = 'music';
+
+export function normalizeTagKind(input) {
+  const value = String(input ?? '').trim().toLowerCase();
+  return TAG_KINDS.includes(value) ? value : DEFAULT_TAG_KIND;
+}
+
 export function normalizeTagCategory(input) {
   const value = String(input ?? '').trim().toLowerCase();
   return TAG_CATEGORIES.includes(value) ? value : DEFAULT_TAG_CATEGORY;
@@ -46,7 +62,7 @@ export function validateTagName(input) {
 /* ---------------------------------------------------------------- 查询 */
 
 const TAG_SELECT = `
-  SELECT tg.id, tg.name, tg.color, tg.pinned, tg.category, tg.created_at, tg.updated_at,
+  SELECT tg.id, tg.name, tg.kind, tg.color, tg.pinned, tg.category, tg.created_at, tg.updated_at,
          (SELECT COUNT(*) FROM album_tags at WHERE at.tag_id = tg.id)          AS album_count,
          (SELECT COUNT(*) FROM album_tags at2 JOIN tracks t ON t.album_id = at2.album_id
            WHERE at2.tag_id = tg.id)                                          AS track_count
@@ -59,50 +75,62 @@ const TAG_SELECT = `
  */
 const shape = (r) => (r ? { ...r, pinned: Boolean(r.pinned), lead: isLeadTag(r.name) } : null);
 
-export function listTags({ sort = 'usage' } = {}) {
+/**
+ * @param {{sort?: string, kind?: string|null}} opts
+ *   kind 给定时只返回那一套标签；不给则两套都返回（标签管理页用）。
+ */
+export function listTags({ sort = 'usage', kind = null } = {}) {
   const order = sort === 'name'
     ? 'tg.name COLLATE NOCASE ASC'
     : 'tg.pinned DESC, album_count DESC, tg.name COLLATE NOCASE ASC';
-  return db.prepare(`${TAG_SELECT} ORDER BY ${order}`).all().map(shape);
+  const wanted = kind ? normalizeTagKind(kind) : null;
+  const where = wanted ? 'WHERE tg.kind = ?' : '';
+  const args = wanted ? [wanted] : [];
+  return db.prepare(`${TAG_SELECT} ${where} ORDER BY ${order}`).all(...args).map(shape);
 }
 
 export function getTag(id) {
   return shape(db.prepare(`${TAG_SELECT} WHERE tg.id = ?`).get(Number(id)));
 }
 
-export function findTagByName(name) {
+/** 按名字找标签，**必须在指定的一套里找**（默认普通专辑那套） */
+export function findTagByName(name, kind = DEFAULT_TAG_KIND) {
   const normalized = normalizeTagName(name);
   if (!normalized) return null;
-  return shape(db.prepare(`${TAG_SELECT} WHERE tg.name = ? COLLATE NOCASE`).get(normalized));
+  return shape(db.prepare(`${TAG_SELECT} WHERE tg.name = ? COLLATE NOCASE AND tg.kind = ?`)
+    .get(normalized, normalizeTagKind(kind)));
 }
 
 /* ---------------------------------------------------------------- 写入 */
 
-export function createTag(name, color = null, category = DEFAULT_TAG_CATEGORY) {
+export function createTag(name, color = null, category = DEFAULT_TAG_CATEGORY, kind = DEFAULT_TAG_KIND) {
+  const k = normalizeTagKind(kind);
   const check = validateTagName(name);
   if (!check.ok) throw new Error(check.error);
-  const existing = findTagByName(check.name);
+  const existing = findTagByName(check.name, k);
   if (existing) return existing;
 
-  const nextColor = color ?? (db.prepare('SELECT COUNT(*) AS n FROM tags').get().n % TAG_COLORS);
+  // 调色板按「同一套内」轮转，避免两套各从 0 开始时颜色撞在一起
+  const nextColor = color ?? (db.prepare('SELECT COUNT(*) AS n FROM tags WHERE kind = ?').get(k).n % TAG_COLORS);
   const t = now();
   const info = db.prepare(`
-    INSERT INTO tags (name, color, pinned, category, created_at, updated_at)
-    VALUES (?, ?, 0, ?, ?, ?)
-  `).run(check.name, Number(nextColor) || 0, normalizeTagCategory(category), t, t);
+    INSERT INTO tags (name, kind, color, pinned, category, created_at, updated_at)
+    VALUES (?, ?, ?, 0, ?, ?, ?)
+  `).run(check.name, k, Number(nextColor) || 0, normalizeTagCategory(category), t, t);
   return getTag(info.lastInsertRowid);
 }
 
 /**
- * 打标时按名字取用，不存在则创建。
+ * 打标时按名字取用，不存在则创建 —— **限定在某一套标签里**。
  *
  * 指定了 category 且已有标签还停在默认的「风格」时顺带归类
  * （例：先手工建了「上海飯店」标签，之后才填写社团）——
  * **只升级、不反悔**：已经是社团/CV 的标签不会被改成别的类，尊重用户在标签页里的手工归类。
  */
-export function ensureTag(name, category = null) {
-  const existing = findTagByName(name);
-  if (!existing) return createTag(name, null, category ?? DEFAULT_TAG_CATEGORY);
+export function ensureTag(name, category = null, kind = DEFAULT_TAG_KIND) {
+  const k = normalizeTagKind(kind);
+  const existing = findTagByName(name, k);
+  if (!existing) return createTag(name, null, category ?? DEFAULT_TAG_CATEGORY, k);
   if (category) {
     const target = normalizeTagCategory(category);
     if (existing.category !== target && existing.category === DEFAULT_TAG_CATEGORY) {
@@ -120,7 +148,8 @@ export function updateTag(id, patch = {}) {
   const name = patch.name !== undefined ? validateTagName(patch.name) : null;
   if (name && !name.ok) throw new Error(name.error);
   if (name && name.ok && name.name.toLowerCase() !== tag.name.toLowerCase()) {
-    const clash = findTagByName(name.name);
+    // 重名只在**同一套**里冲突：两套各有一个同名标签是合法的
+    const clash = findTagByName(name.name, tag.kind);
     if (clash && clash.id !== tag.id) throw new Error('已存在同名标签');
   }
   db.prepare('UPDATE tags SET name = ?, color = ?, pinned = ?, category = ?, updated_at = ? WHERE id = ?')
@@ -149,6 +178,8 @@ export function mergeTags(sourceId, targetId) {
   if (!source || !target || source.id === target.id) {
     return { moved: 0, source: null, target };
   }
+  // 跨套合并没有语义（普通专辑的标签不能变成 ASMR 的），直接拒绝而不是悄悄搬过去
+  if (source.kind !== target.kind) throw new Error('只能合并同一套里的标签（普通专辑 / ASMR）');
   const moved = db.prepare(`
     INSERT OR IGNORE INTO album_tags (album_id, tag_id, source, added_at)
     SELECT album_id, ?, source, added_at FROM album_tags WHERE tag_id = ?
@@ -187,35 +218,59 @@ export function getTagsForAlbums(albumIds) {
 /**
  * 为若干专辑追加/移除标签。add 可传标签 id 或标签名（名字不存在则创建）。
  * 返回 { added, removed, created }
+ *
+ * **两套标签的关键落点**：每张专辑用它自己的 `kind` 去解析标签 ——
+ *   · 传标签名时，在「该专辑所属的那一套」里找/建同名标签
+ *   · 传标签 id 时，若该 id 属于另一套，则按名字在本文专辑那套里找/建同名标签
+ * 因此批量勾选**混合种类**的专辑也安全：同名标签会自动落到各自那一套里。
  */
 export function applyAlbumTags(albumIds, { add = [], remove = [] } = {}) {
   const ids = (albumIds ?? []).map(Number).filter(Number.isFinite);
   if (!ids.length) return { added: 0, removed: 0, created: 0 };
 
-  let created = 0;
-  const addIds = [];
+  // 每张专辑的类别 —— 决定它只能用哪一套标签
+  const kindOf = new Map(db.prepare(
+    `SELECT id, COALESCE(kind, 'music') AS kind FROM albums
+      WHERE id IN (${ids.map(() => '?').join(', ')})`,
+  ).all(...ids).map((r) => [r.id, normalizeTagKind(r.kind)]));
+
+  // add 统一归一成「名字 + 分类」；传 id 时沿用该标签的名字与分类
+  const specs = [];
   for (const item of add) {
     if (typeof item === 'number' || /^\d+$/.test(String(item))) {
-      const id = Number(item);
-      if (getTag(id)) addIds.push(id);
+      const tag = getTag(Number(item));
+      if (tag) specs.push({ name: tag.name, category: tag.category });
       continue;
     }
-    const before = findTagByName(item);
-    const tag = before ?? createTag(item);
-    if (!before) created += 1;
-    addIds.push(tag.id);
+    const name = normalizeTagName(item);
+    if (validateTagName(name).ok) specs.push({ name, category: null });
   }
   const removeIds = (remove ?? []).map(Number).filter((id) => Number.isFinite(id) && getTag(id));
 
   const t = now();
   let added = 0;
   let removed = 0;
+  let created = 0;
   const insert = db.prepare(`
     INSERT OR IGNORE INTO album_tags (album_id, tag_id, source, added_at) VALUES (?, ?, 'manual', ?)
   `);
   const del = db.prepare('DELETE FROM album_tags WHERE album_id = ? AND tag_id = ?');
+
+  // 同一套里的同名标签只解析一次
+  const resolved = new Map();
+  const resolveTagId = (spec, kind) => {
+    const key = `${kind}|${spec.name.toLowerCase()}`;
+    if (resolved.has(key)) return resolved.get(key);
+    const before = findTagByName(spec.name, kind);
+    const tag = before ?? createTag(spec.name, null, spec.category ?? DEFAULT_TAG_CATEGORY, kind);
+    if (!before) created += 1;
+    resolved.set(key, tag.id);
+    return tag.id;
+  };
+
   for (const albumId of ids) {
-    for (const tagId of addIds) added += insert.run(albumId, tagId, t).changes;
+    const kind = kindOf.get(albumId) ?? DEFAULT_TAG_KIND;
+    for (const spec of specs) added += insert.run(albumId, resolveTagId(spec, kind), t).changes;
     for (const tagId of removeIds) removed += del.run(albumId, tagId).changes;
   }
   return { added, removed, created };

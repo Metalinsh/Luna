@@ -162,7 +162,7 @@ try {
   ok('详情页中快进按钮生效', ctrl.delta >= 4 && ctrl.delta <= 6, `+${ctrl.delta}s`);
   ok('时间随播放更新', /^\d+:\d\d$/.test(ctrl.curTime), ctrl.curTime);
 
-  await ev(`document.querySelector('#npClose')?.click(); true`);
+  await ev(`document.querySelector('#npBack')?.click(); true`);
 
   console.log('\n— 需求4：顺序播放 —');
   const seq = await ev(`(async () => {

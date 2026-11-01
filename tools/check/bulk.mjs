@@ -55,6 +55,15 @@ await sleep(3600);
 await ev(`location.hash = '#/'`);
 await sleep(2000);
 
+// 专辑墙现在按音乐库过滤（v1.2.4）：先切到 ASMR 库，墙上才有音声发行可供点选
+await ev(`(async () => {
+  const r = await fetch('/api/libraries').then(x => x.json());
+  const voice = r.libraries.find(l => l.kind === 'voice') ?? r.libraries[0];
+  document.querySelector('.library-item[data-id="' + voice.id + '"]')?.click();
+  await new Promise(z => setTimeout(z, 2200));
+  return true;
+})()`);
+
 try {
   console.log('\n— 需求1：「选择」按钮有描边与主题底色 —');
   const style = await ev(`(() => {
@@ -120,8 +129,12 @@ try {
   ok('选中含音声时出现「批量填艺术家」「批量填社团」',
     mixed.artistHidden === false && mixed.circleHidden === false,
     `${mixed.count} · ${mixed.hint}`);
-  ok('提示说明只对 ASMR 生效并报告跳过数',
-    /ASMR/.test(mixed.hint) && /跳过/.test(mixed.hint), mixed.hint);
+  /*
+   * v1.2.4 起专辑墙按音乐库过滤，**一个库里只有一类专辑**，界面上再也选不出
+   * 「音声 + 普通」的混合选择，所以这里只断言「仅对 ASMR 生效」。
+   * 接口层「改音声、跳过普通专辑」的口径由需求 2b 用混合 id 直接验证。
+   */
+  ok('提示说明只对 ASMR 生效', /ASMR/.test(mixed.hint), mixed.hint);
   await shot('v9-bulk-voice.png');
 
   console.log('\n— 需求2b：接口只改音声、跳过普通专辑 —');

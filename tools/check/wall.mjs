@@ -86,6 +86,18 @@ try {
   await cdp.send('Page.navigate', { url: BASE });
   await sleep(2800);
 
+  /*
+   * v1.2.4 起专辑墙**必须挂在一个音乐库上**（两套标签据此区分），
+   * 所以断言角标前先切到 ASMR 库 —— 只有音声发行才带「N 个版本」角标。
+   */
+  await cdp.eval(`(async () => {
+    const r = await fetch('/api/libraries').then(x => x.json());
+    const voice = r.libraries.find(l => l.kind === 'voice') ?? r.libraries[0];
+    document.querySelector('.library-item[data-id="' + voice.id + '"]')?.click();
+    await new Promise(z => setTimeout(z, 2200));
+    return true;
+  })()`);
+
   console.log('\n— 品牌更名 —');
   const brand = await cdp.eval(`({ title: document.title, brand: document.querySelector('.brand-title')?.textContent?.trim() })`);
   ok('标题已是 Luna', /Luna/.test(brand.title ?? ''), brand.title);

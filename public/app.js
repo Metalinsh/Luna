@@ -117,7 +117,15 @@ const state = {
   view: 'albums',
   query: '',
   sort: localStorage.getItem('sort') || 'artist-asc',
-  tagFilter: new Set(),
+  /**
+   * 标签筛选：**专辑墙 / 喜欢的ASMR / 喜欢的专辑 三处各自独立**（v1.2.4）。
+   *
+   * 之前只有一个全局 Set：在专辑墙点了标签后，进收藏页依然生效，而且收藏页不显示
+   * 标签栏、也看不到「正在筛选」，用户只能靠刷新或回专辑墙清除。
+   */
+  tagFilters: { wall: new Set(), favasmr: new Set(), favalbum: new Set() },
+  /** 当前标签栏对应的是哪一套标签（music 普通 / voice ASMR），由视图或音乐库决定 */
+  tagCatalogKind: 'music',
   tagMode: localStorage.getItem('tagMode') || 'and',
   albumSize: localStorage.getItem('albumSize') || 'medium',
   albums: [],
@@ -592,6 +600,30 @@ function creditLine(a) {
   return `<div class="album-credit">${parts.join(' · ')}</div>`;
 }
 
+/** 当前视图的标签筛选集合 —— 三处互相独立（专辑墙 / 喜欢的ASMR / 喜欢的专辑） */
+function activeTagFilter() {
+  if (state.view === 'favasmr') return state.tagFilters.favasmr;
+  if (state.view === 'favalbum') return state.tagFilters.favalbum;
+  return state.tagFilters.wall;
+}
+
+/** 当前选中的音乐库类别：决定专辑墙显示哪一套标签 */
+function currentLibraryKind() {
+  const lib = state.libraries?.find((l) => String(l.id) === String(state.libraryFilter));
+  return lib?.kind === 'voice' ? 'voice' : 'music';
+}
+
+/**
+ * 当前视图该用哪一套标签：
+ *   · 喜欢的ASMR → voice；喜欢的专辑 → music
+ *   · 专辑墙 → 跟随所选音乐库的类别（ASMR 库显示 ASMR 那套，普通库显示普通那套）
+ */
+function tagKindForView() {
+  if (state.view === 'favasmr') return 'voice';
+  if (state.view === 'favalbum') return 'music';
+  return currentLibraryKind();
+}
+
 function albumQuery(offset) {
   const params = new URLSearchParams({
     q: state.query,
@@ -599,15 +631,17 @@ function albumQuery(offset) {
     limit: String(PAGE_SIZE),
     offset: String(offset),
   });
-  if (state.tagFilter.size) {
-    params.set('tags', [...state.tagFilter].join(','));
+  const filter = activeTagFilter();
+  if (filter.size) {
+    params.set('tags', [...filter].join(','));
     params.set('tagMode', state.tagMode);
   }
   if (state.favScope) {
     params.set('favorite', '1');
     params.set('kind', state.favScope === 'asmr' ? 'voice' : 'music');
   }
-  if (state.libraryFilter) params.set('libraryId', String(state.libraryFilter));
+  // 专辑墙**必须**带一个音乐库；收藏视图是跨库的，不带库筛选
+  if (!state.favScope && state.libraryFilter) params.set('libraryId', String(state.libraryFilter));
   return `/api/albums?${params}`;
 }
 
@@ -625,28 +659,36 @@ async function loadAlbums({ append = false, reuse = false } = {}) {
 
   $('#albumGrid').className = `album-grid size-${state.albumSize}`;
   $('#albumGrid').innerHTML = state.albums.map(albumCardMarkup).join('');
-  // 明确告诉用户当前筛选条件（再点一次该库可取消）
+  // 明确告诉用户当前筛选条件（音乐库是必选项，不再有「全部库」）
   const libName = state.libraryFilter
     ? state.libraries?.find((l) => String(l.id) === String(state.libraryFilter))?.display_name
     : null;
+  const tagFilter = activeTagFilter();
   const parts = [];
   if (state.favScope === 'asmr') parts.push('喜欢的ASMR');
   if (state.favScope === 'album') parts.push('喜欢的专辑');
-  if (libName) parts.push(`${libName} 库`);
+  if (libName && !state.favScope) parts.push(`${libName} 库`);
   if (state.query) parts.push(`搜索「${state.query}」`);
-  if (state.tagFilter.size) parts.push('标签筛选');
+  if (tagFilter.size) parts.push('标签筛选');
   $('#resultCount').textContent = parts.length
     ? `${parts.join(' · ')}：${total} 张专辑`
     : `${total} 张专辑`;
 
-  const filtered = Boolean(state.query || state.tagFilter.size || state.libraryFilter || state.favScope);
+  // 专辑墙没有选中音乐库时，空库提示要指向「添加/选择音乐库」而不是「换关键词」
+  const noLibrary = !state.favScope && !state.libraryFilter;
+  const filtered = Boolean(state.query || tagFilter.size || state.libraryFilter || state.favScope);
   const empty = state.albums.length === 0;
   $('#albumsEmpty').hidden = !empty;
   if (empty) {
-    $('#emptyTitle').textContent = filtered ? '没有匹配的专辑' : '还没有音乐';
-    $('#emptyText').textContent = filtered
-      ? '换个关键词，或清除筛选后重试。'
-      : '在左侧添加一个音乐目录，然后点击「扫描音乐库」。';
+    if (noLibrary) {
+      $('#emptyTitle').textContent = '请先选择音乐库';
+      $('#emptyText').textContent = '在左侧「音乐库」里点选一个目录，专辑墙只显示该库的专辑。';
+    } else {
+      $('#emptyTitle').textContent = filtered ? '没有匹配的专辑' : '还没有音乐';
+      $('#emptyText').textContent = filtered
+        ? '换个关键词，或清除筛选后重试。'
+        : '在左侧添加一个音乐目录，然后点击「扫描音乐库」。';
+    }
   }
   $('#loadMoreWrap').hidden = !state.hasMore;
   if (state.hasMore) {
@@ -671,13 +713,24 @@ const TAG_CATEGORY_LABEL = Object.fromEntries(TAG_CATEGORY_META.map((c) => [c.ke
 const TAG_CATEGORY_ORDER = TAG_CATEGORY_META.map((c) => c.key);
 
 /**
+ * 两套标签（与后端 tags.mjs 的 TAG_KINDS 对应）。
+ * 专辑墙显示哪一套由**当前音乐库的类别**决定；两个收藏页各自固定一套。
+ */
+const TAG_KIND_META = [
+  { key: 'music', label: '普通专辑', hint: '只在普通音乐专辑上可用' },
+  { key: 'voice', label: 'ASMR', hint: '只在音声（ASMR）发行上可用' },
+];
+
+/**
  * 把标签按分类分桶；未知分类一律归入「风格」。
  *
- * 带 `lead` 标记的标签（后端 tags.mjs 的 LEAD_TAG_NAMES，「已预读」）
- * **固定排在自己那一栏的最前面**，不跟随使用频次 —— 它是状态标签，
- * 用户扫一眼标签栏就该看到自己预读过哪些。
+ * 栏内顺序（v1.2.4）：
+ *   ① `lead` 标签（后端 tags.mjs 的 LEAD_TAG_NAMES，「已预读」）**固定最前**
+ *   ② 当前已选中的标签（点了筛选就挪到前面，避免选完又被「＋ 还有 N 个」折叠掉）
+ *   ③ 其余标签保持后端给的原始顺序
+ * 取消选中时会重新按原始顺序渲染，因此自动**还原到原来的位置**。
  */
-function groupTagsByCategory(tags) {
+function groupTagsByCategory(tags, selected = null) {
   const map = new Map(TAG_CATEGORY_ORDER.map((k) => [k, []]));
   for (const t of tags ?? []) {
     const key = TAG_CATEGORY_LABEL[t.category] ? t.category : 'style';
@@ -685,22 +738,25 @@ function groupTagsByCategory(tags) {
   }
   for (const [key, list] of map) {
     const lead = list.filter((t) => t.lead === true);
-    if (lead.length && lead.length < list.length) {
-      map.set(key, [...lead, ...list.filter((t) => t.lead !== true)]);
-    }
+    const rest = list.filter((t) => t.lead !== true);
+    const picked = selected ? rest.filter((t) => selected.has(t.id)) : [];
+    const others = selected ? rest.filter((t) => !selected.has(t.id)) : rest;
+    map.set(key, [...lead, ...picked, ...others]);
   }
   return map;
 }
 
 async function loadTagBar() {
-  const { tags } = await api('/api/tags');
+  const kind = tagKindForView();
+  const { tags } = await api(`/api/tags?kind=${kind}`);
   state.tagCatalog = tags;
+  state.tagCatalogKind = kind;
   renderTagBar();
 }
 
 function tagChipMarkup(t) {
   return `
-    <button class="tag-chip tagbar-chip ${state.tagFilter.has(t.id) ? 'is-active' : ''}" data-tag="${t.id}">
+    <button class="tag-chip tagbar-chip ${activeTagFilter().has(t.id) ? 'is-active' : ''}" data-tag="${t.id}">
       <span class="tag-dot" style="background:${tagColor(t.color)}"></span>
       ${esc(t.name)}<span class="tag-count">${t.album_count}</span>
     </button>`;
@@ -740,17 +796,21 @@ function collapseTagRowToFirstLine(box) {
 
 function renderTagBar() {
   const bar = $('#tagBar');
-  bar.hidden = state.view !== 'albums';
+  // 三个专辑墙视图（专辑墙 / 喜欢的ASMR / 喜欢的专辑）都要显示标签栏，各自独立筛选
+  bar.hidden = !ALBUM_WALL_VIEWS.includes(state.view);
 
-  const byCategory = groupTagsByCategory(state.tagCatalog);
+  const filter = activeTagFilter();
+  const byCategory = groupTagsByCategory(state.tagCatalog, filter);
+  const kindLabel = state.tagCatalogKind === 'voice' ? 'ASMR' : '普通专辑';
 
   const sizes = ['small', 'medium', 'large'];
   const sizeLabels = { small: '小', medium: '中', large: '大' };
 
   const head = `
     <div class="tagbar-head">
-      ${state.tagFilter.size ? '<button class="tag-chip is-clear" data-clear="1">✕ 清除筛选</button>' : ''}
+      ${filter.size ? '<button class="tag-chip is-clear" data-clear="1">✕ 清除筛选</button>' : ''}
       <span class="tagbar-title">标签筛选</span>
+      <span class="tagbar-kind" title="两套标签相互独立：ASMR 与普通专辑各有一套">${kindLabel}</span>
       <span style="flex:1"></span>
       <span class="tag-count">封面</span>
       ${sizes.map((s) => `<button class="tag-chip ${state.albumSize === s ? 'is-active' : ''}"
@@ -1207,9 +1267,17 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
   $('#albumDetail').innerHTML = voiceDetailMarkup(album, data, gallery);
   hydrateGalleryThumbs($('#albumDetail'));
 
-  /** 把某个版本的轨道行变成可播放队列 */
-  const queueFromRows = (rows) => rows.map((r) => {
-    const v = r.variants.find((x) => x.track_id === r.preferred_track_id) ?? r.variants[0];
+  /**
+   * 把某个版本的轨道行变成可播放队列。
+   *
+   * `override` 用于「点了某个版本 chip」：只覆盖**那一行**用哪个版本，
+   * 其余行仍按 preferred 选（见下方版本 chip 的点击处理）。
+   */
+  const queueFromRows = (rows, override = null) => rows.map((r) => {
+    const wanted = override && override.rowKey === r.key ? override.trackId : r.preferred_track_id;
+    const v = r.variants.find((x) => x.track_id === wanted)
+      ?? r.variants.find((x) => x.track_id === r.preferred_track_id)
+      ?? r.variants[0];
     return {
       id: v.track_id, title: r.title, track_no: r.track_no,
       duration: v.duration, ext: v.ext, stream_url: v.stream_url,
@@ -1294,8 +1362,25 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
         return true;
       }
       $$('.ver-chip', row).forEach((b) => b.classList.toggle('is-active', b === btn));
-      const q = queueFromRows([{ ...rowData, preferred_track_id: Number(btn.dataset.track) }]);
-      playQueue(q, 0, { cover: album.cover_url, label: `音声《${album.album}》` });
+      /*
+       * 队列必须是**这一整组轨道**，不能只塞被点的这一行 ——
+       * 队列长度为 1 时上一首/下一首只能在原地打转，表现出来就是「按钮按了没反应」
+       * （用户实测：预读过的压缩包专辑里点版本 chip 播放后，切轨按钮失效）。
+       * 起点 = 被点的那一行；被点的版本通过 override 生效，其它行仍用 preferred。
+       * 特典行单独成组：点正文里的行排在正文队列，点特典行排在特典队列。
+       */
+      const mainRows = data.tracks ?? [];
+      const bonusRows = data.bonus_tracks ?? [];
+      const sourceRows = bonusRows.some((r) => r.key === rowData?.key) ? bonusRows : mainRows;
+      const playableRows = sourceRows.filter((r) => {
+        const v = r.variants.find((x) => x.track_id === r.preferred_track_id) ?? r.variants[0];
+        return v && v.file_kind !== 'video';
+      });
+      const q = queueFromRows(playableRows, {
+        rowKey: rowData?.key, trackId: Number(btn.dataset.track),
+      });
+      const startIndex = Math.max(0, q.findIndex((t) => t.id === Number(btn.dataset.track)));
+      playQueue(q, startIndex, { cover: album.cover_url, label: `音声《${album.album}》` });
       return true;
     };
 
@@ -1610,9 +1695,9 @@ async function loadIncomplete() {
 /* ============================================================== 视图：标签 */
 
 async function loadTagsView() {
+  // 不带 kind = 两套都取；标签页里按「普通专辑 / ASMR」分两大段展示
   const { tags } = await api('/api/tags');
   state.tagsView = tags;
-  state.tagCatalog = tags;
 
   const rowMarkup = (t) => `
     <div class="tag-row" data-tag-id="${t.id}">
@@ -1632,7 +1717,7 @@ async function loadTagsView() {
         <button class="icon-btn" data-rename="${t.id}" title="重命名">
           <svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
         </button>
-        <button class="icon-btn" data-merge="${t.id}" title="合并到其他标签">
+        <button class="icon-btn" data-merge="${t.id}" title="合并到同一套里的其他标签">
           <svg viewBox="0 0 24 24"><path d="M7 3v6a4 4 0 0 0 4 4h6M17 9l3 4-3 4"/><path d="M7 21v-6"/></svg>
         </button>
         <button class="icon-btn" data-delete="${t.id}" title="删除标签（不删专辑）">
@@ -1641,29 +1726,47 @@ async function loadTagsView() {
       </span>
     </div>`;
 
-  // 按「风格 / 社团 / CV」三组分栏展示，与专辑墙上方一致
-  const byCategory = groupTagsByCategory(tags);
-  const sections = TAG_CATEGORY_META.map(({ key, label, hint }) => {
-    const list = byCategory.get(key) ?? [];
+  /*
+   * 两套标签分两大段（普通专辑 / ASMR），段内仍按「风格 / 社团 / CV」分组 ——
+   * 与专辑墙上方一致，只是多了一层「哪一套」的边界。
+   */
+  const sections = TAG_KIND_META.map((kindMeta) => {
+    const list = tags.filter((t) => (t.kind === 'voice' ? 'voice' : 'music') === kindMeta.key);
     if (!list.length) return '';
+    const byCategory = groupTagsByCategory(list);
+    const groups = TAG_CATEGORY_META.map(({ key, label, hint }) => {
+      const items = byCategory.get(key) ?? [];
+      if (!items.length) return '';
+      return `
+        <div class="tag-group">
+          <div class="tag-group-head">
+            <h3>${label}</h3>
+            <span>${items.length} 个 · ${esc(hint)}</span>
+          </div>
+          ${items.map(rowMarkup).join('')}
+        </div>`;
+    }).join('');
     return `
-      <div class="tag-group">
-        <div class="tag-group-head">
-          <h3>${label}</h3>
-          <span>${list.length} 个 · ${esc(hint)}</span>
+      <div class="tag-kind-block">
+        <div class="tag-kind-head">
+          <h2>${kindMeta.label}</h2>
+          <span>${list.length} 个标签 · ${esc(kindMeta.hint)}</span>
         </div>
-        ${list.map(rowMarkup).join('')}
+        ${groups}
       </div>`;
   }).join('');
 
   $('#tagsPanel').innerHTML = `
     <div class="wb-head">
       <h2>标签</h2>
-      <span class="wb-sub">${tags.length} 个标签 · 点击名字重命名，点击色块换色；
+      <span class="wb-sub">${tags.length} 个标签（普通专辑与 ASMR 是两套相互独立的标签） · 点击名字重命名，点击色块换色；
         分类决定它在专辑墙上方显示在「风格 / 社团 / CV」哪一栏</span>
     </div>
     <div style="display:flex;gap:8px">
       <input type="text" id="newTagName" placeholder="新建标签…" style="background:var(--bg-l0);border:1px solid var(--line-strong);border-radius:10px;padding:9px 12px;color:var(--fg);outline:none;flex:1;max-width:320px" />
+      <select id="newTagKind" class="tag-cat" title="新标签属于哪一套">
+        ${TAG_KIND_META.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}
+      </select>
       <select id="newTagCat" class="tag-cat" title="新标签的分类">
         ${TAG_CATEGORY_META.map((c) => `<option value="${c.key}">${c.label}</option>`).join('')}
       </select>
@@ -1678,7 +1781,11 @@ async function loadTagsView() {
     try {
       await api('/api/tags', {
         method: 'POST',
-        body: { name: input.value.trim(), category: $('#newTagCat')?.value ?? 'style' },
+        body: {
+          name: input.value.trim(),
+          kind: $('#newTagKind')?.value ?? 'music',
+          category: $('#newTagCat')?.value ?? 'style',
+        },
       });
       input.value = '';
       await loadTagsView();
@@ -1829,7 +1936,27 @@ async function loadStats() {
 
 /* ============================================================ 标签弹窗 */
 
-const tagDialogState = { albumIds: [], selected: new Set(), initial: new Set(), bulk: false, all: [] };
+const tagDialogState = { albumIds: [], selected: new Set(), initial: new Set(), bulk: false, all: [], kind: 'music' };
+
+/** 某张专辑属于哪一套标签（普通专辑 / ASMR） */
+function albumKindOf(id) {
+  const target = Number(id);
+  const fromWall = state.albums?.find((a) => Number(a.id) === target);
+  if (fromWall) return fromWall.is_voice ? 'voice' : 'music';
+  const cur = state.currentAlbum?.album;
+  if (cur && Number(cur.id) === target) return cur.is_voice ? 'voice' : 'music';
+  return tagKindForView();
+}
+
+/**
+ * 打标签弹窗该用哪一套标签。
+ * 专辑墙与两个收藏页都只展示单一类别，所以批量选择必然是同一类；
+ * 万一混合（理论上不会出现），退回当前视图那一套，服务端仍会按各自类别归位。
+ */
+function dialogTagKind(albumIds) {
+  const kinds = new Set((albumIds ?? []).map(albumKindOf));
+  return kinds.size === 1 ? [...kinds][0] : tagKindForView();
+}
 
 async function openTagDialog(albumIds, currentTags = [], { bulk = false } = {}) {
   tagDialogState.albumIds = albumIds;
@@ -1837,13 +1964,17 @@ async function openTagDialog(albumIds, currentTags = [], { bulk = false } = {}) 
   tagDialogState.selected = new Set(currentTags.map((t) => t.id));
   tagDialogState.initial = new Set(currentTags.map((t) => t.id));
 
-  const { tags } = await api('/api/tags');
+  // **只列当前专辑所属的那一套标签**，避免把 ASMR 的标签打到普通专辑上
+  const kind = dialogTagKind(albumIds);
+  tagDialogState.kind = kind;
+  const { tags } = await api(`/api/tags?kind=${kind}`);
   tagDialogState.all = tags;
 
+  const kindLabel = kind === 'voice' ? 'ASMR' : '普通专辑';
   $('#tagDlgTitle').textContent = bulk ? `为 ${albumIds.length} 张专辑打标签` : '为专辑添加标签';
   $('#tagDlgHint').textContent = bulk
-    ? '选择标签后点「追加」加入这些专辑。'
-    : '输入标签名回车即可创建，或点击已有标签切换选中。';
+    ? `选择标签后点「追加」加入这些专辑（${kindLabel}标签）。`
+    : `输入标签名回车即可创建，或点击已有标签切换选中（${kindLabel}标签）。`;
   $('#tagInput').value = '';
   $('#tagError').hidden = true;
   renderTagPicker();
@@ -1894,8 +2025,10 @@ async function createTagFromInput({ applyAfter = false } = {}) {
   const name = $('#tagInput').value.trim();
   if (!name) return;
   try {
-    const { tag } = await api('/api/tags', { method: 'POST', body: { name } });
-    tagDialogState.all = (await api('/api/tags')).tags;
+    const kind = tagDialogState.kind ?? 'music';
+    // 新建的标签必须落在**当前这张专辑所属的那一套**里
+    const { tag } = await api('/api/tags', { method: 'POST', body: { name, kind } });
+    tagDialogState.all = (await api(`/api/tags?kind=${kind}`)).tags;
     tagDialogState.selected.add(tag.id);
     $('#tagInput').value = '';
     renderTagPicker();
@@ -2141,11 +2274,22 @@ function setNowPlaying(open) {
 async function loadLibraries() {
   const { libraries } = await api('/api/libraries');
   state.libraries = libraries;
+  renderLibraryList();
+}
+
+/**
+ * 只重画侧栏的音乐库列表（数据没变、只是选中态变了时用，避免再请求一次）。
+ * 启动时先 loadLibraries 再 ensureDefaultLibrary —— 后者会调用它同步高亮。
+ */
+function renderLibraryList() {
+  const libraries = state.libraries ?? [];
   const list = $('#libraryList');
   list.innerHTML = libraries.map((l) => `
     <div class="library-item${String(state.libraryFilter) === String(l.id) ? ' is-active' : ''}"
-         data-id="${l.id}" title="${esc(l.path)}\n点击只看这个音乐库的专辑">
+         data-id="${l.id}" title="${esc(l.path)}\n点击切换到该音乐库（专辑墙只显示这个库的专辑）">
       <span class="lib-path" data-name-slot="${l.id}">${esc(l.display_name)}</span>
+      <span class="lib-kind${l.kind === 'voice' ? ' is-voice' : ''}"
+            title="${l.kind === 'voice' ? 'ASMR 库：使用 ASMR 那套标签' : '普通专辑库：使用普通专辑那套标签'}">${l.kind === 'voice' ? 'ASMR' : '普通'}</span>
       <span class="lib-count">${l.track_count}</span>
       <button type="button" class="lib-edit icon-btn" data-rename="${l.id}" title="重命名显示名">
         <svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
@@ -2159,6 +2303,50 @@ async function loadLibraries() {
   $('#brandSub').textContent = libraries.length
     ? `${libraries.length} 个目录 · ${libraries.reduce((n, l) => n + l.track_count, 0)} 首`
     : '未添加音乐库';
+}
+
+/**
+ * 专辑墙**必须**挂在一个音乐库上（v1.2.4 起，不再有「全部音乐库」）。
+ *
+ * 之所以这么改：两套标签是按音乐库类别区分的 —— ASMR 库显示 ASMR 那套标签、
+ * 普通库显示普通那套。没有「选中的库」就无从决定专辑墙该用哪一套。
+ * 这里在启动与增删库时挑一个默认库（优先上次选过的）。
+ */
+function ensureDefaultLibrary() {
+  const libs = state.libraries ?? [];
+  if (!libs.length) {
+    state.libraryFilter = null;
+    renderLibraryList();
+    return;
+  }
+  const saved = Number(localStorage.getItem('libraryId'));
+  const exists = libs.some((l) => Number(l.id) === saved);
+  state.libraryFilter = exists ? saved : Number(libs[0].id);
+  localStorage.setItem('libraryId', String(state.libraryFilter));
+  // 选中态是渲染时算出来的，定完默认库要立刻重画，否则侧栏看起来"一个都没选"
+  renderLibraryList();
+}
+
+/** 切换专辑墙当前音乐库：换库可能换「类别」，此时两套标签完全不通用，旧筛选要清掉 */
+async function selectLibrary(id) {
+  const prevKind = currentLibraryKind();
+  state.libraryFilter = Number(id);
+  localStorage.setItem('libraryId', String(state.libraryFilter));
+  state.favScope = null;
+  state.trackFavOnly = false;
+  await loadLibraries();
+  const kind = currentLibraryKind();
+  if (kind !== prevKind) state.tagFilters.wall.clear();
+  /*
+   * 点库 = 「回到专辑墙看这个库」。在收藏页里点库也要切回专辑墙 ——
+   * 否则 favScope 已清空、视图却还停在收藏页，标签栏与列表会各说各话。
+   */
+  history.replaceState({}, '', '#/');
+  showView('albums');
+  await loadTagBar();
+  loadAlbums();
+  const name = state.libraries?.find((l) => Number(l.id) === Number(id))?.display_name ?? '';
+  toast(`已切换到「${name}」`);
 }
 
 function startLibraryRename(id) {
@@ -2263,14 +2451,16 @@ function showView(name) {
   $$('.nav-item').forEach((btn) => btn.classList.toggle('is-active', btn.dataset.view === name));
   state.view = name;
   const isAlbumWall = ALBUM_WALL_VIEWS.includes(name);
-  $('#tagBar').hidden = !isAlbumWall;
   $('#bulkBar').hidden = !(isAlbumWall && state.selecting);
   $('#selectModeBtn').hidden = !isAlbumWall;
-  if (isAlbumWall) renderTagBar();
+  // 标签栏按**当前视图**决定取哪一套标签（专辑墙看库类别，收藏页看收藏范围）
+  if (isAlbumWall) void loadTagBar();
+  else $('#tagBar').hidden = true;
 }
 
 async function refreshCurrent() {
-  if (state.view === 'albums') await loadAlbums();
+  // 三个专辑墙视图共用同一套渲染，都要能刷新
+  if (ALBUM_WALL_VIEWS.includes(state.view)) await loadAlbums();
   else if (state.view === 'albumDetail' && state.currentAlbum) {
     await openAlbum(state.currentAlbum.album.id, { push: false });
   } else if (state.view === 'tracks') await loadTracks();
@@ -2852,17 +3042,32 @@ function bindEvents() {
     const view = btn.dataset.view;
     state.wallSnapshot = null; // 主动点导航 = 重新加载，不用「返回」的进度快照
     history.pushState({}, '', view === 'albums' ? '#/' : `#/${view}`);
-    // 进入收藏视图前清掉库筛选，否则「Album 库」的筛选会把收藏里的 ASMR 藏起来
-    if (view === 'favasmr' || view === 'favalbum') state.libraryFilter = null;
-    if (view === 'albums') { state.favScope = null; state.trackFavOnly = false; loadAlbums(); }
-    else if (view === 'favasmr') { state.favScope = 'asmr'; state.trackFavOnly = false; loadLibraries(); loadAlbums(); }
-    else if (view === 'favalbum') { state.favScope = 'album'; state.trackFavOnly = false; loadLibraries(); loadAlbums(); }
-    else if (view === 'favtracks') { state.trackFavOnly = true; loadTracks(); }
-    else if (view === 'tracks') { state.trackFavOnly = false; loadTracks(); }
+    /*
+     * 先把「视图 + 收藏范围」定下来，**再**加载数据。
+     *
+     * ⚠ 顺序不能反：`albumQuery()` → `activeTagFilter()` 是靠 `state.view` 决定用哪一套
+     * 标签筛选的。以前这里先 `loadAlbums()` 再 `showView()`，于是首次进收藏页时
+     * state.view 还停在上一页（专辑墙），就把**专辑墙的标签筛选**套了进去 ——
+     * 表现为「专辑墙筛了『已预读』，喜欢的ASMR 里没预读的那张就消失了」。
+     * 收藏视图是跨库的：不清 `state.libraryFilter`（那是专辑墙选中的库），
+     * `albumQuery()` 在收藏视图下本来就不会带 libraryId。
+     */
+    if (view === 'albums') {
+      state.favScope = null;
+      state.trackFavOnly = false;
+      ensureDefaultLibrary();   // 从收藏切回专辑墙时补回库选择（专辑墙必须有库）
+    } else if (view === 'favasmr') { state.favScope = 'asmr'; state.trackFavOnly = false; }
+    else if (view === 'favalbum') { state.favScope = 'album'; state.trackFavOnly = false; }
+    else if (view === 'favtracks') { state.trackFavOnly = true; }
+    else if (view === 'tracks') { state.trackFavOnly = false; }
+
+    showView(view);   // ← 必须先切视图：标签筛选套与标签栏都看 state.view
+
+    if (view === 'albums' || view === 'favasmr' || view === 'favalbum') loadAlbums();
+    else if (view === 'favtracks' || view === 'tracks') loadTracks();
     else if (view === 'incomplete') loadIncomplete();
     else if (view === 'tags') loadTagsView();
     else loadStats();
-    showView(view);
   }));
 
   $('#searchInput').addEventListener('input', debounce((e) => {
@@ -2888,14 +3093,16 @@ function bindEvents() {
     const tagBtn = e.target.closest('[data-tag]');
     if (tagBtn) {
       const id = Number(tagBtn.dataset.tag);
-      if (state.tagFilter.has(id)) state.tagFilter.delete(id);
-      else state.tagFilter.add(id);
+      // 只动**当前视图**的筛选集合：专辑墙 / 喜欢的ASMR / 喜欢的专辑互不影响
+      const filter = activeTagFilter();
+      if (filter.has(id)) filter.delete(id);
+      else filter.add(id);
       renderTagBar();
       loadAlbums();
       return;
     }
     if (e.target.closest('[data-clear]')) {
-      state.tagFilter.clear();
+      activeTagFilter().clear();
       renderTagBar();
       loadAlbums();
       return;
@@ -3258,12 +3465,15 @@ function bindEvents() {
       const tag = state.tagsView.find((t) => t.id === id);
       const target = await askText({
       title: `合并标签「${tag.name}」`,
-      hint: '输入目标标签名，该标签下的专辑会全部转到目标标签',
+      hint: `输入目标标签名，该标签下的专辑会全部转到目标标签（只在「${tag.kind === 'voice' ? 'ASMR' : '普通专辑'}」这一套里找）`,
       placeholder: '目标标签名',
     });
     if (target === null) return;
       if (!target) return;
-      const targetTag = state.tagsView.find((t) => t.name.toLowerCase() === target.trim().toLowerCase());
+      // 两套标签相互独立：只在**同一套**里找目标，避免把普通专辑的标签并进 ASMR 那套
+      const targetTag = state.tagsView.find(
+        (t) => t.kind === tag.kind && t.name.toLowerCase() === target.trim().toLowerCase(),
+      );
       if (!targetTag || targetTag.id === id) { toast('目标标签不存在或与源相同', true); return; }
       const res = await api(`/api/tags/${id}/merge`, { method: 'POST', body: { targetId: targetTag.id } });
       toast(`已合并 ${res.moved} 个关联到「${targetTag.name}」`);
@@ -3351,25 +3561,24 @@ function bindEvents() {
       });
       if (!okDel) return;
       await api(`/api/libraries/${id}`, { method: 'DELETE' });
-      if (String(state.libraryFilter) === String(id)) state.libraryFilter = null;
       await loadLibraries();
+      // 删掉的若是当前库，得另挑一个（专辑墙必须有库）
+      ensureDefaultLibrary();
+      await loadTagBar();
       refreshCurrent();
       return;
     }
 
-    // 点击音乐库条目本身 → 只看该库的专辑（再点一次取消筛选）
+    /*
+     * 点击音乐库条目 = **选中它**。专辑墙必须挂在一个库上，所以不再有「再点一次取消」；
+     * 换库若跨了类别（ASMR ↔ 普通），标签那一套也整个换掉。
+     */
     const item = e.target.closest('.library-item');
     if (!item) return;
     const id = Number(item.dataset.id);
-    state.libraryFilter = state.libraryFilter === id ? null : id;
-    if (state.libraryFilter === null) toast('已显示全部音乐库');
-    else toast(`只看「${item.querySelector('.lib-path')?.textContent ?? ''}」`);
-    // 在收藏视图里点库：按该库筛选（收藏 + 库 同时生效）
-    state.favScope = null;
-    state.trackFavOnly = false;
-    await loadLibraries();
-    if (!ALBUM_WALL_VIEWS.includes(state.view)) showView('albums');
-    loadAlbums();
+    // 已经在专辑墙看这个库就不用再切；但在收藏页时点库应当切回专辑墙
+    if (String(state.libraryFilter) === String(id) && state.view === 'albums' && !state.favScope) return;
+    await selectLibrary(id);
   });
 
   $('#scanBtn').addEventListener('click', startScan);
@@ -3415,7 +3624,8 @@ function bindEvents() {
   });
   $('#lyricsBtn').addEventListener('click', () => setNowPlaying($('#nowPlaying').hidden));
   $('#npOpen').addEventListener('click', () => setNowPlaying($('#nowPlaying').hidden));
-  $('#npClose').addEventListener('click', () => setNowPlaying(false));
+  // 单曲详情：左上角「返回」（取代原来的右上角 ✕）；返回后仍是进入前的那个视图
+  $('#npBack').addEventListener('click', () => setNowPlaying(false));
 
   /* ---------- 单曲详情：封面区域宽度可拖动（默认占窗口一半） ---------- */
   const NP_W_KEY = 'npCoverWidth';
@@ -3601,6 +3811,18 @@ async function route() {
     return;
   }
   if (hash === '/tracks') { showView('tracks'); await loadTracks(); return; }
+  // 收藏视图也要能被直接打开/刷新（三个入口现在各有独立筛选）
+  if (hash === '/favasmr') {
+    state.favScope = 'asmr'; state.trackFavOnly = false;
+    showView('favasmr'); await loadAlbums(); return;
+  }
+  if (hash === '/favalbum') {
+    state.favScope = 'album'; state.trackFavOnly = false;
+    showView('favalbum'); await loadAlbums(); return;
+  }
+  if (hash === '/favtracks') {
+    state.trackFavOnly = true; showView('favtracks'); await loadTracks(); return;
+  }
   if (hash === '/incomplete') { showView('incomplete'); await loadIncomplete(); return; }
   if (hash === '/tags') { showView('tags'); await loadTagsView(); return; }
   if (hash === '/stats') { showView('stats'); await loadStats(); return; }
@@ -4323,8 +4545,10 @@ function bindSettingsEvents() {
   applyColWidths(currentColWidths());
   $('#albumGrid').className = `album-grid size-${state.albumSize}`;
   try {
-    await Promise.all([loadLibraries(), loadTagBar()]);
-    await route();
+    await loadLibraries();
+    // 专辑墙必须挂在一个音乐库上：先定下当前库，标签栏才知道该取哪一套标签
+    ensureDefaultLibrary();
+    await Promise.all([loadTagBar(), route()]);
     await refreshIncompleteBadge();
     await updateFavoriteBadges();
     const { running, lastReport } = await api('/api/scan/status');
