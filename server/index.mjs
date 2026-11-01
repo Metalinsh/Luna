@@ -531,6 +531,12 @@ function autoLinkName(baseIds, value, field, { matchOthers = true } = {}) {
   return {
     propagated: toWrite.map((a) => ({ id: a.id, title: a.title })),
     tagged: tag?.id ? targets.length : 0,
+    /**
+     * 实际被打上标签的专辑 id（含「本次填写的」与「库内同名被自动套用的」）。
+     * 界面据此**就地更新专辑墙缓存**：返回专辑墙时走 `loadAlbums({ reuse: true })`
+     * 复用已加载列表、不会重新请求，不补缓存的话卡片标签要等重启才出现（v1.2.5 缺陷）。
+     */
+    tagged_ids: tag?.id ? targets : [],
     tag: tag ? { id: tag.id, name: tag.name, color: tag.color, category: tag.category } : null,
     tag_skipped: tag ? null : reason,
   };
@@ -622,6 +628,8 @@ app.post('/api/albums/bulk-voice-meta', (req, res) => {
     propagated: links.flatMap((l) => l.propagated),
     tags: links.map((l) => l.tag).filter(Boolean),
     tagged: links.reduce((n, l) => n + l.tagged, 0),
+    // 与单张填写一致：告诉界面这批标签实际打到了哪些专辑（用于就地更新专辑墙缓存）
+    tagged_ids: [...new Set(links.flatMap((l) => l.tagged_ids ?? []))],
     tag_skipped: links.find((l) => l.tag_skipped)?.tag_skipped ?? null,
     wrote_files: false,
   });

@@ -83,6 +83,42 @@ function linkToastText(base, res = {}) {
   return parts.join('，');
 }
 
+/**
+ * 手工填写社团 / 艺术家（含「采用建议的艺术家」）之后，**就地更新专辑墙缓存**。
+ *
+ * 为什么必须补：从专辑详情返回专辑墙走的是 `loadAlbums({ reuse: true })` —— 直接拿
+ * `state.albums` 重新渲染，**不会重新请求**（这是为了保住滚动位置与分页）。
+ * 所以只刷新标签栏而不补缓存的话，卡片封面下方的标签、名称下方的「[社团] · 艺术家」
+ * 都会一直停在旧值，直到重启软件触发一次全量加载（v1.2.5 用户实测缺陷）。
+ *
+ * @param {Array<number|string>} ids 后端返回的 tagged_ids（本次填写的 + 库内同名自动套用的）
+ * @param {{tag?:object, circle?:string, albumArtist?:string}} patch 要写回缓存的字段
+ */
+function patchAlbumCache(ids, { tag = null, circle, albumArtist } = {}) {
+  if (!Array.isArray(ids) || !ids.length) return;
+  const wanted = new Set(ids.map(Number));
+  for (const row of state.albums ?? []) {
+    if (!wanted.has(Number(row.id))) continue;
+    if (circle !== undefined) row.circle = circle;
+    if (albumArtist !== undefined) row.album_artist = albumArtist;
+    if (tag?.id && !(row.tags ?? []).some((t) => Number(t.id) === Number(tag.id))) {
+      row.tags = [...(row.tags ?? []), { id: tag.id, name: tag.name, color: tag.color }];
+    }
+  }
+}
+
+/**
+ * 详情页改完标签后，把这张专辑的最新标签同步回专辑墙缓存。
+ * 同样是因为返回专辑墙走 `loadAlbums({ reuse: true })`，不会重新请求。
+ */
+function syncWallTagsFromDetail() {
+  if (state.view !== 'albumDetail') return;   // 在墙上改的标签，refreshCurrent 已经重新拉过列表
+  const current = state.currentAlbum?.album;
+  if (!current?.id) return;
+  const row = (state.albums ?? []).find((a) => Number(a.id) === Number(current.id));
+  if (row) row.tags = (current.tags ?? []).map((t) => ({ id: t.id, name: t.name, color: t.color }));
+}
+
 /* ------------------------------------------------------------------ 常量 */
 
 const TAG_COLORS = ['#7d6cf5', '#43dfb8', '#f0b866', '#ff8fab', '#5aa9ff',
@@ -1315,7 +1351,9 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
     if (name === null) return;
     const res = await api(`/api/albums/${album.id}/voice-artist`, { method: 'POST', body: { artist: name } });
     toast(linkToastText('已保存艺术家（仅库内记录）', res));
-    await loadTagBar(); // 自动建立的同名标签要立刻出现在专辑墙上方的「CV」栏
+    // 自动建立的同名标签 + 卡片署名：标签栏与专辑墙缓存都要同步，否则返回墙后仍是旧样子
+    patchAlbumCache(res.tagged_ids, { tag: res.tag, albumArtist: res.album_artist });
+    await loadTagBar();
     openAlbum(album.id, { push: false });
   });
   $('#voiceCircleBtn')?.addEventListener('click', async () => {
@@ -1328,6 +1366,7 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
     if (name === null) return;
     const res = await api(`/api/albums/${album.id}/circle`, { method: 'POST', body: { circle: name } });
     toast(linkToastText('已保存社团（仅库内记录）', res));
+    patchAlbumCache(res.tagged_ids, { tag: res.tag, circle: res.circle });
     await loadTagBar();
     openAlbum(album.id, { push: false });
   });
@@ -1336,6 +1375,8 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
       method: 'POST', body: { decision: 'adopted' },
     });
     toast(linkToastText('已采用该艺术家（仅软件显示）', res));
+    // 采用建议同样会建立同名标签并改署名 —— 与手工填写一样补进缓存
+    patchAlbumCache(res.tagged_ids, { tag: res.tag, albumArtist: res.album_artist });
     await loadTagBar();
     openAlbum(album.id, { push: false });
   });
@@ -2063,6 +2104,7 @@ async function applyTagDialog(action = 'apply') {
     }
     $('#tagDialog').close();
     await refreshCurrent();
+    syncWallTagsFromDetail();   // 从详情页改的标签，返回专辑墙时也要立刻出现
     await loadTagBar();
   } catch (err) {
     const box = $('#tagError');

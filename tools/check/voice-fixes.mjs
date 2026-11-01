@@ -304,6 +304,84 @@ try {
     (chips.labels ?? []).join(' | '));
   await shot('v5-track6-versions.png');
 
+  console.log('\n— 问题6：填写艺术家后返回专辑墙，卡片标签立刻刷新（v1.2.5 缺陷）—');
+  /**
+   * 用户实测：详情页手动填了艺术家（自动建立同名 CV 标签），返回专辑墙后卡片封面下方
+   * 没有这个标签，重启软件才出现。
+   *
+   * 根因：返回专辑墙走 `loadAlbums({ reuse: true })`（复用 state.albums，不重新请求），
+   * 保存后只刷新了标签栏，没把新标签补进列表缓存。
+   * 这里按用户路径走一遍：墙 → 详情 → 填艺术家 → 返回键回墙，全程不刷新页面。
+   */
+  const artistRefresh = await ev(`(async () => {
+    const TEST_ARTIST = '界面自检声优';
+    const tagTotal = (card) => {
+      const spans = [...(card?.querySelectorAll('.album-tags .mini-tag') ?? [])].map(x => x.textContent.trim());
+      const more = spans.find(t => /^\\+\\d+$/.test(t));
+      const rest = spans.filter(t => !/^\\+\\d+$/.test(t)).length;
+      return rest + (more ? Number(more.slice(1)) : 0);
+    };
+
+    const r = await fetch('/api/albums?limit=200').then(x => x.json());
+    const v = r.albums.find(a => a.is_voice);
+    const before = (await fetch('/api/albums/' + v.id).then(x => x.json())).album;
+
+    // 切到 ASMR 库（专辑墙必须挂一个库），记下卡片当前的标签数
+    const libs = [...document.querySelectorAll('.library-item')];
+    libs.find(i => /ASMR/i.test(i.querySelector('.lib-path')?.textContent ?? ''))?.click();
+    await new Promise(z => setTimeout(z, 1800));
+    const cardBefore = document.querySelector('.album-card[data-id="' + v.id + '"]');
+    const totalBefore = tagTotal(cardBefore);
+
+    location.hash = '#/album/' + v.id;
+    await new Promise(z => setTimeout(z, 2200));
+
+    document.querySelector('#voiceArtistBtn').click();
+    await new Promise(z => setTimeout(z, 700));
+    document.querySelector('#askInput').value = TEST_ARTIST;
+    document.querySelector('#askOk').click();
+    await new Promise(z => setTimeout(z, 1800));
+
+    history.back();   // 与用户点「返回」等价：走 hashchange → route() 复用列表
+    await new Promise(z => setTimeout(z, 2000));
+
+    const card = document.querySelector('.album-card[data-id="' + v.id + '"]');
+    return {
+      id: v.id,
+      originalArtist: before.album_artist ?? '',
+      onWall: document.querySelector('#viewAlbums')?.hidden === false,
+      totalBefore,
+      totalAfter: tagTotal(card),
+      miniTags: [...(card?.querySelectorAll('.album-tags .mini-tag') ?? [])].map(x => x.textContent.trim()),
+      credit: card?.querySelector('.album-credit')?.textContent?.trim() ?? '',
+      title: card?.querySelector('.album-name')?.textContent?.trim() ?? '',
+    };
+  })()`);
+  ok('填写艺术家后回到专辑墙', artistRefresh.onWall === true, artistRefresh.title);
+  ok('卡片标签数立刻 +1（无需重启软件）', artistRefresh.totalAfter === artistRefresh.totalBefore + 1,
+    `${artistRefresh.totalBefore} → ${artistRefresh.totalAfter}：${(artistRefresh.miniTags ?? []).join(' | ')}`);
+  ok('卡片署名也跟着更新', (artistRefresh.credit ?? '').includes('界面自检声优'), artistRefresh.credit);
+  await shot('v125-voice-artist-wall-refresh.png');
+
+  // 还原测试写过的艺术家，并解除测试标签（避免污染下次运行）
+  if (artistRefresh.id) {
+    await fetch(`${API}/api/albums/${artistRefresh.id}/voice-artist`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artist: artistRefresh.originalArtist }),
+    });
+    const afterRestore = await (await fetch(`${API}/api/albums/${artistRefresh.id}`)).json();
+    const testTag = (afterRestore.album.tags ?? []).find((t) => t.name === '界面自检声优');
+    if (testTag) {
+      await fetch(`${API}/api/albums/${artistRefresh.id}/tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ add: [], remove: [testTag.id] }),
+      });
+    }
+    console.log(`  （已还原 #${artistRefresh.id} 的艺术家为 ${JSON.stringify(artistRefresh.originalArtist)} 并解除测试标签）`);
+  }
+
   // 还原测试写过的社团
   await fetch(`${API}/api/albums/${origCircle.id}/circle`, {
     method: 'POST',
