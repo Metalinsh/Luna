@@ -265,6 +265,77 @@ try {
   ok('社团可通过检索命中', circle.searchHit >= 1, `命中 ${circle.searchHit} 张`);
   ok('社团接口生效', circle.searchHit >= 1);
 
+  console.log('\n— 标签栏：分类独立展开 + 高度上限 —');
+  /**
+   * v1.2.5 用户反馈的两处标签栏问题：
+   *   ② 三大分类无法独立展开 —— 点任意一栏的「＋ 还有 N 个」会把三栏一起展开；
+   *   ③ 展开后标签一多会把专辑墙挤出屏幕 —— 需要高度上限（窗口 1/3）并可在栏内滚动。
+   */
+  const tagbar = await cdp.eval(`(async () => {
+    const nav = [...document.querySelectorAll('.nav-item')].find(b => b.dataset.view === 'albums');
+    nav.click();
+    await new Promise(r => setTimeout(r, 1500));
+    // 专辑墙必须挂一个音乐库；没有选中就先选第一个
+    if (!document.querySelector('.library-item.is-active')) {
+      document.querySelector('.library-item')?.click();
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    const bar = document.querySelector('#tagBar');
+    const rows = [...bar.querySelectorAll('.tagbar-row[data-cat-row]')];
+    const hiddenIn = (row) => [...row.querySelectorAll('.tagbar-chip')].filter(c => c.hidden).length;
+    const rowOf = (cat) => bar.querySelector('.tagbar-row[data-cat-row="' + cat + '"]');
+
+    const overflowRows = rows.filter(r => r.querySelector('[data-more]:not([hidden])'));
+    if (!overflowRows.length) return { skip: '当前标签数量不足以折叠，无法验证', rows: rows.length };
+
+    const target = overflowRows[0];
+    const targetCat = target.dataset.catRow;
+    const otherCats = overflowRows.slice(1).map(r => r.dataset.catRow);
+    const before = {
+      targetHidden: hiddenIn(target),
+      othersHidden: otherCats.map(c => hiddenIn(rowOf(c))),
+    };
+
+    target.querySelector('[data-more]').click();
+    await new Promise(r => setTimeout(r, 400));
+
+    const cs = getComputedStyle(bar);
+    const expanded = {
+      targetHidden: hiddenIn(rowOf(targetCat)),
+      hasLess: !!rowOf(targetCat)?.querySelector('[data-less]'),
+      otherHidden: otherCats.map(c => hiddenIn(rowOf(c))),
+      otherStillMore: otherCats.map(c => !!rowOf(c)?.querySelector('[data-more]:not([hidden])')),
+      isExpandedClass: bar.classList.contains('is-expanded'),
+      overflowY: cs.overflowY,
+      maxHeightPx: parseFloat(cs.maxHeight),
+      heightPx: bar.getBoundingClientRect().height,
+      third: window.innerHeight / 3,
+    };
+
+    rowOf(targetCat)?.querySelector('[data-less]')?.click();
+    await new Promise(r => setTimeout(r, 400));
+    const collapsed = {
+      isExpandedClass: bar.classList.contains('is-expanded'),
+      targetHasMore: !!rowOf(targetCat)?.querySelector('[data-more]:not([hidden])'),
+    };
+    return { targetCat, otherCats, before, expanded, collapsed };
+  })()`);
+  ok('标签栏有可展开的分类', !tagbar.skip, tagbar.skip ?? `展开「${tagbar.targetCat}」，另有 ${tagbar.otherCats?.length ?? 0} 栏也在溢出`);
+  ok('点击「还有 N 个」只展开被点的分类', tagbar.expanded?.targetHidden === 0 && tagbar.expanded?.hasLess === true,
+    `${tagbar.targetCat} 隐藏 chip ${tagbar.before?.targetHidden} → ${tagbar.expanded?.targetHidden}`);
+  ok('其它分类保持折叠（不再一起展开）',
+    (tagbar.otherCats ?? []).every((_, i) => tagbar.expanded.otherHidden[i] === tagbar.before.othersHidden[i]
+      && tagbar.expanded.otherStillMore[i] === true),
+    `其它栏隐藏数 ${(tagbar.expanded?.otherHidden ?? []).join(',')} / 折叠按钮保留 ${(tagbar.expanded?.otherStillMore ?? []).join(',')}`);
+  ok('展开后高度上限为窗口的 1/3',
+    Math.abs((tagbar.expanded?.maxHeightPx ?? 0) - (tagbar.expanded?.third ?? 0)) <= 6,
+    `max-height ${tagbar.expanded?.maxHeightPx}px vs 1/3 ${Math.round(tagbar.expanded?.third ?? 0)}px`);
+  ok('展开后可在标签栏内滚动',
+    tagbar.expanded?.overflowY === 'auto' && tagbar.expanded.heightPx <= tagbar.expanded.third + 6,
+    `overflow-y=${tagbar.expanded?.overflowY}，实际高度 ${Math.round(tagbar.expanded?.heightPx ?? 0)}px`);
+  ok('收起后恢复折叠态',
+    tagbar.collapsed?.isExpandedClass === false && tagbar.collapsed?.targetHasMore === true);
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 } catch (err) {
   console.error('验证脚本异常：', err.message);

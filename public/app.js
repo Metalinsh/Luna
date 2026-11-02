@@ -169,11 +169,14 @@ const state = {
   albumOffset: 0,
   hasMore: false,
   tagCatalog: [],
-  /** 标签栏是否展开（每栏默认只显示前若干个，避免标签一多就把专辑墙挤下去） */
-  tagBarExpanded: false,
+  /**
+   * 标签栏里**已展开的分类**（`style` / `circle` / `artist`）。
+   * 以前是一个全局布尔，点任意一栏的「＋ 还有 N 个」会把三栏一起展开；
+   * 现在按分类独立记录，各栏互不影响。
+   */
+  tagBarExpanded: new Set(),
   libraries: [],
   trackList: [],
-  incomplete: { summary: null, albums: [], group: null, status: null },
   tagsView: [],
   currentAlbum: null,
   /** 从专辑墙进详情页时的浏览进度快照（视图 + 滚动位置），供返回时还原 */
@@ -574,13 +577,11 @@ function badgesFor(album) {
     parts.push(`<span class="badge is-archive" title="该发行来自压缩包：${arch.tracks} 条曲目在包内，播放时会按需解码">`
       + `🗜 包内 ${arch.tracks}</span>`);
   }
-  const c = album.completeness;
-  if (c && c.status !== 'complete') {
-    const critical = c.status === 'critical';
-    const tips = (c.missingDetailed ?? []).map((m) => m.label).join('、');
-    parts.push(`<span class="badge ${critical ? 'is-critical' : 'is-warn'}" title="${esc(tips)}">`
-      + `${critical ? '⚠ 关键缺失' : '⚠ 待完善'}</span>`);
-  }
+  /*
+   * v1.2.5 起**不再提示信息缺失**（用户要求）：卡片上不再出现
+   * 「⚠ 待完善 / ⚠ 关键缺失」角标，也不再有左侧「待完善」分类。
+   * 缺失字段本身的编辑能力保留（编辑信息 / 填写社团 / 填写艺术家等）。
+   */
   if (album.tags?.length) {
     parts.push(`<span class="badge is-tag">🏷 ${album.tags.length}</span>`);
   }
@@ -783,6 +784,13 @@ function groupTagsByCategory(tags, selected = null) {
 }
 
 async function loadTagBar() {
+  /*
+   * 标签栏取哪一套标签由**当前选中的音乐库类别**决定（普通 / ASMR）。
+   * 库列表已经拿到、却还没定下当前库时先补一个默认库：扫描完成、首次添加音乐库
+   * 这些时机里，选择逻辑可能晚于标签栏刷新（v1.2.5 用户实测：初次扫描 ASMR 库后
+   * 标签识别出来了，但标签栏里一个都不显示，重启才正常）。
+   */
+  if (!state.libraryFilter && (state.libraries?.length ?? 0) > 0) ensureDefaultLibrary();
   const kind = tagKindForView();
   const { tags } = await api(`/api/tags?kind=${kind}`);
   state.tagCatalog = tags;
@@ -857,11 +865,13 @@ function renderTagBar() {
     const all = byCategory.get(key) ?? [];
     if (!all.length) return '';
     // 折叠态：先按原样渲染，插入 DOM 后再量出第一行能放几个（见 collapseTagRowToFirstLine）
-    const tail = state.tagBarExpanded
-      ? (all.length > 1 ? '<button class="tag-chip is-more" data-less="1">收起</button>' : '')
-      : '<button class="tag-chip is-more" data-more="1" hidden>＋ 还有 0 个</button>';
+    // 展开态**按分类独立**记录，点哪栏的「还有 N 个」只展开哪栏
+    const expanded = state.tagBarExpanded.has(key);
+    const tail = expanded
+      ? (all.length > 1 ? `<button class="tag-chip is-more" data-less="1" data-cat="${key}">收起</button>` : '')
+      : `<button class="tag-chip is-more" data-more="1" data-cat="${key}" hidden>＋ 还有 0 个</button>`;
     return `
-      <div class="tagbar-row">
+      <div class="tagbar-row" data-cat-row="${key}">
         <span class="tagbar-label" title="${esc(hint)}">${label}<em>${all.length}</em></span>
         <div class="tagbar-chips">${all.map(tagChipMarkup).join('')}${tail}</div>
       </div>`;
@@ -877,9 +887,19 @@ function renderTagBar() {
 
   bar.innerHTML = head + (state.tagCatalog.length ? rows : emptyRow);
 
+  /**
+   * 展开态给标签栏加一个上限（CSS `.tagbar.is-expanded`：33vh + 滚动）。
+   * 展开的栏多、标签多时，不让标签栏把专辑墙挤没；折叠态保持自然高度。
+   */
+  bar.classList.toggle('is-expanded', state.tagBarExpanded.size > 0);
+
   // 隐藏状态下量不出真实行高，等回到专辑墙（showView → renderTagBar）再量
-  if (!bar.hidden && !state.tagBarExpanded) {
-    for (const box of $$('#tagBar .tagbar-chips')) collapseTagRowToFirstLine(box);
+  if (!bar.hidden) {
+    for (const box of $$('#tagBar .tagbar-chips')) {
+      const cat = box.closest('.tagbar-row')?.dataset.catRow;
+      if (state.tagBarExpanded.has(cat)) continue;   // 展开的那栏整行铺开，不做折叠
+      collapseTagRowToFirstLine(box);
+    }
   }
 }
 
@@ -1124,19 +1144,10 @@ async function openAlbum(id, { push = true } = {}) {
   const formats = [...new Set(tracks.map((t) => (t.ext ?? '').replace('.', '').toUpperCase()).filter(Boolean))];
   const bitrates = tracks.map((t) => t.bitrate).filter(Number.isFinite);
   const avgKbps = bitrates.length ? Math.round(bitrates.reduce((a, b) => a + b, 0) / bitrates.length / 1000) : null;
-  const c = album.completeness ?? { status: 'complete', missing: [], missingDetailed: [], ignored: [] };
 
   const tagsHtml = album.tags?.length
     ? album.tags.map((t) => `<span class="tag-pill is-preset" style="--tag-color:${tagColor(t.color)}">${esc(t.name)}</span>`).join('')
     : '<span class="tag-count">还没有标签</span>';
-
-  const missingHtml = c.missingDetailed?.length
-    ? c.missingDetailed.map((m) => `<span class="miss-chip ${m.level === 'required' ? 'is-critical' : ''}"
-        title="${esc(m.hint ?? '')}" data-open-group="${m.key}">${esc(m.label)}</span>`).join('')
-    : '<span class="miss-chip" style="background:rgba(74,217,145,.14);color:var(--ok);border-color:rgba(74,217,145,.3)">完整</span>';
-  const ignoredHtml = c.ignored?.length
-    ? c.ignored.map((k) => `<span class="miss-chip is-ignored" data-restore="${k}" title="点击恢复提醒">已忽略</span>`).join('')
-    : '';
 
   $('#albumDetail').innerHTML = `
     <div class="detail-head">
@@ -1169,8 +1180,6 @@ async function openAlbum(id, { push = true } = {}) {
           </button>
         </div>
         <div class="wb-missing" style="margin-top:14px" id="detailTags">${tagsHtml}</div>
-        <div class="wb-missing" style="margin-top:8px">${missingHtml}${ignoredHtml}</div>
-        ${album.is_compilation ? '<div class="tag-count" style="margin-top:8px">已标记为合辑（豁免「缺专辑艺术家」提醒）</div>' : ''}
       </div>
     </div>
     <div class="track-table">
@@ -1202,18 +1211,6 @@ async function openAlbum(id, { push = true } = {}) {
     api('/api/reveal', { method: 'POST', body: { path: tracks[0]?.path } }).catch(() => {});
   });
   bindDetailCacheActions(album);
-  $$('#albumDetail [data-open-group]').forEach((el) => el.addEventListener('click', async () => {
-    await api(`/api/albums/${album.id}/ignore`, { method: 'POST', body: { key: el.dataset.openGroup } });
-    toast('已忽略该提醒');
-    openAlbum(album.id, { push: false });
-  }));
-  $$('#albumDetail [data-restore]').forEach((el) => el.addEventListener('click', async () => {
-    await api(`/api/albums/${album.id}/ignore`, {
-      method: 'POST', body: { key: el.dataset.restore, restore: true },
-    });
-    toast('已恢复该提醒');
-    openAlbum(album.id, { push: false });
-  }));
 
   showView('albumDetail');
   if (push) history.pushState({ id }, '', `#/album/${id}`);
@@ -1677,62 +1674,6 @@ async function loadTracks() {
   highlightPlayingRow();
 }
 
-/* ============================================================ 视图：待完善 */
-
-async function loadIncomplete() {
-  const params = new URLSearchParams({ limit: '400' });
-  if (state.incomplete.group) params.set('group', state.incomplete.group);
-  if (state.incomplete.status) params.set('status', state.incomplete.status);
-  const data = await api(`/api/incomplete?${params}`);
-  state.incomplete.summary = data.summary;
-  state.incomplete.albums = data.albums;
-
-  const summary = data.summary;
-  const badge = $('#incompleteBadge');
-  badge.hidden = !summary.incomplete;
-  badge.textContent = String(summary.incomplete);
-
-  const groups = summary.groups.map((g) => `
-    <button class="wb-group ${state.incomplete.group === g.key ? 'is-active' : ''}" data-group="${g.key}">
-      <div class="wb-count">${g.count}</div>
-      <div class="wb-label">${esc(g.label)}</div>
-      <div class="wb-level ${g.level === 'required' ? 'is-critical' : ''}">
-        ${g.level === 'required' ? '关键缺失' : '建议补全'}
-      </div>
-    </button>`).join('');
-
-  const items = state.incomplete.albums.map((a) => `
-    <div class="wb-item">
-      <div class="wb-cover" style="${a.cover_hash ? `background-image:url('/api/cover/${a.cover_hash}')` : ''}"></div>
-      <div class="wb-main">
-        <div class="wb-title">${esc(a.album)}</div>
-        <div class="wb-artist">${esc(a.album_artist)}${a.year ? ` · ${a.year}` : ''}</div>
-      </div>
-      <div class="wb-missing">
-        ${a.missingDetailed.map((m) => `<span class="miss-chip ${m.level === 'required' ? 'is-critical' : ''}"
-            title="${esc(m.hint ?? '')}">${esc(m.label)}</span>`).join('')}
-      </div>
-      <button class="btn btn-ghost" data-open-album="${a.id}">打开</button>
-    </div>`).join('');
-
-  $('#incompletePanel').innerHTML = `
-    <div class="wb-head">
-      <h2>待完善工作台</h2>
-      <span class="wb-sub">
-        共 ${summary.total} 张专辑 · <span style="color:var(--ok)">完整 ${summary.complete}</span> ·
-        <span style="color:var(--warn)">建议补全 ${summary.advisory}</span> ·
-        <span style="color:#ff9a9a">关键缺失 ${summary.critical}</span>
-      </span>
-    </div>
-    <div class="wb-groups">${groups || '<div class="wb-sub">库里没有待完善专辑 🎉</div>'}</div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <button class="tag-chip ${!state.incomplete.group ? 'is-active' : ''}" data-group="">全部</button>
-      ${state.incomplete.group ? '<button class="tag-chip" data-group-clear="1">✕ 清除筛选</button>' : ''}
-    </div>
-    <div class="wb-list">${items || '<div class="wb-sub">没有符合条件的专辑</div>'}</div>
-    <p class="wb-sub">提示：忽略某项后可在专辑详情页点「已忽略」恢复；编辑与写回能力将在 V2.2 提供。</p>`;
-}
-
 /* ============================================================== 视图：标签 */
 
 async function loadTagsView() {
@@ -1842,7 +1783,7 @@ async function loadTagsView() {
 /* ============================================================== 视图：统计 */
 
 async function loadStats() {
-  const { stats, completeness, lastBackupAt } = await api('/api/stats');
+  const { stats, lastBackupAt } = await api('/api/stats');
   const thumbs = await thumbCacheStats();
   const coverUsage = await api('/api/maintenance/usage').catch(() => null);
   const jobs = await api('/api/jobs?limit=8').catch(() => ({ jobs: [] }));
@@ -1850,8 +1791,6 @@ async function loadStats() {
   const maxFormat = Math.max(1, ...stats.byFormat.map((f) => f.n));
   const maxArtist = Math.max(1, ...stats.topArtists.map((a) => a.albums));
   const maxTag = Math.max(1, ...(stats.topTags ?? []).map((t) => t.albums || 1));
-  const completeRate = completeness.total
-    ? Math.round((completeness.complete / completeness.total) * 100) : 0;
 
   $('#statsPanel').innerHTML = `
     <div class="stat-cards">
@@ -1861,9 +1800,6 @@ async function loadStats() {
       <div class="stat-card"><div class="stat-value">${stats.tags}</div><div class="stat-label">标签</div></div>
       <div class="stat-card"><div class="stat-value">${esc(fmtLong(stats.total_duration))}</div><div class="stat-label">总时长</div></div>
       <div class="stat-card"><div class="stat-value">${esc(fmtBytes(stats.total_size))}</div><div class="stat-label">占用空间</div></div>
-      <div class="stat-card"><div class="stat-value">${completeRate}%</div><div class="stat-label">信息完整度</div></div>
-      <div class="stat-card"><div class="stat-value" style="color:var(--warn)">${completeness.incomplete}</div>
-        <div class="stat-label">待完善专辑</div></div>
     </div>
 
     <div class="two-col">
@@ -1900,7 +1836,7 @@ async function loadStats() {
       <div class="panel">
         <h3>数据安全</h3>
         <p class="hint" style="line-height:1.8">
-          标签、库显示名、提醒豁免属于<b>用户资产</b>，删除索引不会自动重建它们。<br />
+          标签、库显示名属于<b>用户资产</b>，删除索引不会自动重建它们。<br />
           最近自动备份：${lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '暂无'}<br />
           封面缓存：${coverUsage ? `${coverUsage.covers.files} 个文件 / ${fmtBytes(coverUsage.covers.bytes)}` : '—'}
           ${thumbs ? ` · 缩略图 ${thumbs.count} 张（浏览器缓存）` : ''}
@@ -2449,7 +2385,22 @@ function pollScan() {
         clearInterval(state.scanTimer);
         state.scanTimer = null;
         $('#scanBtn').disabled = false;
-        await Promise.all([loadLibraries(), loadTagBar(), refreshCurrent()]);
+        /*
+         * ⚠ 顺序很关键（v1.2.5 用户实测缺陷：初次扫描 ASMR 库后，识别出的标签不在
+         * 专辑墙标签栏里显示）。
+         *
+         * `loadTagBar()` 按**当前选中音乐库的类别**决定取哪一套标签（普通 / ASMR），
+         * 以前这里用 `Promise.all([loadLibraries(), loadTagBar(), refreshCurrent()])`
+         * 并行跑 —— 标签栏可能在音乐库列表回来之前就取了，此时 state.libraryFilter
+         * 还是空的（或旧库），于是按「普通专辑」那套去取，ASMR 标签自然一个都不显示；
+         * 重启软件后启动顺序正确，才恢复正常。
+         *
+         * 现在改成串行：库列表 → 选中库 → 标签栏 → 当前视图。
+         */
+        await loadLibraries();
+        ensureDefaultLibrary();
+        await loadTagBar();
+        await refreshCurrent();
         const report = lastReport ?? s;
         const dlsiteHit = report.dlsiteMatched
           ? `，DLsite 命中 ${report.dlsiteMatched} 张（补 ${report.dlsiteFilled ?? 0} 项 · 打标 ${report.dlsiteTagged ?? 0} 张`
@@ -2476,7 +2427,7 @@ function pollScan() {
 
 /* ============================================================ 视图切换 */
 
-const VIEWS = ['Albums', 'AlbumDetail', 'Tracks', 'Incomplete', 'Tags', 'Stats'];
+const VIEWS = ['Albums', 'AlbumDetail', 'Tracks', 'Tags', 'Stats'];
 
 /**
  * 视图映射：多个入口可以复用同一个视图容器。
@@ -2489,7 +2440,6 @@ const VIEW_MAP = {
   favtracks: 'Tracks',
   albumDetail: 'AlbumDetail',
   tracks: 'Tracks',
-  incomplete: 'Incomplete',
   tags: 'Tags',
   stats: 'Stats',
 };
@@ -2514,19 +2464,8 @@ async function refreshCurrent() {
   else if (state.view === 'albumDetail' && state.currentAlbum) {
     await openAlbum(state.currentAlbum.album.id, { push: false });
   } else if (state.view === 'tracks') await loadTracks();
-  else if (state.view === 'incomplete') await loadIncomplete();
   else if (state.view === 'tags') await loadTagsView();
   else if (state.view === 'stats') await loadStats();
-  await refreshIncompleteBadge();
-}
-
-async function refreshIncompleteBadge() {
-  try {
-    const { summary } = await api('/api/incomplete?limit=1');
-    const badge = $('#incompleteBadge');
-    badge.hidden = !summary.incomplete;
-    badge.textContent = String(summary.incomplete);
-  } catch { /* 角标失败不影响主流程 */ }
 }
 
 /* ============================================================== 多选 */
@@ -3115,7 +3054,6 @@ function bindEvents() {
 
     if (view === 'albums' || view === 'favasmr' || view === 'favalbum') loadAlbums();
     else if (view === 'favtracks' || view === 'tracks') loadTracks();
-    else if (view === 'incomplete') loadIncomplete();
     else if (view === 'tags') loadTagsView();
     else loadStats();
   }));
@@ -3158,12 +3096,15 @@ function bindEvents() {
       return;
     }
     if (e.target.closest('[data-more]')) {
-      state.tagBarExpanded = true;
+      // 只展开被点的那一栏（按分类独立）
+      const cat = e.target.closest('[data-more]')?.dataset.cat;
+      if (cat) state.tagBarExpanded.add(cat);
       renderTagBar();
       return;
     }
     if (e.target.closest('[data-less]')) {
-      state.tagBarExpanded = false;
+      const cat = e.target.closest('[data-less]')?.dataset.cat;
+      if (cat) state.tagBarExpanded.delete(cat);
       renderTagBar();
       return;
     }
@@ -3179,14 +3120,18 @@ function bindEvents() {
 
   /**
    * 窗口宽度变化后重新量一次「第一行能放几个」。
-   * 折叠态才需要重算；展开态本来就全部铺开。
+   * 只重算**折叠态**的栏：展开的栏本来就整行铺开，不参与折叠测量。
    */
   let tagBarResizeTimer;
   window.addEventListener('resize', () => {
     clearTimeout(tagBarResizeTimer);
     tagBarResizeTimer = setTimeout(() => {
-      if (state.view !== 'albums' || state.tagBarExpanded) return;
-      for (const box of $$('#tagBar .tagbar-chips')) collapseTagRowToFirstLine(box);
+      if (state.view !== 'albums') return;
+      for (const box of $$('#tagBar .tagbar-chips')) {
+        const cat = box.closest('.tagbar-row')?.dataset.catRow;
+        if (state.tagBarExpanded.has(cat)) continue;
+        collapseTagRowToFirstLine(box);
+      }
     }, 160);
   });
 
@@ -3238,7 +3183,6 @@ function bindEvents() {
       state.selecting = false;
       await Promise.all([
         loadAlbums(), loadLibraries(), loadTagBar(), updateFavoriteBadges(),
-        refreshIncompleteBadge(),   // 移除后「待完善」计数可能变化
       ]);
       syncSelectionUi();
     } catch (err) {
@@ -3426,26 +3370,6 @@ function bindEvents() {
 
   $('#jobUndoBtn').addEventListener('click', (e) => undoJob(e.currentTarget.dataset.jobId));
   $('#jobCloseBtn').addEventListener('click', () => { $('#jobBar').hidden = true; });
-
-  $('#incompletePanel').addEventListener('click', (e) => {
-    const group = e.target.closest('[data-group]');
-    if (group) {
-      state.incomplete.group = group.dataset.group || null;
-      loadIncomplete();
-      return;
-    }
-    if (e.target.closest('[data-group-clear]')) {
-      state.incomplete.group = null;
-      loadIncomplete();
-      return;
-    }
-    const open = e.target.closest('[data-open-album]');
-    if (open) {
-      const id = Number(open.dataset.openAlbum);
-      history.pushState({}, '', `#/album/${id}`);
-      openAlbum(id, { push: false });
-    }
-  });
 
   /** 标签分类切换：只改这一张标签的归类，随后同步专辑墙上方的分栏 */
   $('#tagsPanel').addEventListener('change', async (e) => {
@@ -3860,8 +3784,7 @@ async function route() {
     await openAlbum(Number(hash.slice('/album/'.length)), { push: false });
     return;
   }
-  if (hash === '/tracks') { showView('tracks'); await loadTracks(); return; }
-  // 收藏视图也要能被直接打开/刷新（三个入口现在各有独立筛选）
+  if (hash === '/tracks') { showView('tracks'); await loadTracks(); return; }  // 收藏视图也要能被直接打开/刷新（三个入口现在各有独立筛选）
   if (hash === '/favasmr') {
     state.favScope = 'asmr'; state.trackFavOnly = false;
     showView('favasmr'); await loadAlbums(); return;
@@ -3873,7 +3796,6 @@ async function route() {
   if (hash === '/favtracks') {
     state.trackFavOnly = true; showView('favtracks'); await loadTracks(); return;
   }
-  if (hash === '/incomplete') { showView('incomplete'); await loadIncomplete(); return; }
   if (hash === '/tags') { showView('tags'); await loadTagsView(); return; }
   if (hash === '/stats') { showView('stats'); await loadStats(); return; }
   // 从专辑详情返回：**原地还原**之前的列表与滚动位置（不重新请求）
@@ -4599,7 +4521,6 @@ function bindSettingsEvents() {
     // 专辑墙必须挂在一个音乐库上：先定下当前库，标签栏才知道该取哪一套标签
     ensureDefaultLibrary();
     await Promise.all([loadTagBar(), route()]);
-    await refreshIncompleteBadge();
     await updateFavoriteBadges();
     const { running, lastReport } = await api('/api/scan/status');
     if (running) {

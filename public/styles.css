@@ -641,6 +641,22 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex; flex-direction: column; align-items: stretch; gap: 6px;
   padding: 10px 24px 12px; border-bottom: 1px solid var(--line);
 }
+/*
+ * 展开态：高度上限 = 当前窗口的 1/3，超出时在标签栏内部上下滚动（v1.2.5）。
+ * 以前展开后整栏跟着标签数量无限变长，标签一多就把专辑墙整个挤出屏幕。
+ */
+.tagbar.is-expanded {
+  max-height: 33vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 滚动时表头（清除筛选 / 当前标签套别 / 封面尺寸）保持可见 */
+.tagbar.is-expanded .tagbar-head {
+  position: sticky; top: 0; z-index: 1;
+  padding-bottom: 2px;
+  background: var(--bg-surface);
+  backdrop-filter: blur(8px);
+}
 /* 表头行：清除筛选 + 标题 + 右侧封面尺寸 */
 .tagbar-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .tagbar-title { font-size: 12px; color: var(--fg-faint); }
