@@ -979,6 +979,21 @@ export function listVoiceAlbumsWithRj() {
   `).all();
 }
 
+/**
+ * 某个压缩包当前挂在哪些类别的专辑上（v1.2.6）。
+ *
+ * 用途：压缩包有「size + mtime 没变就整包跳过」的快路径，而**判定规则变了**时
+ * （例如 ASMR 库里的无 RJ 包要先按普通专辑入过库，之后改为按音声模型）不能跳，
+ * 否则旧数据永远改不过来。扫描器据此判断「这个包需要强制重新入库」。
+ */
+export function archiveAlbumKinds(archiveId) {
+  return db.prepare(`
+    SELECT DISTINCT COALESCE(a.kind, 'music') AS kind
+    FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
+    WHERE t.archive_id = ?
+  `).all(Number(archiveId)).map((r) => r.kind);
+}
+
 /** 批量写入社团（只写库，不动文件） */
 export function setAlbumCircleBulk(ids, circle) {
   const value = String(circle ?? '').trim() || null;

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -44,9 +45,41 @@ export function isUnderAsmrFolder(p) {
 }
 
 /**
- * 自动维护「ASMR」标签。
+ * 音声库（ASMR 库）里某个文件的**发行根**（v1.2.6）。
  *
- * 非 ASMR 目录下的专辑会被**移除**该标签：否则用户把专辑移出 ASMR 目录后，
+ * 规则：
+ *   · 路径里有 RJ 号 → 沿用 `locateRelease()` 的发行根（与旧行为一致）；
+ *   · 没有 RJ 号 → 取**库下的一级目录**作为一张发行（ASMR 作品通常一个作品一个文件夹，
+ *     版本 / 特典是它的子目录，正好对应三层模型）；
+ *   · 文件直接躺在库根目录 → 发行根就是库根，但必须 `explicit`（只取这一层的文件），
+ *     否则 analyzeRelease 会递归把整库当成一张专辑。
+ *
+ * @returns {{root: string, explicit: boolean}}
+ */
+function voiceRootOf(file, libraryPath) {
+  // 只看目录段：RJ 号写在**文件名**里不属于正式发行命名，不该决定发行根
+  const located = locateRelease(path.dirname(file));
+  if (located) return { root: located.releaseRoot, explicit: false };
+  const rel = path.relative(libraryPath, path.dirname(file));
+  const segs = rel.split(/[\\/]/).filter((s) => s && s !== '.' && s !== '..');
+  if (segs.length) return { root: path.join(libraryPath, segs[0]), explicit: false };
+  return { root: libraryPath, explicit: true };
+}
+
+/** 把磁盘文件转成 analyzeRelease 认识的文件记录（只在「显式文件清单」时用） */
+function diskFileRecord(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const kind = AUDIO_EXTENSIONS.has(ext) ? 'audio'
+    : VIDEO_EXT.has(ext) ? 'video'
+      : 'other';
+  let size = 0;
+  try { size = fs.statSync(filePath).size; } catch { /* 文件消失时交给后续步骤报错 */ }
+  return { path: filePath, name: path.basename(filePath), ext, kind, size };
+}
+
+/**
+ * 自动维护「ASMR」标签。
+ * * 非 ASMR 目录下的专辑会被**移除**该标签：否则用户把专辑移出 ASMR 目录后，
  * 旧标签会一直留着，而本功能的意义正是让标签跟随目录。
  */
 function syncAsmrTag(albumId, samplePath) {
@@ -603,7 +636,7 @@ function readArchiveTags(vpath, file) {
  *
  * @returns {Promise<object>} { archiveId, albumId, entries, tracks, skippedReason? }
  */
-async function ingestArchive({ archivePath, libraryId, seen, known }) {
+async function ingestArchive({ archivePath, libraryId, seen, known, forceVoice = false }) {
   if (known.archives.has(archivePath)) return { skipped: 'already' };
 
   /*
@@ -621,7 +654,15 @@ async function ingestArchive({ archivePath, libraryId, seen, known }) {
     const st = await fsp.stat(archivePath);
     const prev = store.getArchiveByPath(archivePath);
     const settled = prev && ['ready', 'partial', 'no_audio'].includes(String(prev.status));
-    if (settled && prev.file_size === st.size && prev.file_mtime === Math.round(st.mtimeMs)) {
+    /*
+     * 判定规则变了（v1.2.6：ASMR 库里的包一律走音声模型）时不能走快路径，
+     * 否则以前按普通专辑入过库的包永远改不过来 —— 那种包需要强制重建一次。
+     */
+    const needsReclassify = forceVoice
+      && prev
+      && store.archiveAlbumKinds(prev.id).some((k) => k !== 'voice');
+    if (settled && !needsReclassify
+        && prev.file_size === st.size && prev.file_mtime === Math.round(st.mtimeMs)) {
       known.archives.set(archivePath, { id: prev.id, info: null, unchanged: true });
       for (const p of store.trackPathsInArchive(prev.id)) seen.add(p);
       scanState.archivesSkipped += 1;
@@ -697,23 +738,29 @@ async function ingestArchive({ archivePath, libraryId, seen, known }) {
   /**
    * 关键分流：压缩包必须和磁盘文件走**同一条**判定规则。
    *
-   * 曾经这里无条件调用 ingestRelease()，而 ingestRelease 会给每个发行打上
-   * 「ASMR」标签 —— 于是任何放普通音乐（游戏原声、OST）的压缩包都会被误标为
-   * 音声并挂上 ASMR 标签。磁盘文件有 locateRelease() 兜底，压缩包却漏了。
+   * 历史：曾经无条件调用 ingestRelease()，于是任何放普通音乐（游戏原声、OST）的压缩包
+   * 都会被误标为音声；之后改成「包内有 RJ 号的成员才进音声三层模型」。
    *
-   * 现在：包内有 RJ 号的成员才进音声三层模型；其余按普通音乐专辑处理。
+   * v1.2.6：再次修正为与磁盘同口径 —— **ASMR 库里的包整包按音声模型入库**
+   * （没有 RJ 号也一样，例如 `[Comiket 91][かの仔] かのコレクション.zip`）；
+   * 非 ASMR 库里的包仍按「有 RJ 才走音声」判定。
    */
-  const rjMembers = audioFiles.filter((f) => locateRelease(f.path));
+  const useVoice = forceVoice || audioFiles.some((f) => locateRelease(f.path));
   const plainMembers = audioFiles.filter((f) => !locateRelease(f.path));
 
   const result = { tracks: 0 };
-  if (rjMembers.length) {
+  if (useVoice) {
     const r = await ingestRelease({
       root: archivePath, libraryId, seen, files: virtualFiles, readTags: false, known,
     });
     result.tracks = (result.tracks ?? 0) + (r.tracks ?? 0);
+  } else if (plainMembers.length) {
+    result.tracks = (result.tracks ?? 0) + await ingestMusicArchiveMembers({
+      archivePath, archiveId, members: plainMembers, libraryId, seen,
+    });
   }
-  if (plainMembers.length) {
+  // 混编包：ASMR 库以外的包若既有 RJ 成员又有普通成员，普通成员仍按音乐专辑收录
+  if (useVoice && !forceVoice && plainMembers.length) {
     result.tracks = (result.tracks ?? 0) + await ingestMusicArchiveMembers({
       archivePath, archiveId, members: plainMembers, libraryId, seen,
     });
@@ -821,8 +868,10 @@ export async function rescanReleaseRoot({ releaseRoot, libraryId }) {
   const seen = new Set();
   const known = { archives: new Map() };
   // 发行根本身是压缩包时，走包内挂载；否则按目录重扫
+  // ASMR 库里的发行（路径含 ASMR 目录段）一律按音声模型，压缩包不再要求 RJ 号
+  const forceVoice = isUnderAsmrFolder(releaseRoot);
   const result = isArchiveName(releaseRoot) && looksLikeZip(releaseRoot)
-    ? await ingestArchive({ archivePath: releaseRoot, libraryId, seen, known })
+    ? await ingestArchive({ archivePath: releaseRoot, libraryId, seen, known, forceVoice })
     : await ingestRelease({ root: releaseRoot, libraryId, seen });
   let removed = 0;
   for (const p of store.trackPathsUnder(releaseRoot)) {
@@ -1267,9 +1316,28 @@ async function runScan({ libraryIds }) {
     scanState.phase = '解析标签';
 
     // 分流：带 RJ 号的走音声三层模型，其余走普通音乐专辑模型
-    const voiceGroups = new Map();
+    const voiceGroups = new Map();   // root → { files: string[], explicit: boolean }
     const musicFiles = [];
+    /*
+     * v1.2.6：**ASMR 库里的内容一律按音声三层模型入库**，不再要求路径里带 RJ 号。
+     *
+     * 以前只按 `locateRelease()`（RJ 号）分流，于是丢进 ASMR 库、但文件名/目录名没有
+     * RJ 号的作品（例如 `[Comiket 91][かの仔] かのコレクション.zip`）会被当成普通音乐专辑：
+     * 详情页是普通样式、压缩包按普通专辑解析，只在目录名上挂着「ASMR」标签。
+     * 现在库目录名含 ASMR → 整库都走音声模型；有 RJ 号的仍按 RJ 定发行根。
+     */
+    const voiceLibrary = isUnderAsmrFolder(lib.path);
+    if (voiceLibrary) scanState.voiceLibraries = (scanState.voiceLibraries ?? 0) + 1;
     for (const file of allFiles) {
+      if (voiceLibrary) {
+        const { root, explicit } = voiceRootOf(file, lib.path);
+        if (!voiceGroups.has(root)) voiceGroups.set(root, { files: [], explicit });
+        const group = voiceGroups.get(root);
+        group.files.push(file);
+        // 直接躺在库根目录的文件：把清单限定在这一层，避免把整库当一张专辑
+        group.explicit = group.explicit || explicit;
+        continue;
+      }
       const located = locateRelease(file);
       if (!located) {
         // 视频文件只属于音声发行，孤立视频不收录
@@ -1277,8 +1345,8 @@ async function runScan({ libraryIds }) {
         musicFiles.push(file);
         continue;
       }
-      if (!voiceGroups.has(located.releaseRoot)) voiceGroups.set(located.releaseRoot, []);
-      voiceGroups.get(located.releaseRoot).push(file);
+      if (!voiceGroups.has(located.releaseRoot)) voiceGroups.set(located.releaseRoot, { files: [], explicit: false });
+      voiceGroups.get(located.releaseRoot).files.push(file);
     }
 
     const seen = new Set();
@@ -1291,13 +1359,18 @@ async function runScan({ libraryIds }) {
         if (scanState.cancelRequested) break;
         scanState.currentRelease = path.basename(root);
         try {
-          const r = await ingestRelease({ root, libraryId: lib.id, seen });
+          const r = await ingestRelease({
+            root,
+            libraryId: lib.id,
+            seen,
+            ...(group.explicit ? { files: group.files.map(diskFileRecord) } : {}),
+          });
           scanState.releasesIngested = (scanState.releasesIngested ?? 0) + 1;
           scanState.releaseTracks = (scanState.releaseTracks ?? 0) + r.tracks;
         } catch (err) {
           pushError(`音声发行解析失败：${root}（${err.message}）`);
           // 失败时保守处理：这些文件不进入 seen，交由清理阶段决定，避免误删
-          for (const f of group) seen.add(f);
+          for (const f of group.files) seen.add(f);
         }
         scanState.processed += group.length;
       }
@@ -1313,7 +1386,9 @@ async function runScan({ libraryIds }) {
       for (const archivePath of walked.archives) {
         if (scanState.cancelRequested) break;
         try {
-          const r = await ingestArchive({ archivePath, libraryId: lib.id, seen, known });
+          const r = await ingestArchive({
+            archivePath, libraryId: lib.id, seen, known, forceVoice: voiceLibrary,
+          });
           if (r?.tracks) scanState.releasesIngested = (scanState.releasesIngested ?? 0) + 1;
         } catch (err) {
           scanState.archivesFailed += 1;
