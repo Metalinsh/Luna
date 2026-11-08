@@ -995,6 +995,9 @@ function voiceDetailMarkup(album, data, gallery = null) {
             <svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> 播放本版本
           </button>
           <button class="btn" id="tagAlbumBtn">🏷 标签</button>
+          <button class="btn" id="editVoiceMediaBtn" title="写回磁盘音频文件的标签/封面；压缩包内只读">
+            <svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> 编辑媒体
+          </button>
           <button class="btn" id="revealAlbumBtn">
             <svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> 打开文件夹
           </button>
@@ -1006,7 +1009,7 @@ function voiceDetailMarkup(album, data, gallery = null) {
     ? album.tags.map((t) => `<span class="tag-pill is-preset" style="--tag-color:${tagColor(t.color)}">${esc(t.name)}</span>`).join('')
     : '<span class="tag-count">还没有标签</span>'}
         </div>
-        <div class="voice-notes">音声专辑的名称取自文件夹，艺术家只记录在软件内，<b>不会写回音频文件</b>。</div>
+        <div class="voice-notes">音声专辑的名称取自文件夹；艺术家/社团的快捷填写只记库内。点「编辑媒体」可显式写回<b>磁盘文件</b>的标签/封面；<b>压缩包内文件只读</b>。</div>
         ${album.archive?.archives > 0 ? `<div class="voice-notes archive-note">
           🗜 该发行来自压缩包：<b>${album.archive.tracks} 条曲目在包内</b>（已按包内目录结构解析版本与轨号）。
           包内文件不会被修改，播放时会按需解码到缓存。
@@ -1329,6 +1332,7 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
     playQueue(q, 0, { cover: album.cover_url, label: `音声《${album.album}》` });
   });
   $('#tagAlbumBtn').addEventListener('click', () => openTagDialog([album.id], album.tags ?? []));
+  $('#editVoiceMediaBtn')?.addEventListener('click', () => openEditDrawer(album.id));
   $('#revealAlbumBtn').addEventListener('click', () => {
     api('/api/reveal', { method: 'POST', body: { path: album.release_root } }).catch(() => {});
   });
@@ -2508,7 +2512,7 @@ function toggleSelect(id) {
 const editState = {
   albumId: null, album: null, tracks: [],
   dirty: new Set(), cleared: new Set(),
-  pendingCover: null, confirmed: false,
+  pendingCover: null, confirmed: false, voice: false,
 };
 
 const ALBUM_FIELDS = [
@@ -2534,7 +2538,12 @@ function trackOriginal(track, key) {
 }
 
 async function openEditDrawer(albumId) {
-  const { album, tracks } = await api(`/api/albums/${encodeURIComponent(albumId)}`);
+  const detail = await api(`/api/albums/${encodeURIComponent(albumId)}`);
+  const { album } = detail;
+  // 音声详情返回的是「按轨号合并后的行」，没有 track id；写回需要逐文件曲目。
+  const tracks = album.is_voice
+    ? (await api(`/api/albums/${encodeURIComponent(albumId)}/edit-tracks`)).tracks
+    : detail.tracks;
   editState.albumId = albumId;
   editState.album = album;
   editState.tracks = tracks;
@@ -2542,6 +2551,9 @@ async function openEditDrawer(albumId) {
   editState.cleared.clear();
   editState.pendingCover = null;
   editState.confirmed = false;
+  editState.voice = Boolean(album.is_voice);
+  const head = $('#editDrawer .drawer-head h3');
+  if (head) head.textContent = editState.voice ? '编辑音声媒体文件' : '编辑专辑信息';
   renderEditDrawer();
   $('#drawerBackdrop').hidden = false;
   $('#editDrawer').hidden = false;
@@ -2574,8 +2586,17 @@ function renderEditDrawer() {
   const tracks = editState.tracks;
   const coverUrl = a.cover_url;
   const pending = editState.pendingCover;
+  const voice = editState.voice;
+  const writableCount = tracks.filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null).length;
+  const coverDefault = voice ? 'db' : 'embedded';
 
   $('#editBody').innerHTML = `
+    ${voice ? `<div class="voice-edit-note">
+      <b>音声发行 · 媒体文件写回</b><br>
+      这里修改的是<b>磁盘音频文件内的标签和封面</b>。压缩包内曲目只读，会自动跳过；
+      只想改卡片显示（不碰文件）请用详情页的「填艺术家 / 填写社团 / 标签」。
+    </div>` : ''}
+
     <div class="drawer-section" style="border-top:0;padding-top:0">
       <h4>封面</h4>
       <div class="cover-edit">
@@ -2592,19 +2613,25 @@ function renderEditDrawer() {
             <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px">移除封面</button>
           </div>
           <div class="cover-modes">
-            <label><input type="radio" name="coverMode" value="embedded" checked />
+            <label><input type="radio" name="coverMode" value="embedded"
+              ${coverDefault === 'embedded' ? 'checked' : ''} />
               写入每首曲目的内嵌封面（跨软件可见，体积增加）</label>
-            <label><input type="radio" name="coverMode" value="folder" />
-              只写目录 cover.jpg（省空间，拷走单文件会丢）</label>
-            <label><input type="radio" name="coverMode" value="db" />
+            <label><input type="radio" name="coverMode" value="folder"
+              ${coverDefault === 'folder' ? 'checked' : ''} />
+              ${voice ? '只写发行根目录 cover.jpg（省空间，拷走单文件会丢）' : '只写目录 cover.jpg（省空间，拷走单文件会丢）'}</label>
+            <label><input type="radio" name="coverMode" value="db"
+              ${coverDefault === 'db' ? 'checked' : ''} />
               仅记录在软件内（零风险，重建索引会丢）</label>
           </div>
+          ${voice ? `<div class="set-note">当前可写回 ${writableCount} 个磁盘曲目；
+            ${tracks.length - writableCount} 个压缩包内曲目会跳过。</div>` : ''}
         </div>
       </div>
     </div>
 
     <div class="drawer-section">
-      <h4>专辑信息（写入全部 ${tracks.length} 首曲目）</h4>
+      <h4>${voice ? `文件标签（写入全部 ${writableCount} 个可写曲目）` : `专辑信息（写入全部 ${tracks.length} 首曲目）`}</h4>
+      ${voice ? '<p class="hint" style="font-size:12px;line-height:1.6;margin:0 0 10px">音声卡片的发行标题仍以文件夹/发行结构为准；这里写的是音频文件内的标签。</p>' : ''}
       ${ALBUM_FIELDS.slice(0, 2).map((f) => fieldMarkup({
         ...f, value: originalValue(f.key),
       })).join('')}
@@ -2615,14 +2642,23 @@ function renderEditDrawer() {
 
     <div class="drawer-section">
       <h4>曲目（只改填写的那一首）</h4>
-      ${tracks.map((t) => `
-        <div class="track-edit-row">
+      ${tracks.map((t) => {
+        const readonly = t.source_kind === 'archive_member' || t.archive_id != null;
+        const meta = voice
+          ? [t.version_name, readonly ? '包内只读' : null].filter(Boolean).join(' · ')
+          : '';
+        return `
+        <div class="track-edit-row${voice ? ' is-voice' : ''}${readonly ? ' is-readonly' : ''}">
           <span class="idx">${t.track_no ?? ''}</span>
           <input type="text" data-track="${t.id}" data-track-field="title"
-                 value="${esc(trackOriginal(t, 'title'))}" placeholder="曲名" />
+                 value="${esc(trackOriginal(t, 'title'))}" placeholder="曲名"
+                 ${readonly ? 'disabled title="压缩包内文件只读"' : ''} />
           <input type="number" data-track="${t.id}" data-track-field="trackNo"
-                 value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨" />
-        </div>`).join('')}
+                 value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨"
+                 ${readonly ? 'disabled' : ''} />
+          ${meta ? `<div class="track-edit-meta">${esc(meta)}</div>` : ''}
+        </div>`;
+      }).join('')}
     </div>
 
     <div class="drawer-section">
@@ -2630,6 +2666,7 @@ function renderEditDrawer() {
       <p class="hint" style="font-size:12.5px;line-height:1.7;margin:0">
         保存时会先把原文件复制到工作副本，写入并回读校验后才原子替换；
         原文件会完整保留在音乐库根目录的 <code>.lam-undo/</code> 下，可一键撤销。
+        ${voice ? '<br><b>压缩包内文件始终只读</b>，不会被修改。' : ''}
       </p>
     </div>`;
 
@@ -2709,9 +2746,15 @@ async function previewEdit() {
       method: 'POST', body: payload,
     });
     const s = res.preview.summary;
+    const skipped = Number(s.unsupported) || 0;
+    if (!Number(s.files)) {
+      $('#editImpact').classList.add('is-error');
+      $('#editImpact').textContent = '没有可写回的磁盘曲目（压缩包内文件只读或格式不支持）';
+      return null;
+    }
     $('#editImpact').classList.remove('is-error');
     $('#editImpact').innerHTML = `将修改 <b>${s.files}</b> 个文件`
-      + `${s.unsupported ? `（其中 <b>${s.unsupported}</b> 个格式不支持写回，只会更新数据库）` : ''}`
+      + `${skipped ? `，跳过 <b>${skipped}</b> 个不可写文件（压缩包内只读或格式不支持）` : ''}`
       + ` · 字段：${esc(s.fields.join('、'))}`;
     return { payload, preview: res.preview };
   } catch (err) {

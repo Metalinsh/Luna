@@ -154,7 +154,7 @@ try {
     chipsPerRow: [...document.querySelectorAll('#voiceTrackTable .voice-row:not(.is-head)')].slice(0,3).map(r => r.querySelectorAll('.ver-chip').length),
     videoChips: document.querySelectorAll('.ver-chip.is-video').length,
     bonusSummary: document.querySelector('.bonus-box > summary')?.textContent?.trim(),
-    notes: document.querySelector('.voice-notes')?.textContent?.trim()?.slice(0, 40),
+    notes: document.querySelector('.voice-notes')?.textContent?.trim()?.slice(0, 120),
   }))()`);
   ok('详情页标题正确', Boolean(detail.title), detail.title?.slice(0, 30));
   ok('顶部标注为音声发行并显示 RJ 号', /音声发行/.test(detail.kind ?? '') && /RJ01182623/.test(detail.rj ?? ''), `${detail.kind} / ${detail.rj}`);
@@ -163,7 +163,8 @@ try {
   ok('多数轨道行有多个可切换版本', detail.chipsPerRow.filter((n) => n > 1).length >= 3, `每行 chips：${detail.chipsPerRow.join(',')}`);
   ok('视频版 chip 存在（每轨含中文字幕与日文字幕两版）', detail.videoChips === 16, `${detail.videoChips} 个`);
   ok('特典分组存在且收起', /特典（1 条）/.test(detail.bonusSummary ?? ''), detail.bonusSummary);
-  ok('标注「不会写回音频文件」', /不会写回音频文件/.test(detail.notes ?? ''), detail.notes);
+  ok('标注「快捷填写只记库内 / 编辑媒体可写回」',
+    /只记库内/.test(detail.notes ?? '') && /编辑媒体/.test(detail.notes ?? ''), detail.notes);
   await cdp.shot('v3-voice-detail.png');
 
   console.log('\n— 版本切换播放 —');

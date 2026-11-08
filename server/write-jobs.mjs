@@ -57,6 +57,18 @@ export function currentWriteJobId() {
   return currentJobId;
 }
 
+/**
+ * 一条曲目能否写回媒体文件。
+ *
+ * 压缩包内成员是**只读虚拟路径**（`zip\u0001member`），不能当普通文件复制/写入；
+ * 因此即使扩展名受支持，也必须排除。磁盘上的普通文件才交给 writers 处理。
+ */
+export function isWritableTrack(track) {
+  if (!track) return false;
+  if (track.source_kind === 'archive_member' || track.archive_id != null) return false;
+  return canWrite(track.ext);
+}
+
 /* --------------------------------------------------------------- 任务表 */
 
 export function createJob({ type, items, backupDir, payload = {} }) {
@@ -202,6 +214,10 @@ export async function processFile({
 
   try {
     // ① 写前检查
+    // 压缩包成员是只读虚拟路径，不能按磁盘文件 stat / copy / rename。
+    if (track.source_kind === 'archive_member' || track.archive_id != null) {
+      return { status: 'skipped', error: '压缩包内文件只读' };
+    }
     const stat = await fsp.stat(filePath);
     if (!canWrite(ext)) return { status: 'skipped', error: `格式不支持写回（${ext}）` };
     if (!(await canOpenExclusive(filePath))) return { status: 'skipped', error: '文件正被其他程序占用' };
@@ -301,9 +317,100 @@ export async function processFileWrite({ jobId, seq, item, op, keepBackup = true
 
 /* ------------------------------------------------------------ 索引同步 */
 
+/**
+ * 音声发行的展示字段来自「文件夹 + 曲目标签」。
+ * 写回媒体标签后，只更新这次确实写到的专辑级字段；不碰发行结构（album_id/版本/轨号）。
+ * 音声标题仍以文件夹/内嵌标签的既有规则为准，这里只在用户显式写了 album 标签时更新。
+ */
+function updateVoiceAlbumAfterWrite(albumId, patch, parsed) {
+  const sets = [];
+  const values = [];
+  const has = (key) => Object.prototype.hasOwnProperty.call(patch ?? {}, key);
+
+  if (has('album') && parsed.album) {
+    sets.push('title = ?');
+    values.push(parsed.album);
+  }
+  if (has('albumArtist') || has('artists')) {
+    // 用户显式写了文件标签 → 下次扫描按标签重算，而不是锁成 manual
+    sets.push('album_artist = ?', "album_artist_source = 'tag'");
+    values.push(parsed.albumArtist || parsed.artist || null);
+  }
+  if (has('year')) {
+    sets.push('year = ?');
+    values.push(parsed.year ?? null);
+  }
+  if (has('genres')) {
+    sets.push('genre = ?');
+    values.push(parsed.genre ?? null);
+  }
+  if (!sets.length) return;
+
+  sets.push('updated_at = ?');
+  values.push(now());
+  db.prepare(`UPDATE albums SET ${sets.join(', ')} WHERE id = ? AND kind = 'voice'`)
+    .run(...values, Number(albumId));
+}
+
+/**
+ * 音声曲目只就地更新**本次实际写到的字段**。
+ * 不能像普通专辑那样用整份文件标签覆盖全部字段：封面任务只改 picture，
+ * 若顺手把其它标签也重写一遍，会把库内手工值/DB override 冲掉。
+ */
+function syncVoiceTrackInPlace(existing, meta, stat, patch = {}) {
+  const firstString = (v) => (Array.isArray(v) ? (v.find(Boolean) ?? '') : (v ?? ''));
+  const taggedTitle = (meta.common.title ?? '').trim();
+  const artist = firstString(meta.common.artist) || firstString(meta.common.artists);
+  const albumArtist = firstString(meta.common.albumartist) || artist;
+  const album = (meta.common.album ?? '').trim();
+  const year = meta.common.year ?? null;
+  const genre = firstString(meta.common.genre) || null;
+  const composer = firstString(meta.common.composer) || null;
+  const picture = meta.common.picture?.[0];
+  const has = (key) => Object.prototype.hasOwnProperty.call(patch ?? {}, key);
+
+  const sets = ['parse_error = NULL', 'has_cover = ?', 'size = ?', 'mtime = ?', 'updated_at = ?',
+    'duration = ?', 'bitrate = ?', 'sample_rate = ?', 'channels = ?', 'codec = ?', 'container = ?'];
+  const values = [
+    picture ? 1 : 0,
+    stat.size,
+    Math.round(stat.mtimeMs),
+    now(),
+    meta.format.duration ?? null,
+    meta.format.bitrate ?? null,
+    meta.format.sampleRate ?? null,
+    meta.format.numberOfChannels ?? null,
+    meta.format.codec ?? null,
+    meta.format.container ?? null,
+  ];
+
+  if (has('title')) {
+    sets.push('title = ?', 'title_source = ?');
+    values.push(
+      taggedTitle || path.basename(existing.path, path.extname(existing.path)),
+      taggedTitle ? 'tag' : 'filename',
+    );
+  }
+  if (has('album')) { sets.push('album = ?'); values.push(album || null); }
+  if (has('albumArtist')) { sets.push('album_artist = ?'); values.push(albumArtist || null); }
+  if (has('artists')) { sets.push('artist = ?'); values.push(artist || null); }
+  if (has('trackNo')) { sets.push('track_no = ?'); values.push(meta.common.track?.no ?? null); }
+  if (has('discNo')) { sets.push('disc_no = ?'); values.push(meta.common.disk?.no ?? null); }
+  if (has('year')) { sets.push('year = ?'); values.push(year); }
+  if (has('genres')) { sets.push('genre = ?'); values.push(genre); }
+  if (has('composers')) { sets.push('composer = ?'); values.push(composer); }
+
+  const metadataWritten = ['title', 'album', 'albumArtist', 'artists',
+    'trackNo', 'discNo', 'year', 'genres', 'composers'].some(has);
+  if (metadataWritten) sets.push("meta_source = 'file'", 'override_json = NULL');
+
+  db.prepare(`UPDATE tracks SET ${sets.join(', ')} WHERE id = ?`).run(...values, existing.id);
+  return { album, albumArtist, artist, year, genre };
+}
+
 /** 写回后用重新解析的结果同步索引（不信任编辑表单里的值） */
-export async function syncTrackIndex(trackId) {
-  const existing = db.prepare('SELECT id, path FROM tracks WHERE id = ?').get(Number(trackId));
+export async function syncTrackIndex(trackId, patch = {}) {
+  const existing = db.prepare('SELECT id, path, album_id FROM tracks WHERE id = ?').get(Number(trackId));
   if (!existing) return false;
   const filePath = existing.path;
 
@@ -320,15 +427,30 @@ export async function syncTrackIndex(trackId) {
   const dir = path.dirname(filePath);
   const year = meta.common.year ?? null;
   const genre = firstString(meta.common.genre) || null;
+  const picture = meta.common.picture?.[0];
+  const previous = db.prepare('SELECT library_id FROM tracks WHERE id = ?').get(existing.id);
+
+  const albumRow = existing.album_id
+    ? db.prepare('SELECT id, kind FROM albums WHERE id = ?').get(existing.album_id)
+    : null;
+
+  /*
+   * 音声发行的曲目**不能**走 resolveAlbumForTrack：
+   * 它按 album/albumArtist/dir 重算 `music` 专辑键，会把音声曲目从三层模型里
+   * 挪到一张新的普通专辑，后面的版本/轨号/发行根关系全部断掉。
+   * 这里只就地更新标签字段，保留 album_id、版本、轨号与压缩包来源字段。
+   */
+  if (albumRow?.kind === 'voice') {
+    const parsed = syncVoiceTrackInPlace(existing, meta, stat, patch);
+    updateVoiceAlbumAfterWrite(albumRow.id, patch, parsed);
+    return true;
+  }
 
   // 注意：必须把 album/albumArtist/year/genre 全部传给重聚合，
   // 否则专辑级字段不会被更新（coalesce 会保留旧值）
   const resolved = resolveAlbumForTrack({
     id: existing.id, album, albumArtist, artist, dir, year, genre,
   });
-
-  const picture = meta.common.picture?.[0];
-  const previous = db.prepare('SELECT library_id FROM tracks WHERE id = ?').get(existing.id);
 
   upsertTrack({
     path: filePath,
@@ -469,13 +591,18 @@ export function planMetadataEdit({
 
     if (!Object.keys(patch).length) continue;
 
+    const archiveMember = track.source_kind === 'archive_member' || track.archive_id != null;
+    const writable = isWritableTrack(track);
     patches[String(track.id)] = patch;
     snapshots[String(track.id)] = { size: track.size, mtime: track.mtime };
     changes.push({
       trackId: track.id,
       path: track.path,
       filename: track.filename,
-      writable: canWrite(track.ext),
+      writable,
+      readonlyReason: writable
+        ? null
+        : (archiveMember ? '压缩包内文件只读' : `格式不支持写回（${track.ext || '未知'}）`),
       before: {
         title: track.title, album: track.album, albumArtist: track.album_artist,
         year: track.year, genre: track.genre, trackNo: track.track_no, discNo: track.disc_no,
@@ -487,16 +614,21 @@ export function planMetadataEdit({
 
   if (!changes.length) return { ok: false, errors: ['没有任何字段发生变化'] };
 
+  const writableChanges = changes.filter((c) => c.writable);
+
   return {
     ok: true,
+    // 不可写文件也放进任务：执行器会逐条标记 skipped（格式不支持 / 压缩包内只读），
+    // 任务历史里因此能如实说明「为什么没写」。UI 在 files=0 时会阻止发起任务。
     items: changes.map((c) => ({ trackId: c.trackId, path: c.path })),
     patches,
     snapshots,
     changes,
     summary: {
-      files: changes.length,
-      writable: changes.filter((c) => c.writable).length,
-      unsupported: changes.filter((c) => !c.writable).length,
+      files: writableChanges.length,
+      total: changes.length,
+      writable: writableChanges.length,
+      unsupported: changes.length - writableChanges.length,
       fields: [...new Set(changes.flatMap((c) => c.changedFields))],
     },
   };
@@ -580,7 +712,7 @@ export async function runJob(jobId, { writer = writeTags, onProgress = null } = 
       setItemStatus(jobId, seq, result.status, result.error ?? null, result.backupPath ?? null);
       if (result.status === 'done') {
         stats.succeeded += 1;
-        await syncTrackIndex(item.track_id).catch(() => {});
+        await syncTrackIndex(item.track_id, patch).catch(() => {});
       } else if (result.status === 'skipped') {
         stats.skipped += 1;
       } else {
@@ -619,6 +751,8 @@ export async function undoJob(jobId) {
 
   const restorable = job.items.filter((item) => item.backup_file && fs.existsSync(item.backup_file));
   if (!restorable.length) throw new Error('没有可还原的备份文件');
+  // 撤销后按「原任务写过的字段」重新解析还原文件，音声卡片才能跟着回退。
+  const undoPatches = job.payload?.patches ?? {};
 
   if (currentJobId !== null) {
     const err = new Error('已有写任务在进行中');
@@ -645,13 +779,37 @@ export async function undoJob(jobId) {
         if (fs.existsSync(target)) await fsp.rm(target, { force: true });
         await fsp.rename(temp, target);
         stats.restored += 1;
-        if (item.track_id) await syncTrackIndex(item.track_id).catch(() => {});
+        if (item.track_id) {
+          await syncTrackIndex(item.track_id, undoPatches[String(item.track_id)] ?? {})
+            .catch(() => {});
+        }
       } catch (err) {
         stats.failed += 1;
         try { await fsp.rm(temp, { force: true }); } catch { /* 忽略 */ }
         console.error(`[undo] ${target} 还原失败：${err.message}`);
       }
     }
+    // 音声标题/艺术家不一定能只靠还原文件推回来（例如原文件没有 album 标签），
+    // 所以撤销时按写前快照把专辑展示字段也一并还原。
+    const albumSnapshot = job.payload?.albumSnapshot;
+    const albumId = job.payload?.albumId;
+    if (albumSnapshot && albumId) {
+      db.prepare(`
+        UPDATE albums SET title = ?, album_artist = ?, album_artist_source = ?,
+          year = ?, genre = ?, artist_suggested = ?, artist_decision = ?
+        WHERE id = ?
+      `).run(
+        albumSnapshot.title ?? null,
+        albumSnapshot.album_artist ?? null,
+        albumSnapshot.album_artist_source ?? null,
+        albumSnapshot.year ?? null,
+        albumSnapshot.genre ?? null,
+        albumSnapshot.artist_suggested ?? null,
+        albumSnapshot.artist_decision ?? null,
+        Number(albumId),
+      );
+    }
+
     setJobStatus(undoId, 'done', { finished_at: now(), succeeded: stats.restored, failed: stats.failed });
     db.prepare("UPDATE write_jobs SET status = 'undone' WHERE id = ?").run(jobId);
     return { undoJobId: undoId, ...stats };

@@ -2109,6 +2109,7 @@ export function listAlbumTracks(albumId) {
            t.track_no, t.disc_no, t.year, t.genre, t.composer, t.duration, t.bitrate,
            t.sample_rate, t.channels, t.codec, t.size, t.mtime, t.library_id, t.has_cover,
            t.parse_error, t.title_source, t.meta_source, t.lyrics_path, t.favorite,
+           t.source_kind, t.archive_id, t.member_path, t.materialized_state,
            a.circle AS album_circle, a.kind AS album_kind
     FROM tracks t LEFT JOIN albums a ON a.id = t.album_id
     WHERE t.album_id = ?
