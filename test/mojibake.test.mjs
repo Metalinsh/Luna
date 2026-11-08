@@ -28,6 +28,11 @@ test('Shift-JIS / CP932 误解码的日文可修复', () => {
   }
 });
 
+test('Shift-JIS-as-Latin-1 带 C1 控制字符的曲目标题可修复', () => {
+  const garbled = '09 \u0081~\u008f\u0084\u0096\u00da\u0081c\u0081c\u0081H';
+  assert.equal(repairMojibake(garbled)?.fixed, '09 ×巡目……？');
+});
+
 test('Latin-1 误解码的中文 / 日文可修复', () => {
   for (const text of ['你好', '九月', '日本語', 'こんにちは']) {
     const garbled = mojibake(text, 'latin1');

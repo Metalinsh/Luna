@@ -2564,13 +2564,13 @@ function autofixValue(key, fallback) {
   return fix ? fix.fixed : fallback;
 }
 
-function autofixBadge(key) {
+function autofixHint(key) {
   const fix = editState.autofixes.get(key);
   if (!fix) return '';
-  return `<div class="autofix-inline">
+  return `<div class="autofix-hint">
     <span class="autofix-ok">✓ 已自动修复疑似乱码</span>
-    <button type="button" class="btn btn-mini" data-autofix-undo="${key}">撤销</button>
-    <button type="button" class="btn btn-mini" data-autofix-diff="${key}">查看修改</button>
+    <button type="button" class="autofix-link" data-autofix-undo="${key}">撤销</button>
+    <button type="button" class="autofix-link" data-autofix-diff="${key}">查看修改</button>
   </div>`;
 }
 
@@ -2630,6 +2630,7 @@ function fieldMarkup({ key, label, type, value, hint }) {
   return `
     <div class="field">
       <label>${esc(label)}${hint ? ` <span style="color:var(--fg-faint)">· ${esc(hint)}</span>` : ''}</label>
+      ${!cleared && fix ? autofixHint(fixKey) : ''}
       <div class="field-row">
         <input type="${type}" data-field="${key}" value="${esc(shown)}"
                ${classes ? `class="${classes}"` : ''} ${cleared ? 'disabled' : ''} />
@@ -2638,7 +2639,6 @@ function fieldMarkup({ key, label, type, value, hint }) {
           ${cleared ? '已清除' : '清除'}
         </button>
       </div>
-      ${!cleared && fix ? autofixBadge(fixKey) : ''}
     </div>`;
 }
 
@@ -2722,15 +2722,18 @@ function renderEditDrawer() {
         return `
         <div class="track-edit-row${voice ? ' is-voice' : ''}${readonly ? ' is-readonly' : ''}">
           <span class="idx">${t.track_no ?? ''}</span>
-          <input type="text" data-track="${t.id}" data-track-field="title"
-                 value="${esc(titleValue)}" placeholder="曲名"
-                 ${titleFix ? 'class="is-autofixed"' : ''}
-                 ${readonly ? 'disabled title="压缩包内文件只读"' : ''} />
+          <div class="track-title-wrap${titleFix ? ' is-autofixed' : ''}">
+            <input type="text" data-track="${t.id}" data-track-field="title"
+                   value="${esc(titleValue)}" placeholder="曲名"
+                   ${titleFix ? 'class="is-autofixed"' : ''}
+                   ${readonly ? 'disabled title="压缩包内文件只读"' : ''} />
+            ${titleFix ? `<button type="button" class="autofix-inside" data-autofix-diff="${titleKey}"
+              title="已自动修复疑似乱码；点击查看修改">✓</button>` : ''}
+          </div>
           <input type="number" data-track="${t.id}" data-track-field="trackNo"
                  value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨"
                  ${readonly ? 'disabled' : ''} />
           ${meta ? `<div class="track-edit-meta">${esc(meta)}</div>` : ''}
-          ${titleFix ? autofixBadge(titleKey) : ''}
         </div>`;
       }).join('')}
     </div>
@@ -2816,12 +2819,14 @@ function showAutofixDiff(keys = null) {
   }
   $('#mojibakeList').innerHTML = list.map((fix) => `
     <div class="mojibake-row">
-      <div class="mojibake-label">${esc(fix.label ?? fix.key)}</div>
+      <div class="mojibake-head">
+        <span class="mojibake-label">${esc(fix.label ?? fix.key)}</span>
+        <button type="button" class="autofix-link" data-autofix-undo="${fix.key}">撤销</button>
+      </div>
       <div class="mojibake-diff">
         <div class="mojibake-minus">- ${esc(fix.original)}</div>
         <div class="mojibake-plus">+ ${esc(fix.fixed)}</div>
       </div>
-      <button type="button" class="btn btn-mini" data-autofix-undo="${fix.key}">撤销此字段</button>
     </div>`).join('');
   const dialog = $('#mojibakeDialog');
   if (!dialog.open) dialog.showModal();
