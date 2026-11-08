@@ -2511,8 +2511,10 @@ function toggleSelect(id) {
 
 const editState = {
   albumId: null, album: null, tracks: [],
-  dirty: new Set(), cleared: new Set(),
+  dirty: new Set(), cleared: new Set(), clearedValues: new Map(),
   pendingCover: null, confirmed: false, voice: false,
+  /** 用户勾选的封面写入方式；null = 用默认值 */
+  coverModes: null,
   /** 疑似乱码自动修复：key → { key, label, original, fixed, encoding, confidence } */
   autofixes: new Map(),
 };
@@ -2564,16 +2566,6 @@ function autofixValue(key, fallback) {
   return fix ? fix.fixed : fallback;
 }
 
-function autofixHint(key) {
-  const fix = editState.autofixes.get(key);
-  if (!fix) return '';
-  return `<div class="autofix-hint">
-    <span class="autofix-ok">✓ 已自动修复疑似乱码</span>
-    <button type="button" class="autofix-link" data-autofix-undo="${key}">撤销</button>
-    <button type="button" class="autofix-link" data-autofix-diff="${key}">查看修改</button>
-  </div>`;
-}
-
 async function openEditDrawer(albumId) {
   const base = `/api/albums/${encodeURIComponent(albumId)}`;
   // 详情接口给的是展示数据；编辑需要逐文件曲目 + 乱码自检结果。
@@ -2589,9 +2581,11 @@ async function openEditDrawer(albumId) {
   editState.tracks = tracks;
   editState.dirty.clear();
   editState.cleared.clear();
+  editState.clearedValues.clear();
   editState.pendingCover = null;
   editState.confirmed = false;
   editState.voice = Boolean(album.is_voice);
+  editState.coverModes = null;
   editState.autofixes = new Map();
   const readonlyTrackIds = new Set(tracks
     .filter((t) => t.source_kind === 'archive_member' || t.archive_id != null)
@@ -2630,14 +2624,19 @@ function fieldMarkup({ key, label, type, value, hint }) {
   return `
     <div class="field">
       <label>${esc(label)}${hint ? ` <span style="color:var(--fg-faint)">· ${esc(hint)}</span>` : ''}</label>
-      ${!cleared && fix ? autofixHint(fixKey) : ''}
       <div class="field-row">
-        <input type="${type}" data-field="${key}" value="${esc(shown)}"
-               ${classes ? `class="${classes}"` : ''} ${cleared ? 'disabled' : ''} />
-        <button class="clear-btn ${cleared ? 'is-on' : ''}" data-clear="${key}"
-                title="${cleared ? '取消清空' : '清空该字段（不点则保持原值）'}">
-          ${cleared ? '已清除' : '清除'}
-        </button>
+        <div class="autofix-input-wrap has-x${fix && !cleared ? ' is-autofixed' : ''}">
+          <input type="${type}" data-field="${key}" value="${esc(shown)}"
+                 ${classes ? `class="${classes}"` : ''}
+                 ${cleared ? 'disabled placeholder="已清除"' : ''} />
+          ${!cleared && fix ? `<button type="button" class="autofix-inside"
+            data-autofix-diff="${fixKey}" title="已自动修复疑似乱码；点击查看修改">✓</button>` : ''}
+          <button type="button" class="input-x${cleared ? ' is-on' : ''}"
+                  data-clear="${key}" title="${cleared ? '取消清空' : '清空该字段（点保存才会清空）'}"
+                  aria-label="${cleared ? '取消清空' : '清空该字段'}">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          </button>
+        </div>
       </div>
     </div>`;
 }
@@ -2650,6 +2649,10 @@ function renderEditDrawer() {
   const voice = editState.voice;
   const writableCount = tracks.filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null).length;
   const coverDefault = voice ? 'db' : 'embedded';
+  const coverModes = Array.isArray(editState.coverModes) && editState.coverModes.length
+    ? editState.coverModes
+    : [coverDefault];
+  const hasCover = Boolean(a.cover_url || pending);
   const autofixCount = editState.autofixes.size;
 
   $('#editBody').innerHTML = `
@@ -2672,27 +2675,28 @@ function renderEditDrawer() {
         <div class="cover-preview" id="coverPreview"
              style="background-image:url('${pending ?? coverUrl ?? ''}')"></div>
         <div class="cover-controls">
-          <div style="font-size:12.5px;color:var(--fg-dim)">
+          <div id="coverSourceText" style="font-size:12.5px;color:var(--fg-dim)">
             当前来源：${esc(a.cover_source ?? '无')}
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn" id="pickCoverBtn" style="padding:6px 10px">选择图片…</button>
             <button class="btn btn-primary" id="applyCoverBtn" style="padding:6px 10px"
               ${pending ? '' : 'disabled'}>应用封面</button>
-            <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px">移除封面</button>
+            <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px"
+              ${a.cover_url ? '' : 'hidden'}>移除封面</button>
           </div>
-          <div class="cover-modes">
-            <label><input type="radio" name="coverMode" value="embedded"
-              ${coverDefault === 'embedded' ? 'checked' : ''} />
+          <div class="cover-modes" id="coverModes" ${hasCover ? '' : 'hidden'}>
+            <label><input type="checkbox" name="coverMode" value="embedded"
+              ${coverModes.includes('embedded') ? 'checked' : ''} />
               写入每首曲目的内嵌封面（跨软件可见，体积增加）</label>
-            <label><input type="radio" name="coverMode" value="folder"
-              ${coverDefault === 'folder' ? 'checked' : ''} />
+            <label><input type="checkbox" name="coverMode" value="folder"
+              ${coverModes.includes('folder') ? 'checked' : ''} />
               ${voice ? '只写发行根目录 cover.jpg（省空间，拷走单文件会丢）' : '只写目录 cover.jpg（省空间，拷走单文件会丢）'}</label>
-            <label><input type="radio" name="coverMode" value="db"
-              ${coverDefault === 'db' ? 'checked' : ''} />
-              仅记录在软件内（零风险，重建索引会丢）</label>
+            <label><input type="checkbox" name="coverMode" value="db"
+              ${coverModes.includes('db') ? 'checked' : ''} />
+              仅记录在软件内（不写文件，重建索引会丢）</label>
           </div>
-          ${voice ? `<div class="set-note">当前可写回 ${writableCount} 个磁盘曲目；
+          ${voice ? `<div class="set-note" id="coverWriteNote" ${hasCover ? '' : 'hidden'}>当前可写回 ${writableCount} 个磁盘曲目；
             ${tracks.length - writableCount} 个压缩包内曲目会跳过。</div>` : ''}
         </div>
       </div>
@@ -2722,7 +2726,7 @@ function renderEditDrawer() {
         return `
         <div class="track-edit-row${voice ? ' is-voice' : ''}${readonly ? ' is-readonly' : ''}">
           <span class="idx">${t.track_no ?? ''}</span>
-          <div class="track-title-wrap${titleFix ? ' is-autofixed' : ''}">
+          <div class="autofix-input-wrap${titleFix ? ' is-autofixed' : ''}">
             <input type="text" data-track="${t.id}" data-track-field="title"
                    value="${esc(titleValue)}" placeholder="曲名"
                    ${titleFix ? 'class="is-autofixed"' : ''}
@@ -2829,6 +2833,11 @@ function showAutofixDiff(keys = null) {
     return;
   }
 
+  const single = Array.isArray(keys) && keys.length === 1;
+  const dialog = $('#mojibakeDialog');
+  dialog.classList.toggle('is-single', single);
+  $('#mojibakeUndoAll').hidden = single;
+
   const pending = list.filter((fix) => Number(fix.confidence) < 0.9).length;
   $('#mojibakeStats').innerHTML = `
     <span class="moji-stat"><b>${list.length}</b> 条修复记录</span>
@@ -2872,7 +2881,6 @@ function showAutofixDiff(keys = null) {
     </div>`;
   }).join('');
 
-  const dialog = $('#mojibakeDialog');
   if (!dialog.open) dialog.showModal();
 }
 
@@ -2972,8 +2980,19 @@ async function saveEdit() {
 
 function toggleClear(key) {
   const snapshot = currentInputs();
-  if (editState.cleared.has(key)) editState.cleared.delete(key);
-  else { editState.cleared.add(key); editState.dirty.delete(key); }
+  const wasCleared = editState.cleared.has(key);
+  if (wasCleared) {
+    // 取消清除时恢复清除前的值（包括自动修复后的值），而不是空字符串
+    const previous = editState.clearedValues.get(key);
+    if (previous !== undefined) snapshot[key] = previous;
+    editState.cleared.delete(key);
+    editState.clearedValues.delete(key);
+  } else {
+    const input = $(`#editBody input[data-field="${key}"]`);
+    editState.clearedValues.set(key, input?.value ?? '');
+    editState.cleared.add(key);
+    editState.dirty.delete(key);
+  }
   renderEditDrawer();
   restoreInputs(snapshot);
 }
@@ -3002,25 +3021,49 @@ function restoreInputs(map) {
 
 /* ------------------------------------------------------------ 封面操作 */
 
+async function refreshCoverStateInDrawer() {
+  if (!editState.albumId) return;
+  try {
+    const { album } = await api(`/api/albums/${encodeURIComponent(editState.albumId)}`);
+    editState.album.cover_url = album.cover_url;
+    editState.album.cover_source = album.cover_source;
+    editState.pendingCover = null;
+    const preview = $('#coverPreview');
+    if (preview) preview.style.backgroundImage = album.cover_url ? `url('${album.cover_url}')` : '';
+    const source = $('#coverSourceText');
+    if (source) source.textContent = `当前来源：${album.cover_source ?? '无'}`;
+    const modes = $('#coverModes');
+    if (modes) modes.hidden = !album.cover_url;
+    const note = $('#coverWriteNote');
+    if (note) note.hidden = !album.cover_url;
+    const remove = $('#removeCoverBtn');
+    if (remove) remove.hidden = !album.cover_url;
+    const apply = $('#applyCoverBtn');
+    if (apply) { apply.disabled = true; apply.textContent = '应用封面'; }
+  } catch { /* 刷新封面展示失败不影响已提交的任务 */ }
+}
+
 async function applyCover() {
   if (!editState.pendingCover) return;
-  const mode = $('input[name="coverMode"]:checked')?.value ?? 'embedded';
+  const modes = $$('#editBody input[name="coverMode"]:checked').map((i) => i.value);
+  if (!modes.length) {
+    toast('请选择封面写入方式', true);
+    return;
+  }
   const btn = $('#applyCoverBtn');
   btn.disabled = true;
   btn.textContent = '写入中…';
   try {
     const res = await api(`/api/albums/${editState.albumId}/cover`, {
       method: 'POST',
-      body: { imageBase64: editState.pendingCover, mode },
+      body: { imageBase64: editState.pendingCover, modes },
     });
-    editState.pendingCover = null;
+    await refreshCoverStateInDrawer();
     if (res.jobId) {
-      closeEditDrawer();
+      toast(`已开始写入封面（${res.files} 个文件）`);
       pollJob(res.jobId);
     } else {
       toast('封面已记录（仅存软件内）');
-      closeEditDrawer();
-      refreshCurrent();
     }
   } catch (err) {
     toast(err.message, true);
@@ -3030,16 +3073,18 @@ async function applyCover() {
 }
 
 async function removeCover() {
-  const mode = $('input[name="coverMode"]:checked')?.value ?? 'db';
+  const modes = $$('#editBody input[name="coverMode"]:checked').map((i) => i.value);
+  if (!modes.length) modes.push('db');
   try {
-    const res = await api(`/api/albums/${editState.albumId}/cover`, { method: 'DELETE', body: { mode } });
+    const res = await api(`/api/albums/${editState.albumId}/cover`, {
+      method: 'DELETE', body: { modes },
+    });
+    await refreshCoverStateInDrawer();
     if (res.jobId) {
-      closeEditDrawer();
+      toast(`已开始移除封面文件（${res.deleted ?? res.files} 个）`);
       pollJob(res.jobId);
     } else {
       toast('已移除封面记录');
-      closeEditDrawer();
-      refreshCurrent();
     }
   } catch (err) {
     toast(err.message, true);
@@ -3049,13 +3094,16 @@ async function removeCover() {
 /* ---------------------------------------------------------- 写任务进度 */
 
 const JOB_LABELS = {
-  metadata: '写入标签', 'cover-embedded': '写入内嵌封面', 'cover-folder': '写入目录封面', undo: '撤销还原',
+  metadata: '写入标签', 'cover-embedded': '写入内嵌封面', 'cover-folder': '写入目录封面',
+  'cover-mixed': '封面任务', undo: '撤销还原',
 };
 
 let jobTimer = null;
 
 async function pollJob(jobId) {
   clearInterval(jobTimer);
+  const drawerOpen = !$('#editDrawer').hidden;
+  if (drawerOpen) $('#editSaveBtn').disabled = true;
   const bar = $('#jobBar');
   bar.hidden = false;
   bar.classList.remove('is-done', 'is-error');
@@ -3078,6 +3126,7 @@ async function pollJob(jobId) {
 
       clearInterval(jobTimer);
       jobTimer = null;
+      if (drawerOpen) $('#editSaveBtn').disabled = false;
       const undoable = job.items.some((i) => i.backup_file);
       $('#jobUndoBtn').hidden = !undoable;
       $('#jobUndoBtn').dataset.jobId = String(jobId);
@@ -3565,6 +3614,17 @@ function bindEvents() {
   $('#editBody').addEventListener('input', (e) => {
     if (e.target.matches('input[data-field], input[data-track]')) markDirty(e.target);
   });
+  $('#editBody').addEventListener('change', (e) => {
+    if (!e.target.matches('input[name="coverMode"]')) return;
+    const all = $$('#editBody input[name="coverMode"]');
+    if (e.target.value === 'db' && e.target.checked) {
+      all.forEach((i) => { if (i !== e.target) i.checked = false; });
+    } else if (e.target.value !== 'db' && e.target.checked) {
+      const db = all.find((i) => i.value === 'db');
+      if (db) db.checked = false;
+    }
+    editState.coverModes = all.filter((i) => i.checked).map((i) => i.value);
+  });
   $('#editBody').addEventListener('click', (e) => {
     const clearBtn = e.target.closest('[data-clear]');
     if (clearBtn) { toggleClear(clearBtn.dataset.clear); return; }
@@ -3598,6 +3658,10 @@ function bindEvents() {
       if (preview) preview.style.backgroundImage = `url('${editState.pendingCover}')`;
       const btn = $('#applyCoverBtn');
       if (btn) { btn.disabled = false; btn.textContent = '应用封面'; }
+      const modes = $('#coverModes');
+      if (modes) modes.hidden = false;
+      const note = $('#coverWriteNote');
+      if (note) note.hidden = false;
       toast('已选择图片，点「应用封面」写入');
     };
     reader.readAsDataURL(file);

@@ -1350,9 +1350,13 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   if (isScanning()) return res.status(409).json({ error: '扫描进行中，请稍后再试' });
   if (writeJobs.isWriting()) return res.status(409).json({ error: '已有写任务在进行中' });
 
-  const mode = ['embedded', 'folder', 'db'].includes(req.body?.mode)
-    ? req.body.mode
-    : (album.kind === 'voice' ? 'db' : 'embedded');
+  const requested = Array.isArray(req.body?.modes)
+    ? req.body.modes
+    : [req.body?.mode];
+  const modes = [...new Set(requested.filter((m) => ['embedded', 'folder', 'db'].includes(m)))];
+  if (!modes.length) modes.push(album.kind === 'voice' ? 'db' : 'embedded');
+  // db 与文件写入不是并列关系：只要选了嵌入/目录，就一定会写库内记录。
+  const fileModes = modes.filter((m) => m !== 'db');
 
   let buffer = null;
   if (req.body?.imageBase64) {
@@ -1371,11 +1375,12 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
 
   const tracks = store.listAlbumTracks(id);
   if (!tracks.length) return badRequest(res, '该专辑没有曲目');
-  if (mode === 'embedded' && !writableTracksFor(tracks).length) {
+  const writable = writableTracksFor(tracks);
+  if (fileModes.includes('embedded') && !writable.length) {
     return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），请选择「仅记录在软件内」');
   }
-  const folderDir = mode === 'folder' ? coverDirectoryFor(album, tracks) : null;
-  if (mode === 'folder' && !folderDir) {
+  const folderDir = fileModes.includes('folder') ? coverDirectoryFor(album, tracks) : null;
+  if (fileModes.includes('folder') && !folderDir) {
     return badRequest(res, '该发行来自压缩包，包内文件只读，不能写入目录封面；请选择「仅记录在软件内」');
   }
 
@@ -1383,51 +1388,56 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   store.setManualCover(id, stored);
   scheduleAssetBackup('cover-set');
 
-  if (mode === 'db') {
-    return res.json({ ok: true, mode, cover_url: coverUrlFor(store.getAlbumById(id)) });
+  if (!fileModes.length) {
+    return res.json({ ok: true, mode: 'db', modes: ['db'], cover_url: coverUrlFor(store.getAlbumById(id)) });
   }
 
-  if (mode === 'embedded') {
-    const writable = writableTracksFor(tracks);
-    const patches = {};
-    const snapshots = {};
+  const items = [];
+  const patches = {};
+  const snapshots = {};
+  const operations = {};
+  let files = 0;
+  if (fileModes.includes('embedded')) {
     for (const t of writable) {
       patches[String(t.id)] = { picture: { useJobPicture: true } };
       snapshots[String(t.id)] = { size: t.size, mtime: t.mtime };
+      items.push({ trackId: t.id, path: t.path });
     }
-    const jobId = writeJobs.createJob({
-      type: 'cover-embedded',
-      items: writable.map((t) => ({ trackId: t.id, path: t.path })),
-      payload: {
-        patches,
-        snapshots,
-        picture: { dataBase64: buffer.toString('base64'), mimeType: mime, description: 'front' },
-      },
-    });
-    writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-    return res.status(202).json({ jobId, mode, files: writable.length });
+    files += writable.length;
+  }
+  let target = null;
+  if (fileModes.includes('folder')) {
+    // 音声发行写到「发行根」，不能拿第一条曲目的目录代替（它可能只是某个版本子目录）。
+    target = path.join(folderDir, 'cover.jpg');
+    const firstWritable = writable[0] ?? tracks[0];
+    const lib = firstWritable?.library_id ? store.getLibrary(firstWritable.library_id) : null;
+    const seq = items.length;
+    items.push({ trackId: null, path: target });
+    operations[String(seq)] = {
+      dataBase64: buffer.toString('base64'),
+      backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,
+    };
+    files += 1;
   }
 
-  // folder：写目录 cover.jpg（同卷备份，可撤销）
-  // 音声发行写到「发行根」，不能拿第一条曲目的目录代替（它可能只是某个版本子目录）。
-  const dir = folderDir;
-  const target = path.join(dir, 'cover.jpg');
-  const firstWritable = writableTracksFor(tracks)[0] ?? tracks[0];
-  const lib = firstWritable?.library_id ? store.getLibrary(firstWritable.library_id) : null;
   const jobId = writeJobs.createJob({
-    type: 'cover-folder',
-    items: [{ trackId: null, path: target }],
+    type: fileModes.length > 1 ? 'cover-mixed' : (fileModes[0] === 'embedded' ? 'cover-embedded' : 'cover-folder'),
+    items,
     payload: {
-      operations: {
-        0: {
-          dataBase64: buffer.toString('base64'),
-          backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,
-        },
-      },
+      patches,
+      snapshots,
+      operations,
+      picture: { dataBase64: buffer.toString('base64'), mimeType: mime, description: 'front' },
     },
   });
   writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-  return res.status(202).json({ jobId, mode, target });
+  return res.status(202).json({
+    jobId,
+    mode: fileModes.length === 1 ? fileModes[0] : 'mixed',
+    modes: fileModes,
+    files,
+    target,
+  });
 }));
 
 /** 移除封面：embedded 清空内嵌图；folder 删除 cover.jpg（需显式确认）；db 仅清库内引用 */
@@ -1438,60 +1448,73 @@ app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   if (isScanning()) return res.status(409).json({ error: '扫描进行中，请稍后再试' });
   if (writeJobs.isWriting()) return res.status(409).json({ error: '已有写任务在进行中' });
 
-  const mode = ['embedded', 'folder', 'db'].includes(req.body?.mode) ? req.body.mode : 'db';
+  const requested = Array.isArray(req.body?.modes)
+    ? req.body.modes
+    : [req.body?.mode];
+  const modes = [...new Set(requested.filter((m) => ['embedded', 'folder', 'db'].includes(m)))];
+  if (!modes.length) modes.push('db');
+  const fileModes = modes.filter((m) => m !== 'db');
   const tracks = store.listAlbumTracks(id);
   const writable = writableTracksFor(tracks);
 
-  if (mode === 'embedded' && !writable.length) {
+  if (fileModes.includes('embedded') && !writable.length) {
     return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），请选择「仅记录在软件内」');
   }
-  const dir = mode === 'folder' ? coverDirectoryFor(album, tracks) : null;
-  if (mode === 'folder' && !dir) {
+  const folderDir = fileModes.includes('folder') ? coverDirectoryFor(album, tracks) : null;
+  if (fileModes.includes('folder') && !folderDir) {
     return badRequest(res, '该发行来自压缩包，包内文件只读，不能删除目录封面；请选择「仅记录在软件内」');
   }
 
   store.clearCover(id);
   scheduleAssetBackup('cover-remove');
 
-  if (mode === 'db' || !tracks.length) {
-    return res.json({ ok: true, mode: 'db', cleared: true });
+  if (!fileModes.length || !tracks.length) {
+    return res.json({ ok: true, mode: 'db', modes: ['db'], cleared: true });
   }
 
-  if (mode === 'embedded') {
-    const patches = {};
-    const snapshots = {};
+  const items = [];
+  const patches = {};
+  const snapshots = {};
+  const operations = {};
+  if (fileModes.includes('embedded')) {
     for (const t of writable) {
       patches[String(t.id)] = { picture: null };
       snapshots[String(t.id)] = { size: t.size, mtime: t.mtime };
+      items.push({ trackId: t.id, path: t.path });
     }
-    const jobId = writeJobs.createJob({
-      type: 'cover-embedded',
-      items: writable.map((t) => ({ trackId: t.id, path: t.path })),
-      payload: { patches, snapshots },
-    });
-    writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-    return res.status(202).json({ jobId, mode, files: writable.length });
   }
 
-  // folder：删除目录里的 cover.jpg（改名进备份目录，可撤销）
-  const names = [];
-  for (const name of FOLDER_COVER_NAMES) {
-    if (fs.existsSync(path.join(dir, name))) names.push(name);
-  }
-  if (!names.length) return res.json({ ok: true, mode: 'folder', deleted: 0 });
-  const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
-  const jobId = writeJobs.createJob({
-    type: 'cover-folder',
-    items: names.map((name) => ({ trackId: null, path: path.join(dir, name) })),
-    payload: {
-      operations: Object.fromEntries(names.map((name, i) => [String(i), {
+  if (fileModes.includes('folder')) {
+    const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
+    for (const name of FOLDER_COVER_NAMES) {
+      const target = path.join(folderDir, name);
+      if (!fs.existsSync(target)) continue;
+      const seq = items.length;
+      items.push({ trackId: null, path: target });
+      operations[String(seq)] = {
         kind: 'delete-file',
         backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,
-      }])),
-    },
+      };
+    }
+  }
+
+  if (!items.length) {
+    return res.json({ ok: true, mode: 'folder', modes: fileModes, deleted: 0, cleared: true });
+  }
+
+  const jobId = writeJobs.createJob({
+    type: fileModes.length > 1 ? 'cover-mixed' : (fileModes[0] === 'embedded' ? 'cover-embedded' : 'cover-folder'),
+    items,
+    payload: { patches, snapshots, operations },
   });
   writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-  return res.status(202).json({ jobId, mode, deleted: names.length });
+  return res.status(202).json({
+    jobId,
+    mode: fileModes.length === 1 ? fileModes[0] : 'mixed',
+    modes: fileModes,
+    files: items.length,
+    deleted: items.length,
+  });
 }));
 
 /* ------------------------------------------------------------ maintenance */
