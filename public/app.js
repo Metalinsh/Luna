@@ -2683,6 +2683,7 @@ function renderEditDrawer() {
             <button class="btn btn-primary" id="applyCoverBtn" style="padding:6px 10px"
               ${pending ? '' : 'disabled'}>应用封面</button>
             <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px"
+              title="按勾选的封面方式移除（「仅记录在软件内」= 只清库内）"
               ${a.cover_url ? '' : 'hidden'}>移除封面</button>
           </div>
           <div class="cover-modes" id="coverModes" ${hasCover ? '' : 'hidden'}>

@@ -1187,13 +1187,13 @@ input.is-autofixed.is-dirty { border-color: rgba(67,223,184,.65); background: rg
   box-shadow: 0 30px 70px rgba(0,0,0,.65);
 }
 .mojibake-dialog.is-single {
-  width: min(520px, 92vw); height: auto; max-height: min(70vh, 430px);
+  width: min(520px, 92vw); height: auto; max-height: min(60vh, 380px);
 }
 .mojibake-dialog.is-single .moji-shell { height: auto; }
 .mojibake-dialog.is-single .moji-header { padding: 15px 18px 12px; }
 .mojibake-dialog.is-single .moji-title-row h3 { font-size: 16px; }
 .mojibake-dialog.is-single .moji-desc { margin-top: 5px; }
-.mojibake-dialog.is-single .moji-body { padding: 10px 18px 12px; }
+.mojibake-dialog.is-single .moji-body { flex: 0 0 auto; max-height: 42vh; padding: 10px 18px 12px; }
 .mojibake-dialog.is-single .moji-footer { height: 56px; padding: 0 18px; }
 .moji-shell {
   height: 100%; min-height: 0; padding: 0 !important; gap: 0 !important;
