@@ -1140,6 +1140,42 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 }
 .voice-edit-note b { color: var(--fg); }
 
+/* 疑似乱码自动修复 */
+.autofix-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 14px; padding: 9px 11px; border-radius: 10px;
+  background: rgba(67,223,184,.09); border: 1px solid rgba(67,223,184,.35);
+  color: var(--fg-dim); font-size: 12.5px;
+}
+.autofix-actions { display: inline-flex; gap: 6px; }
+.autofix-ok { color: #43dfb8; font-weight: 600; }
+.autofix-inline {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 5px; font-size: 11.5px; color: var(--fg-dim);
+}
+.field .autofix-inline { margin-top: 6px; }
+.track-edit-row .autofix-inline { grid-column: 2 / -1; }
+input.is-autofixed { border-color: rgba(67,223,184,.5); background: rgba(67,223,184,.055); }
+input.is-autofixed.is-dirty { border-color: rgba(67,223,184,.65); background: rgba(67,223,184,.08); }
+
+.mojibake-dialog { width: min(760px, 92vw); }
+.mojibake-list {
+  display: flex; flex-direction: column; gap: 0; max-height: 55vh; overflow: auto; margin-top: 8px;
+}
+.mojibake-row {
+  padding: 10px 0; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.mojibake-row:first-child { border-top: 0; padding-top: 0; }
+.mojibake-label { font-size: 12px; color: var(--fg-faint); }
+.mojibake-diff {
+  font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+  line-height: 1.65; word-break: break-all;
+}
+.mojibake-minus { color: #ff8a8a; }
+.mojibake-plus { color: #6fe3b0; }
+.mojibake-row .btn { align-self: flex-start; }
+
 .job-history { display: flex; flex-direction: column; gap: 7px; }
 .job-history-row {
   display: flex; align-items: center; gap: 10px; font-size: 12.5px;

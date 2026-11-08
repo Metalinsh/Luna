@@ -27,6 +27,7 @@ const VIDEO_MIME = {
 };
 import * as writeJobs from './write-jobs.mjs';
 import * as writers from './writers.mjs';
+import { repairMojibake } from './mojibake.mjs';
 import {
   scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
   isUnderAsmrFolder,
@@ -311,6 +312,38 @@ app.get('/api/albums/:id/edit-tracks', (req, res) => {
   if (!album) return res.status(404).json({ error: '专辑不存在' });
   const tracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
   res.json({ tracks });
+});
+
+/**
+ * 编辑抽屉打开时先做一次「疑似乱码」自检。
+ * 只返回建议（original/fixed/confidence），不写库、不写文件。
+ */
+app.get('/api/albums/:id/edit-suggestions', (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+
+  const suggestions = [];
+  const addSuggestion = (key, label, value) => {
+    const repair = repairMojibake(value);
+    if (repair) suggestions.push({ key, label, ...repair });
+  };
+
+  const tracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
+  // 与详情接口/编辑抽屉使用同一套显示艺术家规则，避免建议值对不上输入框
+  const displayArtist = store.computeDisplayArtist(album.album_artist, tracks.map((t) => t.artist));
+  addSuggestion('album:album', album.is_voice ? '发行标题' : '专辑名', album.title);
+  addSuggestion('album:albumArtist', album.is_voice ? '艺术家' : '专辑艺术家', displayArtist);
+  addSuggestion('album:genres', '流派', album.genre);
+
+  for (const track of tracks) {
+    const no = track.track_no != null ? ` #${track.track_no}` : '';
+    const version = track.version_name ? ` · ${track.version_name}` : '';
+    addSuggestion(`track:${track.id}:title`, `曲目${no}${version}`, track.title);
+  }
+
+  res.json({ suggestions });
 });
 
 app.get('/api/albums/:id', (req, res) => {

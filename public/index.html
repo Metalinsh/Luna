@@ -327,6 +327,18 @@
   </form>
 </dialog>
 
+<dialog class="dlg mojibake-dialog" id="mojibakeDialog">
+  <form method="dialog">
+    <h3>疑似乱码修复对照</h3>
+    <p class="hint">“-” 是原值，“+” 是当前输入框里的值；可逐项撤销。</p>
+    <div class="mojibake-list" id="mojibakeList"></div>
+    <div class="dlg-actions">
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" value="cancel">关闭</button>
+    </div>
+  </form>
+</dialog>
+
 <div class="jobbar" id="jobBar" hidden>
   <div class="jobbar-inner">
     <span class="jobbar-text" id="jobText">写入中…</span>

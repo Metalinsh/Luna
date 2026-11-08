@@ -1888,7 +1888,7 @@ export function setMergeDecision(albumId, keyA, keyB, decision) {
 /** 音声发行的全部曲目（含版本信息，供界面按轨号合并） */
 export function listVoiceTracks(albumId) {
   return db.prepare(`
-    SELECT t.id, t.path, t.filename, t.ext, t.title, t.track_no, t.track_key,
+    SELECT t.id, t.path, t.filename, t.ext, t.title, t.artist, t.track_no, t.track_key,
            t.file_kind, t.is_bonus, t.size, t.duration, t.version_id, t.variant_label,
            -- 压缩包状态（P1）：界面据此显示「包内」并禁止播放
            t.source_kind, t.materialized_state, t.archive_id, t.member_path,

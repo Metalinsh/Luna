@@ -8,7 +8,7 @@ Luna 为两类形态差异很大的内容分别建模——**普通音乐专辑*
 V1.1 起还支持**压缩包只读挂载**：不解压也能把包内作品摆上专辑墙。
 
 **技术栈**：Node.js + 内置 `node:sqlite` + 零构建原生前端；桌面版由 Electron 打包。
-**运行时依赖仅 3 个**：`express`、`music-metadata`、`node-taglib-sharp`（都是纯 JS，无原生编译）。
+**运行时依赖 4 个**：`express`、`music-metadata`、`node-taglib-sharp`、`iconv-lite`（都是纯 JS，无原生编译；`iconv-lite` 用于乱码检测/修复，原本已随 taglib 间接引入）。
 
 > 📘 产品设计文档：[`docs/产品设计文档.md`](docs/产品设计文档.md)（**§0.5 是 V1.0.0 交付清单**）
 > 🎧 音声专属规则：[`docs/音声专辑设计.md`](docs/音声专辑设计.md)（R1–R15）
@@ -363,6 +363,7 @@ data/
 | 数据库 | `node:sqlite` | 内置，无编译负担 |
 | 标签读取 | `music-metadata` | 格式覆盖广 |
 | 标签写入 | `node-taglib-sharp` | 纯 JS，无需原生模块 |
+| 乱码修复 | `iconv-lite` | 旧编码 ↔ UTF-8 往返检测；原本已随 taglib 间接引入 |
 | 前端 | 原生 ES Module + CSS | **零构建**，改完刷新即生效 |
 | 打包 | electron-builder 26 | `asar: false`（ESM 动态 import 不走 asar 补丁） |
 

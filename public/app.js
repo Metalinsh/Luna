@@ -2513,6 +2513,8 @@ const editState = {
   albumId: null, album: null, tracks: [],
   dirty: new Set(), cleared: new Set(),
   pendingCover: null, confirmed: false, voice: false,
+  /** 疑似乱码自动修复：key → { key, label, original, fixed, encoding, confidence } */
+  autofixes: new Map(),
 };
 
 const ALBUM_FIELDS = [
@@ -2537,13 +2539,51 @@ function trackOriginal(track, key) {
   return key === 'title' ? (track.title ?? '') : (track.track_no ?? '');
 }
 
+function autofixDirtyKey(key) {
+  if (key.startsWith('album:')) return key.slice('album:'.length);
+  if (key.startsWith('track:')) return `title:${key.split(':')[1]}`;
+  return null;
+}
+
+function autofixInputKey(key) {
+  return autofixDirtyKey(key);
+}
+
+function autofixSelector(key) {
+  if (key.startsWith('album:')) {
+    return `#editBody input[data-field="${key.slice('album:'.length)}"]`;
+  }
+  if (key.startsWith('track:')) {
+    return `#editBody input[data-track="${key.split(':')[1]}"][data-track-field="title"]`;
+  }
+  return null;
+}
+
+function autofixValue(key, fallback) {
+  const fix = editState.autofixes.get(key);
+  return fix ? fix.fixed : fallback;
+}
+
+function autofixBadge(key) {
+  const fix = editState.autofixes.get(key);
+  if (!fix) return '';
+  return `<div class="autofix-inline">
+    <span class="autofix-ok">✓ 已自动修复疑似乱码</span>
+    <button type="button" class="btn btn-mini" data-autofix-undo="${key}">撤销</button>
+    <button type="button" class="btn btn-mini" data-autofix-diff="${key}">查看修改</button>
+  </div>`;
+}
+
 async function openEditDrawer(albumId) {
-  const detail = await api(`/api/albums/${encodeURIComponent(albumId)}`);
+  const base = `/api/albums/${encodeURIComponent(albumId)}`;
+  // 详情接口给的是展示数据；编辑需要逐文件曲目 + 乱码自检结果。
+  const [detail, editTracks, suggestionRes] = await Promise.all([
+    api(base),
+    api(`${base}/edit-tracks`).catch(() => null),
+    api(`${base}/edit-suggestions`).catch(() => ({ suggestions: [] })),
+  ]);
   const { album } = detail;
-  // 音声详情返回的是「按轨号合并后的行」，没有 track id；写回需要逐文件曲目。
-  const tracks = album.is_voice
-    ? (await api(`/api/albums/${encodeURIComponent(albumId)}/edit-tracks`)).tracks
-    : detail.tracks;
+  const tracks = editTracks?.tracks ?? detail.tracks;
   editState.albumId = albumId;
   editState.album = album;
   editState.tracks = tracks;
@@ -2552,6 +2592,19 @@ async function openEditDrawer(albumId) {
   editState.pendingCover = null;
   editState.confirmed = false;
   editState.voice = Boolean(album.is_voice);
+  editState.autofixes = new Map();
+  const readonlyTrackIds = new Set(tracks
+    .filter((t) => t.source_kind === 'archive_member' || t.archive_id != null)
+    .map((t) => String(t.id)));
+  for (const suggestion of suggestionRes?.suggestions ?? []) {
+    if (!suggestion?.key || !suggestion.fixed || suggestion.fixed === suggestion.original) continue;
+    // 包内文件写不回去，自动修复没有意义；保留原值，输入框本来就是禁用的。
+    if (suggestion.key.startsWith('track:')
+      && readonlyTrackIds.has(String(suggestion.key.split(':')[1]))) continue;
+    editState.autofixes.set(suggestion.key, { ...suggestion });
+    const dirtyKey = autofixDirtyKey(suggestion.key);
+    if (dirtyKey) editState.dirty.add(dirtyKey);
+  }
   const head = $('#editDrawer .drawer-head h3');
   if (head) head.textContent = editState.voice ? '编辑音声媒体文件' : '编辑专辑信息';
   renderEditDrawer();
@@ -2562,22 +2615,30 @@ async function openEditDrawer(albumId) {
 function closeEditDrawer() {
   $('#editDrawer').hidden = true;
   $('#drawerBackdrop').hidden = true;
+  $('#mojibakeDialog')?.close();
+  editState.autofixes = new Map();
   editState.albumId = null;
 }
 
 function fieldMarkup({ key, label, type, value, hint }) {
   const cleared = editState.cleared.has(key);
+  const fixKey = `album:${key}`;
+  const fix = editState.autofixes.get(fixKey);
+  const shown = cleared ? '' : (fix ? fix.fixed : value);
+  const classes = [cleared ? 'is-cleared' : '', fix && !cleared ? 'is-autofixed' : '']
+    .filter(Boolean).join(' ');
   return `
     <div class="field">
       <label>${esc(label)}${hint ? ` <span style="color:var(--fg-faint)">· ${esc(hint)}</span>` : ''}</label>
       <div class="field-row">
-        <input type="${type}" data-field="${key}" value="${cleared ? '' : esc(value)}"
-               ${cleared ? 'class="is-cleared" disabled' : ''} />
+        <input type="${type}" data-field="${key}" value="${esc(shown)}"
+               ${classes ? `class="${classes}"` : ''} ${cleared ? 'disabled' : ''} />
         <button class="clear-btn ${cleared ? 'is-on' : ''}" data-clear="${key}"
                 title="${cleared ? '取消清空' : '清空该字段（不点则保持原值）'}">
           ${cleared ? '已清除' : '清除'}
         </button>
       </div>
+      ${!cleared && fix ? autofixBadge(fixKey) : ''}
     </div>`;
 }
 
@@ -2589,12 +2650,20 @@ function renderEditDrawer() {
   const voice = editState.voice;
   const writableCount = tracks.filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null).length;
   const coverDefault = voice ? 'db' : 'embedded';
+  const autofixCount = editState.autofixes.size;
 
   $('#editBody').innerHTML = `
     ${voice ? `<div class="voice-edit-note">
       <b>音声发行 · 媒体文件写回</b><br>
       这里修改的是<b>磁盘音频文件内的标签和封面</b>。压缩包内曲目只读，会自动跳过；
       只想改卡片显示（不碰文件）请用详情页的「填艺术家 / 填写社团 / 标签」。
+    </div>` : ''}
+    ${autofixCount ? `<div class="autofix-banner">
+      <span class="autofix-ok">✓ 已自动修复疑似乱码 <b>${autofixCount}</b> 处</span>
+      <span class="autofix-actions">
+        <button type="button" class="btn btn-mini" id="autofixUndoAll">撤销</button>
+        <button type="button" class="btn btn-mini" id="autofixViewAll">查看修改</button>
+      </span>
     </div>` : ''}
 
     <div class="drawer-section" style="border-top:0;padding-top:0">
@@ -2644,6 +2713,9 @@ function renderEditDrawer() {
       <h4>曲目（只改填写的那一首）</h4>
       ${tracks.map((t) => {
         const readonly = t.source_kind === 'archive_member' || t.archive_id != null;
+        const titleKey = `track:${t.id}:title`;
+        const titleFix = editState.autofixes.get(titleKey);
+        const titleValue = titleFix ? titleFix.fixed : trackOriginal(t, 'title');
         const meta = voice
           ? [t.version_name, readonly ? '包内只读' : null].filter(Boolean).join(' · ')
           : '';
@@ -2651,12 +2723,14 @@ function renderEditDrawer() {
         <div class="track-edit-row${voice ? ' is-voice' : ''}${readonly ? ' is-readonly' : ''}">
           <span class="idx">${t.track_no ?? ''}</span>
           <input type="text" data-track="${t.id}" data-track-field="title"
-                 value="${esc(trackOriginal(t, 'title'))}" placeholder="曲名"
+                 value="${esc(titleValue)}" placeholder="曲名"
+                 ${titleFix ? 'class="is-autofixed"' : ''}
                  ${readonly ? 'disabled title="压缩包内文件只读"' : ''} />
           <input type="number" data-track="${t.id}" data-track-field="trackNo"
                  value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨"
                  ${readonly ? 'disabled' : ''} />
           ${meta ? `<div class="track-edit-meta">${esc(meta)}</div>` : ''}
+          ${titleFix ? autofixBadge(titleKey) : ''}
         </div>`;
       }).join('')}
     </div>
@@ -2681,6 +2755,11 @@ function markDirty(input) {
   const key = input.dataset.field
     ? input.dataset.field
     : `${input.dataset.trackField}:${input.dataset.track}`;
+  const fixKey = input.dataset.field
+    ? `album:${input.dataset.field}`
+    : (input.dataset.trackField === 'title' ? `track:${input.dataset.track}:title` : null);
+  const fix = fixKey ? editState.autofixes.get(fixKey) : null;
+  if (fix) fix.fixed = input.value;
   const original = input.dataset.field
     ? String(originalValue(input.dataset.field))
     : String(trackOriginal(
@@ -2695,6 +2774,57 @@ function markDirty(input) {
   }
   editState.confirmed = false;
   $('#editSaveBtn').textContent = '保存并写回文件';
+}
+
+function undoAutofix(key) {
+  const fix = editState.autofixes.get(key);
+  if (!fix) return;
+  const snapshot = currentInputs();
+  const inputKey = autofixInputKey(key);
+  if (inputKey) snapshot[inputKey] = fix.original;
+  if (key.startsWith('album:')) editState.cleared.delete(key.slice('album:'.length));
+  editState.autofixes.delete(key);
+  editState.confirmed = false;
+  renderEditDrawer();
+  restoreInputs(snapshot);
+  const dialog = $('#mojibakeDialog');
+  if (dialog?.open) dialog.close();
+}
+
+function undoAllAutofix() {
+  if (!editState.autofixes.size) return;
+  const snapshot = currentInputs();
+  for (const [key, fix] of editState.autofixes) {
+    const inputKey = autofixInputKey(key);
+    if (inputKey) snapshot[inputKey] = fix.original;
+    if (key.startsWith('album:')) editState.cleared.delete(key.slice('album:'.length));
+  }
+  editState.autofixes.clear();
+  editState.confirmed = false;
+  renderEditDrawer();
+  restoreInputs(snapshot);
+  $('#mojibakeDialog')?.close();
+}
+
+function showAutofixDiff(keys = null) {
+  const list = keys
+    ? keys.map((key) => editState.autofixes.get(key)).filter(Boolean)
+    : [...editState.autofixes.values()];
+  if (!list.length) {
+    toast('没有可查看的乱码修复');
+    return;
+  }
+  $('#mojibakeList').innerHTML = list.map((fix) => `
+    <div class="mojibake-row">
+      <div class="mojibake-label">${esc(fix.label ?? fix.key)}</div>
+      <div class="mojibake-diff">
+        <div class="mojibake-minus">- ${esc(fix.original)}</div>
+        <div class="mojibake-plus">+ ${esc(fix.fixed)}</div>
+      </div>
+      <button type="button" class="btn btn-mini" data-autofix-undo="${fix.key}">撤销此字段</button>
+    </div>`).join('');
+  const dialog = $('#mojibakeDialog');
+  if (!dialog.open) dialog.showModal();
 }
 
 /** 汇总成一次请求：专辑级 fields/clear + 逐曲目覆盖 */
@@ -3389,9 +3519,19 @@ function bindEvents() {
   $('#editBody').addEventListener('click', (e) => {
     const clearBtn = e.target.closest('[data-clear]');
     if (clearBtn) { toggleClear(clearBtn.dataset.clear); return; }
+    if (e.target.closest('#autofixUndoAll')) { undoAllAutofix(); return; }
+    if (e.target.closest('#autofixViewAll')) { showAutofixDiff(); return; }
     if (e.target.closest('#pickCoverBtn')) $('#coverFileInput').click();
     else if (e.target.closest('#applyCoverBtn')) applyCover();
     else if (e.target.closest('#removeCoverBtn')) removeCover();
+  });
+
+  // 乱码修复的「撤销 / 查看修改」按钮在编辑抽屉和 diff 弹窗里都可能出现
+  document.addEventListener('click', (e) => {
+    const undo = e.target.closest('[data-autofix-undo]');
+    if (undo) { undoAutofix(undo.dataset.autofixUndo); return; }
+    const diff = e.target.closest('[data-autofix-diff]');
+    if (diff) { showAutofixDiff([diff.dataset.autofixDiff]); }
   });
 
   $('#coverFileInput').addEventListener('change', (e) => {
