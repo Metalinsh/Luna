@@ -2512,6 +2512,7 @@ function toggleSelect(id) {
 const editState = {
   albumId: null, album: null, tracks: [],
   dirty: new Set(), cleared: new Set(), clearedValues: new Map(),
+  trackCleared: new Set(), trackClearedValues: new Map(),
   pendingCover: null, confirmed: false, voice: false,
   /** 用户勾选的封面写入方式；null = 用默认值 */
   coverModes: null,
@@ -2582,6 +2583,8 @@ async function openEditDrawer(albumId) {
   editState.dirty.clear();
   editState.cleared.clear();
   editState.clearedValues.clear();
+  editState.trackCleared.clear();
+  editState.trackClearedValues.clear();
   editState.pendingCover = null;
   editState.confirmed = false;
   editState.voice = Boolean(album.is_voice);
@@ -2595,7 +2598,12 @@ async function openEditDrawer(albumId) {
     // 包内文件写不回去，自动修复没有意义；保留原值，输入框本来就是禁用的。
     if (suggestion.key.startsWith('track:')
       && readonlyTrackIds.has(String(suggestion.key.split(':')[1]))) continue;
-    editState.autofixes.set(suggestion.key, { ...suggestion });
+    editState.autofixes.set(suggestion.key, {
+      ...suggestion,
+      // fixed 永远保存自动修复结果；current 是输入框当前值，手动修改只动 current
+      current: suggestion.fixed,
+      edited: false,
+    });
     const dirtyKey = autofixDirtyKey(suggestion.key);
     if (dirtyKey) editState.dirty.add(dirtyKey);
   }
@@ -2618,14 +2626,14 @@ function fieldMarkup({ key, label, type, value, hint }) {
   const cleared = editState.cleared.has(key);
   const fixKey = `album:${key}`;
   const fix = editState.autofixes.get(fixKey);
-  const shown = cleared ? '' : (fix ? fix.fixed : value);
-  const classes = [cleared ? 'is-cleared' : '', fix && !cleared ? 'is-autofixed' : '']
+  const shown = cleared ? '' : (fix ? fix.current : value);
+  const classes = [cleared ? 'is-cleared' : '', fix && !cleared && !fix.edited ? 'is-autofixed' : '']
     .filter(Boolean).join(' ');
   return `
     <div class="field">
       <label>${esc(label)}${hint ? ` <span style="color:var(--fg-faint)">· ${esc(hint)}</span>` : ''}</label>
       <div class="field-row">
-        <div class="autofix-input-wrap has-x${fix && !cleared ? ' is-autofixed' : ''}">
+        <div class="autofix-input-wrap has-x${fix && !cleared ? ' has-autofix' : ''}">
           <input type="${type}" data-field="${key}" value="${esc(shown)}"
                  ${classes ? `class="${classes}"` : ''}
                  ${cleared ? 'disabled placeholder="已清除"' : ''} />
@@ -2720,20 +2728,30 @@ function renderEditDrawer() {
         const readonly = t.source_kind === 'archive_member' || t.archive_id != null;
         const titleKey = `track:${t.id}:title`;
         const titleFix = editState.autofixes.get(titleKey);
-        const titleValue = titleFix ? titleFix.fixed : trackOriginal(t, 'title');
+        const clearedTitle = editState.trackCleared.has(t.id);
+        const titleValue = clearedTitle ? '' : (titleFix ? titleFix.current : trackOriginal(t, 'title'));
+        const titleClasses = [
+          clearedTitle ? 'is-cleared' : '',
+          titleFix && !clearedTitle && !titleFix.edited ? 'is-autofixed' : '',
+        ].filter(Boolean).join(' ');
         const meta = voice
           ? [t.version_name, readonly ? '包内只读' : null].filter(Boolean).join(' · ')
           : '';
         return `
         <div class="track-edit-row${voice ? ' is-voice' : ''}${readonly ? ' is-readonly' : ''}">
           <span class="idx">${t.track_no ?? ''}</span>
-          <div class="autofix-input-wrap${titleFix ? ' is-autofixed' : ''}">
+          <div class="autofix-input-wrap${titleFix && !clearedTitle ? ' has-autofix' : ''}${!readonly ? ' has-x' : ''}">
             <input type="text" data-track="${t.id}" data-track-field="title"
-                   value="${esc(titleValue)}" placeholder="曲名"
-                   ${titleFix ? 'class="is-autofixed"' : ''}
-                   ${readonly ? 'disabled title="压缩包内文件只读"' : ''} />
-            ${titleFix ? `<button type="button" class="autofix-inside" data-autofix-diff="${titleKey}"
+                   value="${esc(titleValue)}" placeholder="${clearedTitle ? '已清除' : '曲名'}"
+                   ${titleClasses ? `class="${titleClasses}"` : ''}
+                   ${readonly ? 'disabled title="压缩包内文件只读"' : (clearedTitle ? 'disabled' : '')} />
+            ${titleFix && !clearedTitle ? `<button type="button" class="autofix-inside" data-autofix-diff="${titleKey}"
               title="已自动修复疑似乱码；点击查看修改">✓</button>` : ''}
+            ${!readonly ? `<button type="button" class="input-x${clearedTitle ? ' is-on' : ''}"
+              data-clear-track="${t.id}" title="${clearedTitle ? '取消清空' : '清空该字段（点保存才会清空）'}"
+              aria-label="${clearedTitle ? '取消清空' : '清空该字段'}">
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+            </button>` : ''}
           </div>
           <input type="number" data-track="${t.id}" data-track-field="trackNo"
                  value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨"
@@ -2767,7 +2785,12 @@ function markDirty(input) {
     ? `album:${input.dataset.field}`
     : (input.dataset.trackField === 'title' ? `track:${input.dataset.track}:title` : null);
   const fix = fixKey ? editState.autofixes.get(fixKey) : null;
-  if (fix) fix.fixed = input.value;
+  if (fix) {
+    // current 跟着输入框走；fixed 保持自动修复结果，供对照窗复制
+    fix.current = input.value;
+    fix.edited = String(input.value) !== String(fix.fixed);
+    input.classList.toggle('is-autofixed', !fix.edited);
+  }
   const original = input.dataset.field
     ? String(originalValue(input.dataset.field))
     : String(trackOriginal(
@@ -2908,7 +2931,9 @@ function collectEditPayload() {
   const trackOverrides = {};
   const trackClears = {};
   for (const t of editState.tracks) {
+    if (editState.trackCleared.has(t.id)) trackClears[t.id] = ['title'];
     for (const key of ['title', 'trackNo']) {
+      if (key === 'title' && editState.trackCleared.has(t.id)) continue;
       const id = `${key}:${t.id}`;
       if (!editState.dirty.has(id)) continue;
       const input = $(`[data-track="${t.id}"][data-track-field="${key}"]`);
@@ -2925,7 +2950,7 @@ function collectEditPayload() {
 async function previewEdit() {
   const payload = collectEditPayload();
   if (!Object.keys(payload.fields).length && !payload.clear.length
-    && !Object.keys(payload.trackOverrides).length) {
+    && !Object.keys(payload.trackOverrides).length && !Object.keys(payload.trackClears).length) {
     $('#editImpact').textContent = '还没有任何修改。';
     return null;
   }
@@ -2998,6 +3023,27 @@ function toggleClear(key) {
   restoreInputs(snapshot);
 }
 
+function toggleTrackClear(trackId) {
+  const id = Number(trackId);
+  const key = `title:${id}`;
+  const snapshot = currentInputs();
+  const wasCleared = editState.trackCleared.has(id);
+  if (wasCleared) {
+    const previous = editState.trackClearedValues.get(id);
+    if (previous !== undefined) snapshot[key] = previous;
+    editState.trackCleared.delete(id);
+    editState.trackClearedValues.delete(id);
+  } else {
+    const input = $(`#editBody input[data-track="${id}"][data-track-field="title"]`);
+    editState.trackClearedValues.set(id, input?.value ?? '');
+    editState.trackCleared.add(id);
+    editState.dirty.delete(key);
+  }
+  editState.confirmed = false;
+  renderEditDrawer();
+  restoreInputs(snapshot);
+}
+
 /** 重新渲染前先记住用户已输入的内容，避免丢失未保存的编辑 */
 function currentInputs() {
   const map = {};
@@ -3011,6 +3057,7 @@ function currentInputs() {
 function restoreInputs(map) {
   for (const [key, value] of Object.entries(map)) {
     if (editState.cleared.has(key)) continue;
+    if (key.startsWith('title:') && editState.trackCleared.has(Number(key.split(':')[1]))) continue;
     const input = key.includes(':')
       ? $(`#editBody input[data-track="${key.split(':')[1]}"][data-track-field="${key.split(':')[0]}"]`)
       : $(`#editBody input[data-field="${key}"]`);
@@ -3629,6 +3676,8 @@ function bindEvents() {
   $('#editBody').addEventListener('click', (e) => {
     const clearBtn = e.target.closest('[data-clear]');
     if (clearBtn) { toggleClear(clearBtn.dataset.clear); return; }
+    const trackClearBtn = e.target.closest('[data-clear-track]');
+    if (trackClearBtn) { toggleTrackClear(trackClearBtn.dataset.clearTrack); return; }
     if (e.target.closest('#autofixUndoAll')) { undoAllAutofix(); return; }
     if (e.target.closest('#autofixViewAll')) { showAutofixDiff(); return; }
     if (e.target.closest('#pickCoverBtn')) $('#coverFileInput').click();

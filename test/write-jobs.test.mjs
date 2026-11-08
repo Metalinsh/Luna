@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { parseFile } from 'music-metadata';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lam-write-data-'));
 const musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lam-write-music-'));
@@ -309,6 +310,29 @@ test('乐观锁：编辑期间文件被外部修改 → 跳过且不覆盖外部
   assert.equal(stats.skipped, 1);
   assert.match(writeJobs.getJob(jobId).items[0].error ?? '', /外部修改/);
   assert.equal(sha(file), afterExternal, '外部改动被保留');
+  fs.rmSync(file, { force: true });
+});
+
+test('曲目清除：trackClears 能把已写入的标题标签清空', async (t) => {
+  const file = makeFixture('flac');
+  if (!file) return t.skip('本机没有可用的 ffmpeg');
+  const track = register(file, { album: '清除标题测试', title: '待清除' });
+
+  const setPlan = writeJobs.planMetadataEdit({
+    trackId: track.id, scope: 'track', fields: { title: '待清除' },
+  });
+  assert.equal(setPlan.ok, true);
+  await writeJobs.runJob(enqueue(setPlan));
+
+  const clearPlan = writeJobs.planMetadataEdit({
+    trackId: track.id, scope: 'track', trackClears: { [track.id]: ['title'] },
+  });
+  assert.equal(clearPlan.ok, true);
+  const clearJob = enqueue(clearPlan);
+  const stats = await writeJobs.runJob(clearJob);
+  assert.equal(stats.succeeded, 1);
+  const meta = await parseFile(file, { duration: false });
+  assert.ok(!meta.common.title, `标题仍未清空：${meta.common.title}`);
   fs.rmSync(file, { force: true });
 });
 

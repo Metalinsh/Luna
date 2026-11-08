@@ -1156,9 +1156,9 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 .autofix-link:hover { color: var(--fg); }
 .autofix-input-wrap { position: relative; flex: 1; min-width: 0; }
 .autofix-input-wrap input { width: 100%; }
-.autofix-input-wrap.is-autofixed input { padding-right: 28px; }
+.autofix-input-wrap.has-autofix input { padding-right: 28px; }
 .autofix-input-wrap.has-x input { padding-right: 30px; }
-.autofix-input-wrap.has-x.is-autofixed input { padding-right: 54px; }
+.autofix-input-wrap.has-x.has-autofix input { padding-right: 54px; }
 .autofix-inside {
   position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
   width: 18px; height: 18px; border-radius: 50%; border: 1px solid rgba(67,223,184,.55);

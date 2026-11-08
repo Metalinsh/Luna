@@ -585,8 +585,9 @@ export function planMetadataEdit({
     const patch = buildPatchFrom(fields, clear, isTarget);
 
     const override = trackOverrides?.[String(track.id)];
-    if (override && Object.keys(override).length) {
-      Object.assign(patch, buildPatchFrom(override, trackClears?.[String(track.id)] ?? [], true));
+    const trackClearList = trackClears?.[String(track.id)] ?? [];
+    if ((override && Object.keys(override).length) || trackClearList.length) {
+      Object.assign(patch, buildPatchFrom(override ?? {}, trackClearList, true));
     }
 
     if (!Object.keys(patch).length) continue;
