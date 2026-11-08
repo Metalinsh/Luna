@@ -328,14 +328,21 @@
 </dialog>
 
 <dialog class="dlg mojibake-dialog" id="mojibakeDialog">
-  <form method="dialog">
-    <h3>疑似乱码修复对照</h3>
-    <p class="hint">“-” 是原值，“+” 是当前输入框里的值；可逐项撤销。</p>
-    <div class="mojibake-list" id="mojibakeList"></div>
-    <div class="dlg-actions">
-      <span class="spacer"></span>
-      <button class="btn btn-ghost" value="cancel">关闭</button>
-    </div>
+  <form method="dialog" class="moji-shell">
+    <header class="moji-header">
+      <div class="moji-title-row">
+        <h3>疑似乱码修复对照</h3>
+        <span class="moji-preview-badge">修复预览</span>
+      </div>
+      <p class="moji-desc">检查原始文本与自动修复结果，可以逐项撤销修改。</p>
+      <div class="moji-stats" id="mojibakeStats"></div>
+    </header>
+    <div class="moji-body" id="mojibakeList"></div>
+    <footer class="moji-footer">
+      <button type="button" class="moji-text-btn" id="mojibakeUndoAll">全部撤销</button>
+      <span class="moji-footer-count" id="mojibakeCount"></span>
+      <button class="btn btn-primary" value="cancel">关闭</button>
+    </footer>
   </form>
 </dialog>
 

@@ -1171,23 +1171,94 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 input.is-autofixed { border-color: rgba(67,223,184,.5); background: rgba(67,223,184,.055); }
 input.is-autofixed.is-dirty { border-color: rgba(67,223,184,.65); background: rgba(67,223,184,.08); }
 
-.mojibake-dialog { width: min(760px, 92vw); }
-.mojibake-list {
-  display: flex; flex-direction: column; gap: 0; max-height: 55vh; overflow: auto; margin-top: 8px;
+.mojibake-dialog {
+  width: clamp(600px, 50vw, 860px); max-width: 92vw;
+  height: min(76vh, 720px); max-height: 90vh;
+  padding: 0; border: 1px solid #30313A; border-radius: 14px;
+  background: #17181F; color: #E5E7EB;
+  box-shadow: 0 30px 70px rgba(0,0,0,.65);
 }
-.mojibake-row {
-  padding: 7px 0; border-top: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 3px;
+.moji-shell {
+  height: 100%; min-height: 0; padding: 0 !important; gap: 0 !important;
+  display: flex; flex-direction: column;
 }
-.mojibake-row:first-child { border-top: 0; padding-top: 0; }
-.mojibake-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.mojibake-label { font-size: 11.5px; color: var(--fg-faint); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mojibake-diff {
-  font-family: ui-monospace, Consolas, monospace; font-size: 12px;
-  line-height: 1.55; word-break: break-all;
+.moji-header {
+  flex: none; padding: 18px 22px 14px; border-bottom: 1px solid #30313A;
 }
-.mojibake-minus { color: #ff8a8a; }
-.mojibake-plus { color: #6fe3b0; }
+.moji-title-row { display: flex; align-items: center; gap: 10px; }
+.moji-title-row h3 { margin: 0; font-size: 18px; font-weight: 650; color: #E5E7EB; }
+.moji-preview-badge {
+  flex: none; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid rgba(117,221,178,.25); background: rgba(117,221,178,.09);
+  color: #75DDB2; font-size: 11px; font-weight: 600;
+}
+.moji-desc { margin: 7px 0 0; color: #92939F; font-size: 12.5px; line-height: 1.55; }
+.moji-stats { display: flex; align-items: baseline; gap: 18px; margin-top: 10px; color: #92939F; font-size: 12px; }
+.moji-stat b { margin-right: 3px; color: #E5E7EB; font-size: 15px; font-weight: 650; }
+.moji-stat.is-pending b { color: #E5B86A; }
+.moji-stat.is-ok { color: #75DDB2; }
+.moji-body {
+  flex: 1; min-height: 0; overflow: auto; padding: 12px 22px 16px;
+  scrollbar-gutter: stable;
+}
+.moji-row {
+  padding: 12px 8px; margin: 0 -8px; border-top: 1px solid #30313A; border-radius: 8px;
+  transition: background .12s ease;
+}
+.moji-row:first-child { border-top: 0; }
+.moji-row:hover { background: rgba(255,255,255,.035); }
+.moji-row-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.moji-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.moji-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: #E5E7EB; font-size: 12.5px; font-weight: 600;
+}
+.moji-status {
+  flex: none; padding: 1px 6px; border-radius: 6px; font-size: 10.5px;
+  color: #75DDB2; border: 1px solid rgba(117,221,178,.28); background: rgba(117,221,178,.09);
+}
+.moji-status.is-pending {
+  color: #E5B86A; border-color: rgba(229,184,106,.28); background: rgba(229,184,106,.09);
+}
+.moji-row-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.moji-icon-btn {
+  width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent;
+  color: #92939F; display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  transition: color .12s, background .12s;
+}
+.moji-icon-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
+.moji-icon-btn:hover { color: #E5E7EB; background: rgba(255,255,255,.06); }
+.moji-undo {
+  display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 5px;
+  border: 0; border-radius: 6px; background: transparent; color: #92939F;
+  font-size: 11.5px; cursor: pointer; transition: color .12s, background .12s;
+}
+.moji-undo svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; }
+.moji-undo span {
+  max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap;
+  transition: max-width .15s ease, opacity .12s ease, margin-left .12s ease;
+}
+.moji-undo:hover, .moji-undo:focus-visible { color: #E5E7EB; background: rgba(255,255,255,.06); }
+.moji-undo:hover span, .moji-undo:focus-visible span { max-width: 36px; opacity: 1; margin-left: 2px; }
+.moji-compare { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.moji-line { display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 10px; align-items: start; }
+.moji-line-label { padding-top: 2px; color: #92939F; font-size: 11px; }
+.moji-text {
+  color: #E5E7EB; font-size: 12.5px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+}
+.moji-line.is-original .moji-text { color: #E58B91; }
+.moji-line.is-fixed .moji-text { color: #75DDB2; }
+.moji-footer {
+  flex: none; height: 64px; padding: 0 22px; border-top: 1px solid #30313A;
+  display: flex; align-items: center; gap: 12px; background: #17181F;
+}
+.moji-text-btn {
+  border: 0; background: none; padding: 6px 0; color: #92939F;
+  font-size: 12px; cursor: pointer;
+}
+.moji-text-btn:hover { color: #E5E7EB; }
+.moji-footer-count { margin-left: auto; color: #92939F; font-size: 12px; }
 
 .job-history { display: flex; flex-direction: column; gap: 7px; }
 .job-history-row {

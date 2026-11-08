@@ -2809,6 +2809,17 @@ function undoAllAutofix() {
   $('#mojibakeDialog')?.close();
 }
 
+async function copyAutofix(key) {
+  const fix = editState.autofixes.get(key);
+  if (!fix) return;
+  try {
+    await navigator.clipboard.writeText(fix.fixed ?? '');
+    toast('已复制修复结果');
+  } catch {
+    toast('复制失败，请手动选择文本', true);
+  }
+}
+
 function showAutofixDiff(keys = null) {
   const list = keys
     ? keys.map((key) => editState.autofixes.get(key)).filter(Boolean)
@@ -2817,17 +2828,50 @@ function showAutofixDiff(keys = null) {
     toast('没有可查看的乱码修复');
     return;
   }
-  $('#mojibakeList').innerHTML = list.map((fix) => `
-    <div class="mojibake-row">
-      <div class="mojibake-head">
-        <span class="mojibake-label">${esc(fix.label ?? fix.key)}</span>
-        <button type="button" class="autofix-link" data-autofix-undo="${fix.key}">撤销</button>
+
+  const pending = list.filter((fix) => Number(fix.confidence) < 0.9).length;
+  $('#mojibakeStats').innerHTML = `
+    <span class="moji-stat"><b>${list.length}</b> 条修复记录</span>
+    ${pending
+      ? `<span class="moji-stat is-pending"><b>${pending}</b> 条待确认</span>`
+      : '<span class="moji-stat is-ok">全部为高置信度</span>'}`;
+  $('#mojibakeCount').textContent = `共 ${list.length} 条`;
+
+  $('#mojibakeList').innerHTML = list.map((fix) => {
+    const low = Number(fix.confidence) < 0.9;
+    const label = esc(fix.label ?? fix.key);
+    return `
+    <div class="moji-row">
+      <div class="moji-row-head">
+        <div class="moji-row-title">
+          <span class="moji-label" title="${label}">${label}</span>
+          <span class="moji-status${low ? ' is-pending' : ''}">${low ? '待确认' : '已修复'}</span>
+        </div>
+        <div class="moji-row-actions">
+          <button type="button" class="moji-icon-btn" data-autofix-copy="${fix.key}"
+                  title="复制修复结果" aria-label="复制修复结果">
+            <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>
+          </button>
+          <button type="button" class="moji-undo" data-autofix-undo="${fix.key}"
+                  title="撤销此字段" aria-label="撤销此字段">
+            <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"></path><path d="M4 9h10a5 5 0 0 1 0 10h-3"></path></svg>
+            <span>撤销</span>
+          </button>
+        </div>
       </div>
-      <div class="mojibake-diff">
-        <div class="mojibake-minus">- ${esc(fix.original)}</div>
-        <div class="mojibake-plus">+ ${esc(fix.fixed)}</div>
+      <div class="moji-compare">
+        <div class="moji-line is-original">
+          <span class="moji-line-label">原文</span>
+          <div class="moji-text">${esc(fix.original)}</div>
+        </div>
+        <div class="moji-line is-fixed">
+          <span class="moji-line-label">修复</span>
+          <div class="moji-text">${esc(fix.fixed)}</div>
+        </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+
   const dialog = $('#mojibakeDialog');
   if (!dialog.open) dialog.showModal();
 }
@@ -3533,6 +3577,9 @@ function bindEvents() {
 
   // 乱码修复的「撤销 / 查看修改」按钮在编辑抽屉和 diff 弹窗里都可能出现
   document.addEventListener('click', (e) => {
+    if (e.target.closest('#mojibakeUndoAll')) { undoAllAutofix(); return; }
+    const copy = e.target.closest('[data-autofix-copy]');
+    if (copy) { copyAutofix(copy.dataset.autofixCopy); return; }
     const undo = e.target.closest('[data-autofix-undo]');
     if (undo) { undoAutofix(undo.dataset.autofixUndo); return; }
     const diff = e.target.closest('[data-autofix-diff]');
