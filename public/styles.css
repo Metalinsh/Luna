@@ -1176,8 +1176,15 @@ body.is-np-resizing, body.is-np-resizing * { cursor: col-resize !important; user
 .input-x svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
 .input-x:hover { color: #ff9a9a; background: rgba(255,107,107,.1); }
 .input-x.is-on { color: #ff9a9a; background: rgba(255,107,107,.12); }
-input.is-autofixed { border-color: rgba(67,223,184,.5); background: rgba(67,223,184,.055); }
-input.is-autofixed.is-dirty { border-color: rgba(67,223,184,.65); background: rgba(67,223,184,.08); }
+/* 用 wrapper 提高优先级：压过 .field input / .track-edit-row input 的默认边框 */
+.autofix-input-wrap.has-autofix input.is-autofixed {
+  border-color: rgba(67,223,184,.5);
+  background: rgba(67,223,184,.055);
+}
+.autofix-input-wrap.has-autofix input.is-autofixed.is-dirty {
+  border-color: rgba(67,223,184,.65);
+  background: rgba(67,223,184,.08);
+}
 
 .mojibake-dialog {
   width: clamp(600px, 50vw, 860px); max-width: 92vw;
