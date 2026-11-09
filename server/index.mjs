@@ -1288,7 +1288,20 @@ app.get('/api/writer/support', (req, res) => {
 /* ------------------------------------------------------- 封面管理 V2.2 */
 
 const MAX_COVER_BYTES = 10 * 1024 * 1024;
-const FOLDER_COVER_NAMES = ['cover.jpg', 'folder.jpg', 'front.jpg'];
+/**
+ * 目录封面只认一个文件名：cover.jpg（忽略大小写）。
+ * 「应用封面」写的是它，「移除封面」删的也是它；库里扫描时用的其他候选名（folder.jpg / front.jpg…）
+ * 属于扫描器的选图逻辑，最终都会落到「软件库记录」那一项上，不在这里重复判定。
+ */
+const FOLDER_COVER_FILE = 'cover.jpg';
+
+/** 目录里实际存在的 cover.jpg 文件名（大小写按磁盘上的写法返回）；没有则 null */
+async function folderCoverFile(dir) {
+  if (!dir) return null;
+  let names = [];
+  try { names = await fsp.readdir(dir); } catch { return null; }
+  return names.find((n) => String(n).toLowerCase() === FOLDER_COVER_FILE) ?? null;
+}
 
 function coverUrlFor(album) {
   return album?.cover_hash ? `/api/cover/${album.cover_hash}` : null;
@@ -1339,7 +1352,7 @@ app.get('/api/albums/:id/cover/candidates', asyncRoute(async (req, res) => {
     embeddedCount: tracks.filter((t) => t.has_cover).length,
     trackCount: tracks.length,
     writableCount: writableTracksFor(tracks).length,
-    folderCoverExists: folderImages.some((f) => FOLDER_COVER_NAMES.includes(f.name.toLowerCase())),
+    folderCoverExists: folderImages.some((f) => String(f.name).toLowerCase() === FOLDER_COVER_FILE),
   });
 }));
 
@@ -1351,9 +1364,7 @@ app.get('/api/albums/:id/cover/state', asyncRoute(async (req, res) => {
   const tracks = store.listAlbumTracks(id);
   const writable = writableTracksFor(tracks);
   const dir = coverDirectoryFor(album, tracks);
-  const folderCover = dir
-    ? FOLDER_COVER_NAMES.find((n) => fs.existsSync(path.join(dir, n))) ?? null
-    : null;
+  const folderCover = await folderCoverFile(dir);
   res.json({
     modes: {
       embedded: await embeddedCoverPresent(writable),
@@ -1392,14 +1403,13 @@ async function existingCoverBuffer(album, tracks) {
     } catch { /* 库内文件缺失，继续找下一个来源 */ }
   }
   const dir = coverDirectoryFor(album, tracks);
-  if (dir) {
-    for (const name of FOLDER_COVER_NAMES) {
-      try {
-        const buffer = await fsp.readFile(path.join(dir, name));
-        const mime = maintenance.detectImageMime(buffer);
-        if (mime) return { buffer, mime };
-      } catch { /* 这个文件名不存在，试下一个 */ }
-    }
+  const coverName = await folderCoverFile(dir);
+  if (coverName) {
+    try {
+      const buffer = await fsp.readFile(path.join(dir, coverName));
+      const mime = maintenance.detectImageMime(buffer);
+      if (mime) return { buffer, mime };
+    } catch { /* 读不到就试内嵌图 */ }
   }
   const writable = writableTracksFor(tracks);
   // 优先看有标记的曲目；没有标记时（has_cover 被清过）再抽查前几个文件
@@ -1492,7 +1502,8 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   let target = null;
   if (wantFolder) {
     // 音声发行写到「发行根」，不能拿第一条曲目的目录代替（它可能只是某个版本子目录）。
-    target = path.join(folderDir, 'cover.jpg');
+    // 目录里已有 cover.jpg（哪怕写法是 COVER.JPG）就沿用原名，避免大小写敏感的文件系统上出现两份封面
+    target = path.join(folderDir, (await folderCoverFile(folderDir)) ?? FOLDER_COVER_FILE);
     const firstWritable = writable[0] ?? tracks[0];
     const lib = firstWritable?.library_id ? store.getLibrary(firstWritable.library_id) : null;
     const seq = items.length;
@@ -1576,11 +1587,11 @@ app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
 
   if (wantFolder) {
     const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
-    for (const name of FOLDER_COVER_NAMES) {
-      const target = path.join(folderDir, name);
-      if (!fs.existsSync(target)) continue;
+    // 只删目录封面那一个文件（大小写按磁盘上的写法）
+    const name = await folderCoverFile(folderDir);
+    if (name) {
       const seq = items.length;
-      items.push({ trackId: null, path: target });
+      items.push({ trackId: null, path: path.join(folderDir, name) });
       operations[String(seq)] = {
         kind: 'delete-file',
         backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,

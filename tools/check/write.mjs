@@ -279,6 +279,43 @@ try {
     });
     ok('三处都空时无法沿用封面', noSourceRes.status === 400, noSourceRes.body.error);
     fs.rmSync(folderFile, { force: true });
+
+    // 专辑「天生」就带 cover.jpg（不是本软件写的）也要认；除 cover.jpg 之外的文件名都不算
+    fs.writeFileSync(folderFile, coverBytes);
+    const bornState = (await api(`/api/albums/${checkAlbum.id}/cover/state`)).body;
+    ok('认得目录里原有的 cover.jpg', bornState.modes?.folder === true
+      && bornState.folderCover === 'cover.jpg', `${bornState.folderCover}`);
+    const reuseFromBorn = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'POST', body: { reuseCurrent: true, modes: ['db'] },
+    });
+    ok('沿用目录里原有的 cover.jpg', reuseFromBorn.status === 200 && Boolean(reuseFromBorn.body.cover_url),
+      reuseFromBorn.body.cover_url ?? reuseFromBorn.body.error);
+    fs.rmSync(folderFile, { force: true });
+    await api(`/api/albums/${checkAlbum.id}/cover`, { method: 'DELETE', body: { modes: ['db'] } });
+
+    fs.writeFileSync(path.join(albumDir, 'COVER.JPG'), coverBytes);
+    const upperState = (await api(`/api/albums/${checkAlbum.id}/cover/state`)).body;
+    ok('大小写写法都算目录封面', upperState.modes?.folder === true
+      && upperState.folderCover === 'COVER.JPG', `${upperState.folderCover}`);
+    const rmUpper = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'DELETE', body: { modes: ['folder'] },
+    });
+    if (rmUpper.body.jobId) await waitJob(rmUpper.body.jobId);
+    ok('移除按磁盘上的实际文件名', !fs.existsSync(path.join(albumDir, 'COVER.JPG')),
+      `deleted ${rmUpper.body.deleted}`);
+
+    const decoys = ['folder.jpg', 'cover.png', 'illustration.jpg'];
+    for (const name of decoys) fs.writeFileSync(path.join(albumDir, name), coverBytes);
+    const decoyState = (await api(`/api/albums/${checkAlbum.id}/cover/state`)).body;
+    ok('只认 cover.jpg，别的文件名不算目录封面', decoyState.modes?.folder === false,
+      `${decoyState.folderCover} · ${JSON.stringify(decoyState.modes)}`);
+    const rmDecoy = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'DELETE', body: { modes: ['folder'] },
+    });
+    if (rmDecoy.body.jobId) await waitJob(rmDecoy.body.jobId);
+    ok('移除不会碰别的文件', decoys.every((n) => fs.existsSync(path.join(albumDir, n))),
+      `deleted ${rmDecoy.body.deleted}`);
+    for (const name of decoys) fs.rmSync(path.join(albumDir, name), { force: true });
   } else {
     ok('封面写入测试（无可用封面素材，跳过）', true, 'skip');
   }

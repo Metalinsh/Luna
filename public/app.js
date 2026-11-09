@@ -2516,6 +2516,8 @@ const editState = {
   pendingCover: null, confirmed: false, voice: false,
   /** 封面三个位置的勾选状态（embedded/folder/db）；null = 服务端状态还没取到 */
   coverModes: null,
+  /** /cover/state 的返回：用来显示目录里识别到的封面文件名 */
+  coverState: null,
   /** 疑似乱码自动修复：key → { key, label, original, fixed, encoding, confidence } */
   autofixes: new Map(),
 };
@@ -2589,7 +2591,8 @@ async function openEditDrawer(albumId) {
   editState.pendingCover = null;
   editState.confirmed = false;
   editState.voice = Boolean(album.is_voice);
-  // 复选框反映当前状态：三种位置各自有没有封面；之后用户可以增删勾选
+  // 复选框反映当前状态：三种位置各自有没有封面（目录只看根目录的 cover.jpg）；之后用户可以增删勾选
+  editState.coverState = coverStateRes ?? null;
   editState.coverModes = coverStateRes?.modes
     ? Object.entries(coverStateRes.modes).filter(([, on]) => on).map(([m]) => m)
     : null;
@@ -2661,6 +2664,7 @@ function renderEditDrawer() {
   const voice = editState.voice;
   const writableCount = tracks.filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null).length;
   // 勾选框显示当前状态：打开抽屉时从 /cover/state 读取；读不到时退回默认勾选
+  const coverState = editState.coverState;
   const coverModes = Array.isArray(editState.coverModes)
     ? editState.coverModes
     : [voice ? 'db' : 'embedded'];
@@ -2708,6 +2712,9 @@ function renderEditDrawer() {
               软件库记录（本软件内的封面显示）</label>
           </div>
           <div class="set-note">勾选框显示各位置当前有没有封面；「应用」写入勾选项（没重新选图时沿用现有封面），「移除」删除勾选项。</div>
+          <div class="set-note" id="coverFolderNote" ${coverState?.folderCover ? '' : 'hidden'}>
+            已识别到目录封面：<b id="coverFolderName">${esc(coverState?.folderCover ?? '')}</b>
+          </div>
           ${voice ? `<div class="set-note" id="coverWriteNote">当前可写回 ${writableCount} 个磁盘曲目；
             ${tracks.length - writableCount} 个压缩包内曲目会跳过。</div>` : ''}
         </div>
@@ -3078,6 +3085,7 @@ async function refreshCoverStateInDrawer() {
   try {
     const st = await api(`/api/albums/${encodeURIComponent(editState.albumId)}/cover/state`);
     const modes = st?.modes;
+    editState.coverState = st;
     editState.album.cover_url = st.cover_url;
     editState.album.cover_source = st.cover_source;
     editState.pendingCover = null;
@@ -3086,6 +3094,12 @@ async function refreshCoverStateInDrawer() {
     if (preview) preview.style.backgroundImage = st.cover_url ? `url('${st.cover_url}')` : '';
     const source = $('#coverSourceText');
     if (source) source.textContent = `当前来源：${st.cover_source ?? '无'}`;
+    const note = $('#coverFolderNote');
+    if (note) {
+      note.hidden = !st.folderCover;
+      const name = $('#coverFolderName');
+      if (name) name.textContent = st.folderCover ?? '';
+    }
     $$('#editBody input[name="coverMode"]').forEach((i) => {
       i.checked = Boolean(modes?.[i.value]);
     });
