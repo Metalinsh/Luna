@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "express": "^5.1.0",
+    "iconv-lite": "^0.7.3",
     "music-metadata": "^11.9.0",
     "node-taglib-sharp": "^6.0.3"
   },

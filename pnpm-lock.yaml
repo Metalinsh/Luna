@@ -14,6 +14,9 @@ importers:
       express:
         specifier: ^5.1.0
         version: 5.2.1
+      iconv-lite:
+        specifier: ^0.7.3
+        version: 0.7.3
       music-metadata:
         specifier: ^11.9.0
         version: 11.16.1

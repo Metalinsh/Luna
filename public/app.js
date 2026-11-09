@@ -995,6 +995,9 @@ function voiceDetailMarkup(album, data, gallery = null) {
             <svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg> 播放本版本
           </button>
           <button class="btn" id="tagAlbumBtn">🏷 标签</button>
+          <button class="btn" id="editVoiceMediaBtn" title="写回磁盘音频文件的标签/封面；压缩包内只读">
+            <svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg> 编辑媒体
+          </button>
           <button class="btn" id="revealAlbumBtn">
             <svg viewBox="0 0 24 24"><path d="M3 7h5l2 2h11v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> 打开文件夹
           </button>
@@ -1006,7 +1009,7 @@ function voiceDetailMarkup(album, data, gallery = null) {
     ? album.tags.map((t) => `<span class="tag-pill is-preset" style="--tag-color:${tagColor(t.color)}">${esc(t.name)}</span>`).join('')
     : '<span class="tag-count">还没有标签</span>'}
         </div>
-        <div class="voice-notes">音声专辑的名称取自文件夹，艺术家只记录在软件内，<b>不会写回音频文件</b>。</div>
+        <div class="voice-notes">音声专辑的名称取自文件夹；艺术家/社团的快捷填写只记库内。点「编辑媒体」可显式写回<b>磁盘文件</b>的标签/封面；<b>压缩包内文件只读</b>。</div>
         ${album.archive?.archives > 0 ? `<div class="voice-notes archive-note">
           🗜 该发行来自压缩包：<b>${album.archive.tracks} 条曲目在包内</b>（已按包内目录结构解析版本与轨号）。
           包内文件不会被修改，播放时会按需解码到缓存。
@@ -1329,6 +1332,7 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
     playQueue(q, 0, { cover: album.cover_url, label: `音声《${album.album}》` });
   });
   $('#tagAlbumBtn').addEventListener('click', () => openTagDialog([album.id], album.tags ?? []));
+  $('#editVoiceMediaBtn')?.addEventListener('click', () => openEditDrawer(album.id));
   $('#revealAlbumBtn').addEventListener('click', () => {
     api('/api/reveal', { method: 'POST', body: { path: album.release_root } }).catch(() => {});
   });
@@ -2507,8 +2511,15 @@ function toggleSelect(id) {
 
 const editState = {
   albumId: null, album: null, tracks: [],
-  dirty: new Set(), cleared: new Set(),
-  pendingCover: null, confirmed: false,
+  dirty: new Set(), cleared: new Set(), clearedValues: new Map(),
+  trackCleared: new Set(), trackClearedValues: new Map(),
+  pendingCover: null, confirmed: false, voice: false,
+  /** 封面三个位置的勾选状态（embedded/folder/db）；null = 服务端状态还没取到 */
+  coverModes: null,
+  /** /cover/state 的返回：用来显示目录里识别到的封面文件名 */
+  coverState: null,
+  /** 疑似乱码自动修复：key → { key, label, original, fixed, encoding, confidence } */
+  autofixes: new Map(),
 };
 
 const ALBUM_FIELDS = [
@@ -2533,15 +2544,78 @@ function trackOriginal(track, key) {
   return key === 'title' ? (track.title ?? '') : (track.track_no ?? '');
 }
 
+function autofixDirtyKey(key) {
+  if (key.startsWith('album:')) return key.slice('album:'.length);
+  if (key.startsWith('track:')) return `title:${key.split(':')[1]}`;
+  return null;
+}
+
+function autofixInputKey(key) {
+  return autofixDirtyKey(key);
+}
+
+function autofixSelector(key) {
+  if (key.startsWith('album:')) {
+    return `#editBody input[data-field="${key.slice('album:'.length)}"]`;
+  }
+  if (key.startsWith('track:')) {
+    return `#editBody input[data-track="${key.split(':')[1]}"][data-track-field="title"]`;
+  }
+  return null;
+}
+
+function autofixValue(key, fallback) {
+  const fix = editState.autofixes.get(key);
+  return fix ? fix.fixed : fallback;
+}
+
 async function openEditDrawer(albumId) {
-  const { album, tracks } = await api(`/api/albums/${encodeURIComponent(albumId)}`);
+  const base = `/api/albums/${encodeURIComponent(albumId)}`;
+  // 详情接口给的是展示数据；编辑需要逐文件曲目 + 乱码自检结果。
+  const [detail, editTracks, suggestionRes, coverStateRes] = await Promise.all([
+    api(base),
+    api(`${base}/edit-tracks`).catch(() => null),
+    api(`${base}/edit-suggestions`).catch(() => ({ suggestions: [] })),
+    api(`${base}/cover/state`).catch(() => null),
+  ]);
+  const { album } = detail;
+  const tracks = editTracks?.tracks ?? detail.tracks;
   editState.albumId = albumId;
   editState.album = album;
   editState.tracks = tracks;
   editState.dirty.clear();
   editState.cleared.clear();
+  editState.clearedValues.clear();
+  editState.trackCleared.clear();
+  editState.trackClearedValues.clear();
   editState.pendingCover = null;
   editState.confirmed = false;
+  editState.voice = Boolean(album.is_voice);
+  // 复选框反映当前状态：三种位置各自有没有封面（目录只看根目录的 cover.jpg）；之后用户可以增删勾选
+  editState.coverState = coverStateRes ?? null;
+  editState.coverModes = coverStateRes?.modes
+    ? Object.entries(coverStateRes.modes).filter(([, on]) => on).map(([m]) => m)
+    : null;
+  editState.autofixes = new Map();
+  const readonlyTrackIds = new Set(tracks
+    .filter((t) => t.source_kind === 'archive_member' || t.archive_id != null)
+    .map((t) => String(t.id)));
+  for (const suggestion of suggestionRes?.suggestions ?? []) {
+    if (!suggestion?.key || !suggestion.fixed || suggestion.fixed === suggestion.original) continue;
+    // 包内文件写不回去，自动修复没有意义；保留原值，输入框本来就是禁用的。
+    if (suggestion.key.startsWith('track:')
+      && readonlyTrackIds.has(String(suggestion.key.split(':')[1]))) continue;
+    editState.autofixes.set(suggestion.key, {
+      ...suggestion,
+      // fixed 永远保存自动修复结果；current 是输入框当前值，手动修改只动 current
+      current: suggestion.fixed,
+      edited: false,
+    });
+    const dirtyKey = autofixDirtyKey(suggestion.key);
+    if (dirtyKey) editState.dirty.add(dirtyKey);
+  }
+  const head = $('#editDrawer .drawer-head h3');
+  if (head) head.textContent = editState.voice ? '编辑音声媒体文件' : '编辑专辑信息';
   renderEditDrawer();
   $('#drawerBackdrop').hidden = false;
   $('#editDrawer').hidden = false;
@@ -2550,21 +2624,34 @@ async function openEditDrawer(albumId) {
 function closeEditDrawer() {
   $('#editDrawer').hidden = true;
   $('#drawerBackdrop').hidden = true;
+  $('#mojibakeDialog')?.close();
+  editState.autofixes = new Map();
   editState.albumId = null;
 }
 
 function fieldMarkup({ key, label, type, value, hint }) {
   const cleared = editState.cleared.has(key);
+  const fixKey = `album:${key}`;
+  const fix = editState.autofixes.get(fixKey);
+  const shown = cleared ? '' : (fix ? fix.current : value);
+  const classes = [cleared ? 'is-cleared' : '', fix && !cleared && !fix.edited ? 'is-autofixed' : '']
+    .filter(Boolean).join(' ');
   return `
     <div class="field">
       <label>${esc(label)}${hint ? ` <span style="color:var(--fg-faint)">· ${esc(hint)}</span>` : ''}</label>
       <div class="field-row">
-        <input type="${type}" data-field="${key}" value="${cleared ? '' : esc(value)}"
-               ${cleared ? 'class="is-cleared" disabled' : ''} />
-        <button class="clear-btn ${cleared ? 'is-on' : ''}" data-clear="${key}"
-                title="${cleared ? '取消清空' : '清空该字段（不点则保持原值）'}">
-          ${cleared ? '已清除' : '清除'}
-        </button>
+        <div class="autofix-input-wrap has-x${fix && !cleared ? ' has-autofix' : ''}">
+          <input type="${type}" data-field="${key}" value="${esc(shown)}"
+                 ${classes ? `class="${classes}"` : ''}
+                 ${cleared ? 'disabled placeholder="已清除"' : ''} />
+          ${!cleared && fix ? `<button type="button" class="autofix-inside"
+            data-autofix-diff="${fixKey}" title="已自动修复疑似乱码；点击查看修改">✓</button>` : ''}
+          <button type="button" class="input-x${cleared ? ' is-on' : ''}"
+                  data-clear="${key}" title="${cleared ? '取消清空' : '清空该字段（点保存才会清空）'}"
+                  aria-label="${cleared ? '取消清空' : '清空该字段'}">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          </button>
+        </div>
       </div>
     </div>`;
 }
@@ -2574,37 +2661,69 @@ function renderEditDrawer() {
   const tracks = editState.tracks;
   const coverUrl = a.cover_url;
   const pending = editState.pendingCover;
+  const voice = editState.voice;
+  const writableCount = tracks.filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null).length;
+  // 勾选框显示当前状态：打开抽屉时从 /cover/state 读取；读不到时退回默认勾选
+  const coverState = editState.coverState;
+  const coverModes = Array.isArray(editState.coverModes)
+    ? editState.coverModes
+    : [voice ? 'db' : 'embedded'];
+  const autofixCount = editState.autofixes.size;
 
   $('#editBody').innerHTML = `
+    ${voice ? `<div class="voice-edit-note">
+      <b>音声发行 · 媒体文件写回</b><br>
+      这里修改的是<b>磁盘音频文件内的标签和封面</b>。压缩包内曲目只读，会自动跳过；
+      只想改卡片显示（不碰文件）请用详情页的「填艺术家 / 填写社团 / 标签」。
+    </div>` : ''}
+    ${autofixCount ? `<div class="autofix-banner">
+      <span class="autofix-ok">✓ 已自动修复疑似乱码 <b>${autofixCount}</b> 处</span>
+      <span class="autofix-actions">
+        <button type="button" class="btn btn-mini" id="autofixUndoAll">撤销</button>
+        <button type="button" class="btn btn-mini" id="autofixViewAll">查看修改</button>
+      </span>
+    </div>` : ''}
+
     <div class="drawer-section" style="border-top:0;padding-top:0">
       <h4>封面</h4>
       <div class="cover-edit">
         <div class="cover-preview" id="coverPreview"
              style="background-image:url('${pending ?? coverUrl ?? ''}')"></div>
         <div class="cover-controls">
-          <div style="font-size:12.5px;color:var(--fg-dim)">
+          <div id="coverSourceText" style="font-size:12.5px;color:var(--fg-dim)">
             当前来源：${esc(a.cover_source ?? '无')}
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn" id="pickCoverBtn" style="padding:6px 10px">选择图片…</button>
             <button class="btn btn-primary" id="applyCoverBtn" style="padding:6px 10px"
-              ${pending ? '' : 'disabled'}>应用封面</button>
-            <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px">移除封面</button>
+              title="写入勾选位置的封面（未重新选图时沿用当前封面）">应用封面</button>
+            <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px"
+              title="移除勾选位置的封面">移除封面</button>
           </div>
-          <div class="cover-modes">
-            <label><input type="radio" name="coverMode" value="embedded" checked />
-              写入每首曲目的内嵌封面（跨软件可见，体积增加）</label>
-            <label><input type="radio" name="coverMode" value="folder" />
-              只写目录 cover.jpg（省空间，拷走单文件会丢）</label>
-            <label><input type="radio" name="coverMode" value="db" />
-              仅记录在软件内（零风险，重建索引会丢）</label>
+          <div class="cover-modes" id="coverModes">
+            <label><input type="checkbox" name="coverMode" value="embedded"
+              ${coverModes.includes('embedded') ? 'checked' : ''} />
+              文件内嵌封面（写进每个音频文件，跨软件可见）</label>
+            <label><input type="checkbox" name="coverMode" value="folder"
+              ${coverModes.includes('folder') ? 'checked' : ''} />
+              ${voice ? '发行根目录 cover.jpg（文件体积不变）' : '专辑目录 cover.jpg（文件体积不变）'}</label>
+            <label><input type="checkbox" name="coverMode" value="db"
+              ${coverModes.includes('db') ? 'checked' : ''} />
+              软件库记录（本软件内的封面显示）</label>
           </div>
+          <div class="set-note">勾选框显示各位置当前有没有封面；「应用」写入勾选项（没重新选图时沿用现有封面），「移除」删除勾选项。</div>
+          <div class="set-note" id="coverFolderNote" ${coverState?.folderCover ? '' : 'hidden'}>
+            已识别到目录封面：<b id="coverFolderName">${esc(coverState?.folderCover ?? '')}</b>
+          </div>
+          ${voice ? `<div class="set-note" id="coverWriteNote">当前可写回 ${writableCount} 个磁盘曲目；
+            ${tracks.length - writableCount} 个压缩包内曲目会跳过。</div>` : ''}
         </div>
       </div>
     </div>
 
     <div class="drawer-section">
-      <h4>专辑信息（写入全部 ${tracks.length} 首曲目）</h4>
+      <h4>${voice ? `文件标签（写入全部 ${writableCount} 个可写曲目）` : `专辑信息（写入全部 ${tracks.length} 首曲目）`}</h4>
+      ${voice ? '<p class="hint" style="font-size:12px;line-height:1.6;margin:0 0 10px">音声卡片的发行标题仍以文件夹/发行结构为准；这里写的是音频文件内的标签。</p>' : ''}
       ${ALBUM_FIELDS.slice(0, 2).map((f) => fieldMarkup({
         ...f, value: originalValue(f.key),
       })).join('')}
@@ -2615,14 +2734,41 @@ function renderEditDrawer() {
 
     <div class="drawer-section">
       <h4>曲目（只改填写的那一首）</h4>
-      ${tracks.map((t) => `
-        <div class="track-edit-row">
+      ${tracks.map((t) => {
+        const readonly = t.source_kind === 'archive_member' || t.archive_id != null;
+        const titleKey = `track:${t.id}:title`;
+        const titleFix = editState.autofixes.get(titleKey);
+        const clearedTitle = editState.trackCleared.has(t.id);
+        const titleValue = clearedTitle ? '' : (titleFix ? titleFix.current : trackOriginal(t, 'title'));
+        const titleClasses = [
+          clearedTitle ? 'is-cleared' : '',
+          titleFix && !clearedTitle && !titleFix.edited ? 'is-autofixed' : '',
+        ].filter(Boolean).join(' ');
+        const meta = voice
+          ? [t.version_name, readonly ? '包内只读' : null].filter(Boolean).join(' · ')
+          : '';
+        return `
+        <div class="track-edit-row${voice ? ' is-voice' : ''}${readonly ? ' is-readonly' : ''}">
           <span class="idx">${t.track_no ?? ''}</span>
-          <input type="text" data-track="${t.id}" data-track-field="title"
-                 value="${esc(trackOriginal(t, 'title'))}" placeholder="曲名" />
+          <div class="autofix-input-wrap${titleFix && !clearedTitle ? ' has-autofix' : ''}${!readonly ? ' has-x' : ''}">
+            <input type="text" data-track="${t.id}" data-track-field="title"
+                   value="${esc(titleValue)}" placeholder="${clearedTitle ? '已清除' : '曲名'}"
+                   ${titleClasses ? `class="${titleClasses}"` : ''}
+                   ${readonly ? 'disabled title="压缩包内文件只读"' : (clearedTitle ? 'disabled' : '')} />
+            ${titleFix && !clearedTitle ? `<button type="button" class="autofix-inside" data-autofix-diff="${titleKey}"
+              title="已自动修复疑似乱码；点击查看修改">✓</button>` : ''}
+            ${!readonly ? `<button type="button" class="input-x${clearedTitle ? ' is-on' : ''}"
+              data-clear-track="${t.id}" title="${clearedTitle ? '取消清空' : '清空该字段（点保存才会清空）'}"
+              aria-label="${clearedTitle ? '取消清空' : '清空该字段'}">
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+            </button>` : ''}
+          </div>
           <input type="number" data-track="${t.id}" data-track-field="trackNo"
-                 value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨" />
-        </div>`).join('')}
+                 value="${esc(trackOriginal(t, 'trackNo'))}" placeholder="音轨"
+                 ${readonly ? 'disabled' : ''} />
+          ${meta ? `<div class="track-edit-meta">${esc(meta)}</div>` : ''}
+        </div>`;
+      }).join('')}
     </div>
 
     <div class="drawer-section">
@@ -2630,6 +2776,7 @@ function renderEditDrawer() {
       <p class="hint" style="font-size:12.5px;line-height:1.7;margin:0">
         保存时会先把原文件复制到工作副本，写入并回读校验后才原子替换；
         原文件会完整保留在音乐库根目录的 <code>.lam-undo/</code> 下，可一键撤销。
+        ${voice ? '<br><b>压缩包内文件始终只读</b>，不会被修改。' : ''}
       </p>
     </div>`;
 
@@ -2644,6 +2791,16 @@ function markDirty(input) {
   const key = input.dataset.field
     ? input.dataset.field
     : `${input.dataset.trackField}:${input.dataset.track}`;
+  const fixKey = input.dataset.field
+    ? `album:${input.dataset.field}`
+    : (input.dataset.trackField === 'title' ? `track:${input.dataset.track}:title` : null);
+  const fix = fixKey ? editState.autofixes.get(fixKey) : null;
+  if (fix) {
+    // current 跟着输入框走；fixed 保持自动修复结果，供对照窗复制
+    fix.current = input.value;
+    fix.edited = String(input.value) !== String(fix.fixed);
+    input.classList.toggle('is-autofixed', !fix.edited);
+  }
   const original = input.dataset.field
     ? String(originalValue(input.dataset.field))
     : String(trackOriginal(
@@ -2658,6 +2815,107 @@ function markDirty(input) {
   }
   editState.confirmed = false;
   $('#editSaveBtn').textContent = '保存并写回文件';
+}
+
+function undoAutofix(key) {
+  const fix = editState.autofixes.get(key);
+  if (!fix) return;
+  const snapshot = currentInputs();
+  const inputKey = autofixInputKey(key);
+  if (inputKey) snapshot[inputKey] = fix.original;
+  if (key.startsWith('album:')) editState.cleared.delete(key.slice('album:'.length));
+  editState.autofixes.delete(key);
+  editState.confirmed = false;
+  renderEditDrawer();
+  restoreInputs(snapshot);
+  const dialog = $('#mojibakeDialog');
+  if (dialog?.open) dialog.close();
+}
+
+function undoAllAutofix() {
+  if (!editState.autofixes.size) return;
+  const snapshot = currentInputs();
+  for (const [key, fix] of editState.autofixes) {
+    const inputKey = autofixInputKey(key);
+    if (inputKey) snapshot[inputKey] = fix.original;
+    if (key.startsWith('album:')) editState.cleared.delete(key.slice('album:'.length));
+  }
+  editState.autofixes.clear();
+  editState.confirmed = false;
+  renderEditDrawer();
+  restoreInputs(snapshot);
+  $('#mojibakeDialog')?.close();
+}
+
+async function copyAutofix(key) {
+  const fix = editState.autofixes.get(key);
+  if (!fix) return;
+  try {
+    await navigator.clipboard.writeText(fix.fixed ?? '');
+    toast('已复制修复结果');
+  } catch {
+    toast('复制失败，请手动选择文本', true);
+  }
+}
+
+function showAutofixDiff(keys = null) {
+  const list = keys
+    ? keys.map((key) => editState.autofixes.get(key)).filter(Boolean)
+    : [...editState.autofixes.values()];
+  if (!list.length) {
+    toast('没有可查看的乱码修复');
+    return;
+  }
+
+  const single = Array.isArray(keys) && keys.length === 1;
+  const dialog = $('#mojibakeDialog');
+  dialog.classList.toggle('is-single', single);
+  $('#mojibakeUndoAll').hidden = single;
+
+  const pending = list.filter((fix) => Number(fix.confidence) < 0.9).length;
+  $('#mojibakeStats').innerHTML = `
+    <span class="moji-stat"><b>${list.length}</b> 条修复记录</span>
+    ${pending
+      ? `<span class="moji-stat is-pending"><b>${pending}</b> 条待确认</span>`
+      : '<span class="moji-stat is-ok">全部为高置信度</span>'}`;
+  $('#mojibakeCount').textContent = `共 ${list.length} 条`;
+
+  $('#mojibakeList').innerHTML = list.map((fix) => {
+    const low = Number(fix.confidence) < 0.9;
+    const label = esc(fix.label ?? fix.key);
+    return `
+    <div class="moji-row">
+      <div class="moji-row-head">
+        <div class="moji-row-title">
+          <span class="moji-label" title="${label}">${label}</span>
+          <span class="moji-status${low ? ' is-pending' : ''}">${low ? '待确认' : '已修复'}</span>
+        </div>
+        <div class="moji-row-actions">
+          <button type="button" class="moji-icon-btn" data-autofix-copy="${fix.key}"
+                  title="复制修复结果" aria-label="复制修复结果">
+            <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>
+          </button>
+          <button type="button" class="moji-undo" data-autofix-undo="${fix.key}"
+                  title="撤销此字段" aria-label="撤销此字段">
+            <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"></path><path d="M4 9h10a5 5 0 0 1 0 10h-3"></path></svg>
+            <span>撤销</span>
+          </button>
+        </div>
+      </div>
+      <div class="moji-compare">
+        <div class="moji-line is-original">
+          <span class="moji-line-label">原文</span>
+          <div class="moji-text">${esc(fix.original)}</div>
+        </div>
+        <div class="moji-line is-fixed">
+          <span class="moji-line-label">修复</span>
+          <div class="moji-text">${esc(fix.fixed)}</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  if (!dialog.open) dialog.showModal();
 }
 
 /** 汇总成一次请求：专辑级 fields/clear + 逐曲目覆盖 */
@@ -2683,7 +2941,9 @@ function collectEditPayload() {
   const trackOverrides = {};
   const trackClears = {};
   for (const t of editState.tracks) {
+    if (editState.trackCleared.has(t.id)) trackClears[t.id] = ['title'];
     for (const key of ['title', 'trackNo']) {
+      if (key === 'title' && editState.trackCleared.has(t.id)) continue;
       const id = `${key}:${t.id}`;
       if (!editState.dirty.has(id)) continue;
       const input = $(`[data-track="${t.id}"][data-track-field="${key}"]`);
@@ -2700,7 +2960,7 @@ function collectEditPayload() {
 async function previewEdit() {
   const payload = collectEditPayload();
   if (!Object.keys(payload.fields).length && !payload.clear.length
-    && !Object.keys(payload.trackOverrides).length) {
+    && !Object.keys(payload.trackOverrides).length && !Object.keys(payload.trackClears).length) {
     $('#editImpact').textContent = '还没有任何修改。';
     return null;
   }
@@ -2709,9 +2969,15 @@ async function previewEdit() {
       method: 'POST', body: payload,
     });
     const s = res.preview.summary;
+    const skipped = Number(s.unsupported) || 0;
+    if (!Number(s.files)) {
+      $('#editImpact').classList.add('is-error');
+      $('#editImpact').textContent = '没有可写回的磁盘曲目（压缩包内文件只读或格式不支持）';
+      return null;
+    }
     $('#editImpact').classList.remove('is-error');
     $('#editImpact').innerHTML = `将修改 <b>${s.files}</b> 个文件`
-      + `${s.unsupported ? `（其中 <b>${s.unsupported}</b> 个格式不支持写回，只会更新数据库）` : ''}`
+      + `${skipped ? `，跳过 <b>${skipped}</b> 个不可写文件（压缩包内只读或格式不支持）` : ''}`
       + ` · 字段：${esc(s.fields.join('、'))}`;
     return { payload, preview: res.preview };
   } catch (err) {
@@ -2750,8 +3016,40 @@ async function saveEdit() {
 
 function toggleClear(key) {
   const snapshot = currentInputs();
-  if (editState.cleared.has(key)) editState.cleared.delete(key);
-  else { editState.cleared.add(key); editState.dirty.delete(key); }
+  const wasCleared = editState.cleared.has(key);
+  if (wasCleared) {
+    // 取消清除时恢复清除前的值（包括自动修复后的值），而不是空字符串
+    const previous = editState.clearedValues.get(key);
+    if (previous !== undefined) snapshot[key] = previous;
+    editState.cleared.delete(key);
+    editState.clearedValues.delete(key);
+  } else {
+    const input = $(`#editBody input[data-field="${key}"]`);
+    editState.clearedValues.set(key, input?.value ?? '');
+    editState.cleared.add(key);
+    editState.dirty.delete(key);
+  }
+  renderEditDrawer();
+  restoreInputs(snapshot);
+}
+
+function toggleTrackClear(trackId) {
+  const id = Number(trackId);
+  const key = `title:${id}`;
+  const snapshot = currentInputs();
+  const wasCleared = editState.trackCleared.has(id);
+  if (wasCleared) {
+    const previous = editState.trackClearedValues.get(id);
+    if (previous !== undefined) snapshot[key] = previous;
+    editState.trackCleared.delete(id);
+    editState.trackClearedValues.delete(id);
+  } else {
+    const input = $(`#editBody input[data-track="${id}"][data-track-field="title"]`);
+    editState.trackClearedValues.set(id, input?.value ?? '');
+    editState.trackCleared.add(id);
+    editState.dirty.delete(key);
+  }
+  editState.confirmed = false;
   renderEditDrawer();
   restoreInputs(snapshot);
 }
@@ -2769,6 +3067,7 @@ function currentInputs() {
 function restoreInputs(map) {
   for (const [key, value] of Object.entries(map)) {
     if (editState.cleared.has(key)) continue;
+    if (key.startsWith('title:') && editState.trackCleared.has(Number(key.split(':')[1]))) continue;
     const input = key.includes(':')
       ? $(`#editBody input[data-track="${key.split(':')[1]}"][data-track-field="${key.split(':')[0]}"]`)
       : $(`#editBody input[data-field="${key}"]`);
@@ -2780,60 +3079,105 @@ function restoreInputs(map) {
 
 /* ------------------------------------------------------------ 封面操作 */
 
+/** 把封面的预览 / 来源 / 勾选状态刷成服务端真实状态（选项始终可见，勾选=当前位置有没有封面） */
+async function refreshCoverStateInDrawer() {
+  if (!editState.albumId) return;
+  try {
+    const st = await api(`/api/albums/${encodeURIComponent(editState.albumId)}/cover/state`);
+    const modes = st?.modes;
+    editState.coverState = st;
+    editState.album.cover_url = st.cover_url;
+    editState.album.cover_source = st.cover_source;
+    editState.pendingCover = null;
+    if (modes) editState.coverModes = Object.entries(modes).filter(([, on]) => on).map(([m]) => m);
+    const preview = $('#coverPreview');
+    if (preview) preview.style.backgroundImage = st.cover_url ? `url('${st.cover_url}')` : '';
+    const source = $('#coverSourceText');
+    if (source) source.textContent = `当前来源：${st.cover_source ?? '无'}`;
+    const note = $('#coverFolderNote');
+    if (note) {
+      note.hidden = !st.folderCover;
+      const name = $('#coverFolderName');
+      if (name) name.textContent = st.folderCover ?? '';
+    }
+    $$('#editBody input[name="coverMode"]').forEach((i) => {
+      i.checked = Boolean(modes?.[i.value]);
+    });
+  } catch { /* 刷新封面展示失败不影响已提交的任务 */ }
+}
+
 async function applyCover() {
-  if (!editState.pendingCover) return;
-  const mode = $('input[name="coverMode"]:checked')?.value ?? 'embedded';
+  const modes = $$('#editBody input[name="coverMode"]:checked').map((i) => i.value);
+  if (!modes.length) {
+    toast('请至少勾选一种封面存放方式', true);
+    return;
+  }
+  // 没重新选图就沿用专辑现有的封面：勾哪些位置，就把封面写到哪些位置
+  const body = editState.pendingCover
+    ? { imageBase64: editState.pendingCover, modes }
+    : { reuseCurrent: true, modes };
   const btn = $('#applyCoverBtn');
   btn.disabled = true;
   btn.textContent = '写入中…';
   try {
-    const res = await api(`/api/albums/${editState.albumId}/cover`, {
-      method: 'POST',
-      body: { imageBase64: editState.pendingCover, mode },
-    });
-    editState.pendingCover = null;
+    const res = await api(`/api/albums/${editState.albumId}/cover`, { method: 'POST', body });
     if (res.jobId) {
-      closeEditDrawer();
+      // 文件任务还在跑：等 pollJob 收尾时再同步勾选状态，免得中途覆盖用户刚做的勾选
+      editState.pendingCover = null;
+      toast(`已开始写入封面（${res.files} 个文件）`);
       pollJob(res.jobId);
     } else {
-      toast('封面已记录（仅存软件内）');
-      closeEditDrawer();
-      refreshCurrent();
+      await refreshCoverStateInDrawer();
+      toast('封面已保存到软件库');
     }
   } catch (err) {
     toast(err.message, true);
+  } finally {
     btn.disabled = false;
     btn.textContent = '应用封面';
   }
 }
 
 async function removeCover() {
-  const mode = $('input[name="coverMode"]:checked')?.value ?? 'db';
+  const modes = $$('#editBody input[name="coverMode"]:checked').map((i) => i.value);
+  if (!modes.length) {
+    toast('请先勾选要移除的封面位置', true);
+    return;
+  }
+  const btn = $('#removeCoverBtn');
+  btn.disabled = true;
   try {
-    const res = await api(`/api/albums/${editState.albumId}/cover`, { method: 'DELETE', body: { mode } });
+    const res = await api(`/api/albums/${editState.albumId}/cover`, {
+      method: 'DELETE', body: { modes },
+    });
     if (res.jobId) {
-      closeEditDrawer();
+      toast(`已开始移除封面文件（${res.deleted ?? res.files} 个）`);
+      await refreshCoverStateInDrawer();
       pollJob(res.jobId);
     } else {
-      toast('已移除封面记录');
-      closeEditDrawer();
-      refreshCurrent();
+      await refreshCoverStateInDrawer();
+      toast(res.cleared ? '已移除勾选的封面' : '勾选的位置没有可移除的封面');
     }
   } catch (err) {
     toast(err.message, true);
+  } finally {
+    btn.disabled = false;
   }
 }
 
 /* ---------------------------------------------------------- 写任务进度 */
 
 const JOB_LABELS = {
-  metadata: '写入标签', 'cover-embedded': '写入内嵌封面', 'cover-folder': '写入目录封面', undo: '撤销还原',
+  metadata: '写入标签', 'cover-embedded': '写入内嵌封面', 'cover-folder': '写入目录封面',
+  'cover-mixed': '封面任务', undo: '撤销还原',
 };
 
 let jobTimer = null;
 
 async function pollJob(jobId) {
   clearInterval(jobTimer);
+  const drawerOpen = !$('#editDrawer').hidden;
+  if (drawerOpen) $('#editSaveBtn').disabled = true;
   const bar = $('#jobBar');
   bar.hidden = false;
   bar.classList.remove('is-done', 'is-error');
@@ -2856,6 +3200,12 @@ async function pollJob(jobId) {
 
       clearInterval(jobTimer);
       jobTimer = null;
+      if (drawerOpen) {
+        $('#editSaveBtn').disabled = false;
+        // 封面任务（含撤销）完成后重新读取三个位置的状态，勾选框跟着真实情况走
+        if (job.type === 'cover-embedded' || job.type === 'cover-folder'
+          || job.type === 'cover-mixed' || job.type === 'undo') await refreshCoverStateInDrawer();
+      }
       const undoable = job.items.some((i) => i.backup_file);
       $('#jobUndoBtn').hidden = !undoable;
       $('#jobUndoBtn').dataset.jobId = String(jobId);
@@ -2885,6 +3235,8 @@ async function undoJob(jobId) {
     toast(`已撤销：还原 ${res.restored} 个文件${res.failed ? `，${res.failed} 个失败` : ''}`);
     $('#jobBar').hidden = true;
     await refreshCurrent();
+    // 撤销的如果是封面任务，抽屉里的勾选状态要跟着回到撤销前的真实情况
+    if (!$('#editDrawer').hidden) await refreshCoverStateInDrawer();
   } catch (err) {
     toast(err.message, true);
   }
@@ -3343,12 +3695,33 @@ function bindEvents() {
   $('#editBody').addEventListener('input', (e) => {
     if (e.target.matches('input[data-field], input[data-track]')) markDirty(e.target);
   });
+  $('#editBody').addEventListener('change', (e) => {
+    if (!e.target.matches('input[name="coverMode"]')) return;
+    // 三个位置互相独立，不互斥：勾选集合就是要应用 / 移除的范围
+    editState.coverModes = $$('#editBody input[name="coverMode"]')
+      .filter((i) => i.checked).map((i) => i.value);
+  });
   $('#editBody').addEventListener('click', (e) => {
     const clearBtn = e.target.closest('[data-clear]');
     if (clearBtn) { toggleClear(clearBtn.dataset.clear); return; }
+    const trackClearBtn = e.target.closest('[data-clear-track]');
+    if (trackClearBtn) { toggleTrackClear(trackClearBtn.dataset.clearTrack); return; }
+    if (e.target.closest('#autofixUndoAll')) { undoAllAutofix(); return; }
+    if (e.target.closest('#autofixViewAll')) { showAutofixDiff(); return; }
     if (e.target.closest('#pickCoverBtn')) $('#coverFileInput').click();
     else if (e.target.closest('#applyCoverBtn')) applyCover();
     else if (e.target.closest('#removeCoverBtn')) removeCover();
+  });
+
+  // 乱码修复的「撤销 / 查看修改」按钮在编辑抽屉和 diff 弹窗里都可能出现
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('#mojibakeUndoAll')) { undoAllAutofix(); return; }
+    const copy = e.target.closest('[data-autofix-copy]');
+    if (copy) { copyAutofix(copy.dataset.autofixCopy); return; }
+    const undo = e.target.closest('[data-autofix-undo]');
+    if (undo) { undoAutofix(undo.dataset.autofixUndo); return; }
+    const diff = e.target.closest('[data-autofix-diff]');
+    if (diff) { showAutofixDiff([diff.dataset.autofixDiff]); }
   });
 
   $('#coverFileInput').addEventListener('change', (e) => {
@@ -3361,9 +3734,7 @@ function bindEvents() {
       editState.pendingCover = String(reader.result);
       const preview = $('#coverPreview');
       if (preview) preview.style.backgroundImage = `url('${editState.pendingCover}')`;
-      const btn = $('#applyCoverBtn');
-      if (btn) { btn.disabled = false; btn.textContent = '应用封面'; }
-      toast('已选择图片，点「应用封面」写入');
+      toast('已选择图片，点「应用封面」写入勾选的位置');
     };
     reader.readAsDataURL(file);
   });

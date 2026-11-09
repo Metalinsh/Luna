@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { parseFile } from 'music-metadata';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lam-write-data-'));
 const musicDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lam-write-music-'));
@@ -103,10 +104,10 @@ function register(filePath, { album = '写测试专辑', title = '写测试曲�
   return store.findTrackByPath(filePath);
 }
 
-function enqueue(plan) {
+function enqueue(plan, extra = {}) {
   return writeJobs.createJob({
     type: 'metadata', items: plan.items,
-    payload: { patches: plan.patches, snapshots: plan.snapshots },
+    payload: { patches: plan.patches, snapshots: plan.snapshots, ...extra },
   });
 }
 
@@ -124,6 +125,86 @@ test('字段校验：空曲名、越界年份、越界音轨号、过长流派�
 test('编辑计划：不存在的专辑报错', () => {
   const plan = writeJobs.planMetadataEdit({ albumId: 999999, fields: { year: 2000 } });
   assert.equal(plan.ok, false);
+});
+
+test('写回判定：磁盘文件可写，压缩包成员只读，未知格式不可写', () => {
+  assert.equal(writeJobs.isWritableTrack({ ext: '.mp3', source_kind: 'file', archive_id: null }), true);
+  assert.equal(writeJobs.isWritableTrack({ ext: '.mp3', source_kind: 'archive_member', archive_id: 1 }), false);
+  assert.equal(writeJobs.isWritableTrack({ ext: '.xyz', source_kind: 'file', archive_id: null }), false);
+});
+
+test('音声计划：包内成员被标记只读，统计只把磁盘曲目算作可写', () => {
+  const file = makeFixture('flac') ?? path.join(musicDir, 'plan-fake.mp3');
+  if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.alloc(64));
+  const disk = register(file, { album: '音声计划测试', title: '磁盘曲目', trackNo: 1 });
+  const album = store.getAlbumById(disk.album_id);
+
+  // 同一张专辑下追加一条「压缩包成员」记录（路径是虚拟路径，不落盘）
+  store.upsertTrack({
+    path: `${musicDir}\\fake.zip\u0001inner.mp3`, dir: musicDir,
+    libraryId, filename: 'inner.mp3', ext: '.mp3', size: 1, mtime: 1,
+    title: '包内曲目', artist: '测试', albumArtist: '测试', album: '音声计划测试',
+    albumKey: album.album_key, albumId: album.id, trackNo: 2,
+    sourceKind: 'archive_member', archiveId: 999, memberPath: 'inner.mp3',
+    materializedState: 'archived',
+  });
+
+  const plan = writeJobs.planMetadataEdit({ albumId: album.id, fields: { year: 2020 } });
+  assert.equal(plan.ok, true);
+  assert.equal(plan.summary.total, 2);
+  assert.equal(plan.summary.writable, 1);
+  assert.equal(plan.summary.unsupported, 1);
+  assert.equal(plan.items.length, 2, '不可写项也进任务，执行器会标记 skipped');
+  assert.ok(plan.items.some((i) => i.trackId === disk.id));
+
+  const archive = plan.changes.find((c) => c.path.includes('\u0001'));
+  assert.equal(archive.writable, false);
+  assert.equal(archive.readonlyReason, '压缩包内文件只读');
+});
+
+test('音声写回：同步索引后仍是 voice 专辑，不会重聚合成普通专辑', async (t) => {
+  const file = makeFixture('flac');
+  if (!file) return t.skip('本机没有可用的 ffmpeg');
+
+  const disk = register(file, { album: '音声同步测试', title: '同步曲目', trackNo: 1 });
+  store.db.prepare("UPDATE albums SET kind = 'voice', release_root = ? WHERE id = ?")
+    .run(musicDir, disk.album_id);
+
+  const plan = writeJobs.planMetadataEdit({
+    albumId: disk.album_id,
+    fields: { album: '音声新标题', year: 2024 },
+  });
+  assert.equal(plan.ok, true);
+  const albumBefore = store.getAlbumById(disk.album_id);
+  const jobId = enqueue(plan, {
+    albumId: disk.album_id,
+    albumSnapshot: {
+      title: albumBefore.title,
+      album_artist: albumBefore.album_artist,
+      album_artist_source: albumBefore.album_artist_source,
+      year: albumBefore.year,
+      genre: albumBefore.genre,
+      artist_suggested: albumBefore.artist_suggested,
+      artist_decision: albumBefore.artist_decision,
+    },
+  });
+  const stats = await writeJobs.runJob(jobId);
+  assert.equal(stats.succeeded, 1);
+
+  const after = store.getTrack(disk.id);
+  const album = store.getAlbumById(disk.album_id);
+  assert.equal(after.album_id, disk.album_id, '曲目仍挂在原音声专辑');
+  assert.equal(after.album, '音声新标题');
+  assert.equal(after.year, 2024);
+  assert.equal(album.kind, 'voice', '专辑仍是 voice');
+  assert.equal(album.title, '音声新标题', '音声卡片标题随文件标签更新');
+
+  // 撤销：文件逐字节还原，专辑展示字段按写前快照回退
+  const undo = await writeJobs.undoJob(jobId);
+  assert.equal(undo.restored, 1);
+  const albumAfterUndo = store.getAlbumById(disk.album_id);
+  assert.equal(albumAfterUndo.title, '音声同步测试', '撤销后音声卡片标题回退');
+  assert.equal(albumAfterUndo.year, null, '撤销后年份回退');
 });
 
 /* --------------------------------------------------------------- 写入流程 */
@@ -229,6 +310,29 @@ test('乐观锁：编辑期间文件被外部修改 → 跳过且不覆盖外部
   assert.equal(stats.skipped, 1);
   assert.match(writeJobs.getJob(jobId).items[0].error ?? '', /外部修改/);
   assert.equal(sha(file), afterExternal, '外部改动被保留');
+  fs.rmSync(file, { force: true });
+});
+
+test('曲目清除：trackClears 能把已写入的标题标签清空', async (t) => {
+  const file = makeFixture('flac');
+  if (!file) return t.skip('本机没有可用的 ffmpeg');
+  const track = register(file, { album: '清除标题测试', title: '待清除' });
+
+  const setPlan = writeJobs.planMetadataEdit({
+    trackId: track.id, scope: 'track', fields: { title: '待清除' },
+  });
+  assert.equal(setPlan.ok, true);
+  await writeJobs.runJob(enqueue(setPlan));
+
+  const clearPlan = writeJobs.planMetadataEdit({
+    trackId: track.id, scope: 'track', trackClears: { [track.id]: ['title'] },
+  });
+  assert.equal(clearPlan.ok, true);
+  const clearJob = enqueue(clearPlan);
+  const stats = await writeJobs.runJob(clearJob);
+  assert.equal(stats.succeeded, 1);
+  const meta = await parseFile(file, { duration: false });
+  assert.ok(!meta.common.title, `标题仍未清空：${meta.common.title}`);
   fs.rmSync(file, { force: true });
 });
 

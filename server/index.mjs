@@ -27,6 +27,8 @@ const VIDEO_MIME = {
 };
 import * as writeJobs from './write-jobs.mjs';
 import * as writers from './writers.mjs';
+import { parseFile } from 'music-metadata';
+import { repairMojibake } from './mojibake.mjs';
 import {
   scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
   isUnderAsmrFolder,
@@ -297,6 +299,52 @@ app.get('/api/albums', (req, res) => {
     offset,
     hasMore: offset + rows.length < total,
   });
+});
+
+/**
+ * 编辑抽屉专用的「逐文件曲目」列表。
+ * 音声详情接口返回的是按轨号合并后的行（没有 track id），不能直接用于写回；
+ * 这里按专辑类型返回原始 tracks 行，音声也带版本名与压缩包来源字段。
+ */
+app.get('/api/albums/:id/edit-tracks', (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+  const tracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
+  res.json({ tracks });
+});
+
+/**
+ * 编辑抽屉打开时先做一次「疑似乱码」自检。
+ * 只返回建议（original/fixed/confidence），不写库、不写文件。
+ */
+app.get('/api/albums/:id/edit-suggestions', (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+
+  const suggestions = [];
+  const addSuggestion = (key, label, value) => {
+    const repair = repairMojibake(value);
+    if (repair) suggestions.push({ key, label, ...repair });
+  };
+
+  const tracks = album.is_voice ? store.listVoiceTracks(id) : store.listAlbumTracks(id);
+  // 与详情接口/编辑抽屉使用同一套显示艺术家规则，避免建议值对不上输入框
+  const displayArtist = store.computeDisplayArtist(album.album_artist, tracks.map((t) => t.artist));
+  addSuggestion('album:album', album.is_voice ? '发行标题' : '专辑名', album.title);
+  addSuggestion('album:albumArtist', album.is_voice ? '艺术家' : '专辑艺术家', displayArtist);
+  addSuggestion('album:genres', '流派', album.genre);
+
+  for (const track of tracks) {
+    const no = track.track_no != null ? ` #${track.track_no}` : '';
+    const version = track.version_name ? ` · ${track.version_name}` : '';
+    addSuggestion(`track:${track.id}:title`, `曲目${no}${version}`, track.title);
+  }
+
+  res.json({ suggestions });
 });
 
 app.get('/api/albums/:id', (req, res) => {
@@ -1182,7 +1230,8 @@ app.post('/api/albums/:id/metadata/preview', (req, res) => {
 app.post('/api/albums/:id/metadata', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   if (!id) return badRequest(res, '无效的专辑 ID');
-  if (!store.getAlbumById(id)) return res.status(404).json({ error: '专辑不存在' });
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
   if (isScanning()) return res.status(409).json({ error: '扫描进行中，请稍后再试' });
   if (writeJobs.isWriting()) return res.status(409).json({ error: '已有写任务在进行中' });
 
@@ -1192,7 +1241,21 @@ app.post('/api/albums/:id/metadata', asyncRoute(async (req, res) => {
   const jobId = writeJobs.createJob({
     type: 'metadata',
     items: plan.items,
-    payload: { patches: plan.patches, snapshots: plan.snapshots, albumId: id },
+    payload: {
+      patches: plan.patches,
+      snapshots: plan.snapshots,
+      albumId: id,
+      // 撤销时优先恢复写前的专辑展示字段（音声标题/艺术家可能不来自文件标签）
+      albumSnapshot: {
+        title: album.title,
+        album_artist: album.album_artist,
+        album_artist_source: album.album_artist_source,
+        year: album.year,
+        genre: album.genre,
+        artist_suggested: album.artist_suggested,
+        artist_decision: album.artist_decision,
+      },
+    },
   });
   // 异步执行，前端轮询任务进度
   writeJobs.runJob(jobId).catch((err) => console.error('[write job]', err.message));
@@ -1225,10 +1288,46 @@ app.get('/api/writer/support', (req, res) => {
 /* ------------------------------------------------------- 封面管理 V2.2 */
 
 const MAX_COVER_BYTES = 10 * 1024 * 1024;
-const FOLDER_COVER_NAMES = ['cover.jpg', 'folder.jpg', 'front.jpg'];
+/**
+ * 目录封面只认一个文件名：cover.jpg（忽略大小写）。
+ * 「应用封面」写的是它，「移除封面」删的也是它；库里扫描时用的其他候选名（folder.jpg / front.jpg…）
+ * 属于扫描器的选图逻辑，最终都会落到「软件库记录」那一项上，不在这里重复判定。
+ */
+const FOLDER_COVER_FILE = 'cover.jpg';
+
+/** 目录里实际存在的 cover.jpg 文件名（大小写按磁盘上的写法返回）；没有则 null */
+async function folderCoverFile(dir) {
+  if (!dir) return null;
+  let names = [];
+  try { names = await fsp.readdir(dir); } catch { return null; }
+  return names.find((n) => String(n).toLowerCase() === FOLDER_COVER_FILE) ?? null;
+}
 
 function coverUrlFor(album) {
   return album?.cover_hash ? `/api/cover/${album.cover_hash}` : null;
+}
+
+/** 压缩包成员不能写回；只有磁盘上的曲目可以被封面/标签写任务处理。 */
+function writableTracksFor(tracks) {
+  return (tracks ?? []).filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null);
+}
+
+/**
+ * 「目录封面」写到哪个目录：
+ *   · 音声发行：发行根（目录）；发行根是 .zip 时返回 null（包内只读）
+ *   · 普通专辑：第一条可写曲目的目录
+ * 返回 null 表示没有可写的目录。
+ */
+function coverDirectoryFor(album, tracks) {
+  if (album?.kind === 'voice' && album.release_root) {
+    try {
+      return fs.statSync(album.release_root).isDirectory() ? album.release_root : null;
+    } catch {
+      return null;
+    }
+  }
+  const first = writableTracksFor(tracks)[0];
+  return first ? path.dirname(first.path) : null;
 }
 
 /** 列出可选封面来源：专辑目录里的图片 + 各曲目的内嵌图片数量 */
@@ -1238,7 +1337,7 @@ app.get('/api/albums/:id/cover/candidates', asyncRoute(async (req, res) => {
   if (!album) return res.status(404).json({ error: '专辑不存在' });
 
   const tracks = store.listAlbumTracks(id);
-  const dir = tracks[0] ? path.dirname(tracks[0].path) : null;
+  const dir = coverDirectoryFor(album, tracks);
   const folderImages = [];
   if (dir) {
     try {
@@ -1252,11 +1351,83 @@ app.get('/api/albums/:id/cover/candidates', asyncRoute(async (req, res) => {
     folderImages,
     embeddedCount: tracks.filter((t) => t.has_cover).length,
     trackCount: tracks.length,
-    folderCoverExists: folderImages.some((f) => FOLDER_COVER_NAMES.includes(f.name.toLowerCase())),
+    writableCount: writableTracksFor(tracks).length,
+    folderCoverExists: folderImages.some((f) => String(f.name).toLowerCase() === FOLDER_COVER_FILE),
   });
 }));
 
-/** 设置封面：embedded 写入每首曲目内嵌图；folder 写目录 cover.jpg；db 仅存库 */
+/** 封面当前落在哪些位置：内嵌图 / 目录 cover.jpg / 库内记录。编辑抽屉的复选框直接显示这份状态 */
+app.get('/api/albums/:id/cover/state', asyncRoute(async (req, res) => {
+  const id = parseId(req.params.id);
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+  const tracks = store.listAlbumTracks(id);
+  const writable = writableTracksFor(tracks);
+  const dir = coverDirectoryFor(album, tracks);
+  const folderCover = await folderCoverFile(dir);
+  res.json({
+    modes: {
+      embedded: await embeddedCoverPresent(writable),
+      folder: Boolean(folderCover),
+      db: Boolean(album.cover_hash),
+    },
+    embeddedTracks: writable.filter((t) => t.has_cover).length,
+    writableCount: writable.length,
+    trackCount: tracks.length,
+    folderDir: dir,
+    folderCover,
+    cover_url: coverUrlFor(album),
+    cover_source: album.cover_source,
+  });
+}));
+
+/** 专辑里是否真的有内嵌封面：has_cover 优先，全为 0 时抽查第一个可写文件（clearCover 会把标记一起清零） */
+async function embeddedCoverPresent(writable) {
+  if (writable.some((t) => t.has_cover)) return true;
+  for (const t of writable.slice(0, 1)) {
+    try {
+      const meta = await parseFile(t.path, { duration: false, skipCovers: false });
+      if ((meta.common.picture?.length ?? 0) > 0) return true;
+    } catch { /* 读不到就按 has_cover 的结果 */ }
+  }
+  return false;
+}
+
+/** 沿用专辑现有的封面：库内文件 → 目录 cover.jpg → 曲目内嵌图；返回 null 表示无处可沿用 */
+async function existingCoverBuffer(album, tracks) {
+  if (album.cover_file) {
+    const file = path.join(COVER_DIR, path.basename(String(album.cover_file)));
+    try {
+      const buffer = await fsp.readFile(file);
+      return { buffer, mime: album.cover_mime ?? maintenance.detectImageMime(buffer) };
+    } catch { /* 库内文件缺失，继续找下一个来源 */ }
+  }
+  const dir = coverDirectoryFor(album, tracks);
+  const coverName = await folderCoverFile(dir);
+  if (coverName) {
+    try {
+      const buffer = await fsp.readFile(path.join(dir, coverName));
+      const mime = maintenance.detectImageMime(buffer);
+      if (mime) return { buffer, mime };
+    } catch { /* 读不到就试内嵌图 */ }
+  }
+  const writable = writableTracksFor(tracks);
+  // 优先看有标记的曲目；没有标记时（has_cover 被清过）再抽查前几个文件
+  const pool = writable.filter((t) => t.has_cover);
+  for (const t of (pool.length ? pool : writable.slice(0, 3))) {
+    try {
+      const meta = await parseFile(t.path, { duration: false, skipCovers: false });
+      const pic = meta.common.picture?.[0];
+      if (!pic?.data?.length) continue;
+      const buffer = Buffer.from(pic.data);
+      const mime = maintenance.detectImageMime(buffer) ?? pic.format ?? 'image/jpeg';
+      return { buffer, mime };
+    } catch { /* 换下一首 */ }
+  }
+  return null;
+}
+
+/** 设置封面：按勾选写入，内嵌 / 目录 cover.jpg / 库内记录 三项互不影响 */
 app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const album = store.getAlbumById(id);
@@ -1264,75 +1435,113 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   if (isScanning()) return res.status(409).json({ error: '扫描进行中，请稍后再试' });
   if (writeJobs.isWriting()) return res.status(409).json({ error: '已有写任务在进行中' });
 
-  const mode = ['embedded', 'folder', 'db'].includes(req.body?.mode) ? req.body.mode : 'embedded';
+  const requested = Array.isArray(req.body?.modes)
+    ? req.body.modes
+    : [req.body?.mode];
+  const modes = [...new Set(requested.filter((m) => ['embedded', 'folder', 'db'].includes(m)))];
+  if (!modes.length) return badRequest(res, '请至少勾选一种封面存放方式');
+  // 三种方式互相独立、可同时生效；未勾选的那一种不会被改动。
+  const wantEmbedded = modes.includes('embedded');
+  const wantFolder = modes.includes('folder');
+  const wantDb = modes.includes('db');
+
+  const tracks = store.listAlbumTracks(id);
+  if (!tracks.length) return badRequest(res, '该专辑没有曲目');
+  const writable = writableTracksFor(tracks);
+  if (wantEmbedded && !writable.length) {
+    return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），请改选「软件库记录」');
+  }
+  const folderDir = wantFolder ? coverDirectoryFor(album, tracks) : null;
+  if (wantFolder && !folderDir) {
+    return badRequest(res, '该发行来自压缩包，包内文件只读，不能写目录封面；请改选「软件库记录」');
+  }
 
   let buffer = null;
+  let mime = null;
   if (req.body?.imageBase64) {
     buffer = Buffer.from(String(req.body.imageBase64).replace(/^data:[^;]+;base64,/, ''), 'base64');
   } else if (req.body?.sourcePath) {
     const src = path.resolve(String(req.body.sourcePath));
     try { buffer = await fsp.readFile(src); } catch { return badRequest(res, '图片路径不可读'); }
+  } else if (req.body?.reuseCurrent) {
+    // 没重新选图：沿用专辑现有封面，把同一张图补写到新勾选的位置
+    const found = await existingCoverBuffer(album, tracks);
+    if (!found) return badRequest(res, '这张专辑当前没有可沿用的封面，请先选择图片');
+    buffer = found.buffer;
+    mime = found.mime;
   }
   if (!buffer?.length) return badRequest(res, '缺少图片内容');
   if (buffer.length > MAX_COVER_BYTES) {
     return badRequest(res, `图片超过 ${MAX_COVER_BYTES / 1048576} MB，请先压缩`);
   }
 
-  const mime = maintenance.detectImageMime(buffer);
+  mime = maintenance.detectImageMime(buffer) ?? mime;
   if (!mime) return badRequest(res, '不是可识别的图片（支持 JPEG / PNG / WebP / GIF / BMP）');
 
-  const stored = maintenance.persistCoverImage(buffer, mime, 'manual');
-  store.setManualCover(id, stored);
-  scheduleAssetBackup('cover-set');
-
-  const tracks = store.listAlbumTracks(id);
-  if (!tracks.length) return badRequest(res, '该专辑没有曲目');
-
-  if (mode === 'db') {
-    return res.json({ ok: true, mode, cover_url: coverUrlFor(store.getAlbumById(id)) });
+  let cover_url = coverUrlFor(album);
+  if (wantDb) {
+    const stored = maintenance.persistCoverImage(buffer, mime, 'manual');
+    store.setManualCover(id, stored);
+    scheduleAssetBackup('cover-set');
+    cover_url = coverUrlFor(store.getAlbumById(id));
   }
 
-  if (mode === 'embedded') {
-    const patches = {};
-    const snapshots = {};
-    for (const t of tracks) {
+  const items = [];
+  const patches = {};
+  const snapshots = {};
+  const operations = {};
+  let files = 0;
+  if (wantEmbedded) {
+    for (const t of writable) {
       patches[String(t.id)] = { picture: { useJobPicture: true } };
       snapshots[String(t.id)] = { size: t.size, mtime: t.mtime };
+      items.push({ trackId: t.id, path: t.path });
     }
-    const jobId = writeJobs.createJob({
-      type: 'cover-embedded',
-      items: tracks.map((t) => ({ trackId: t.id, path: t.path })),
-      payload: {
-        patches,
-        snapshots,
-        picture: { dataBase64: buffer.toString('base64'), mimeType: mime, description: 'front' },
-      },
-    });
-    writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-    return res.status(202).json({ jobId, mode, files: tracks.length });
+    files += writable.length;
+  }
+  let target = null;
+  if (wantFolder) {
+    // 音声发行写到「发行根」，不能拿第一条曲目的目录代替（它可能只是某个版本子目录）。
+    // 目录里已有 cover.jpg（哪怕写法是 COVER.JPG）就沿用原名，避免大小写敏感的文件系统上出现两份封面
+    target = path.join(folderDir, (await folderCoverFile(folderDir)) ?? FOLDER_COVER_FILE);
+    const firstWritable = writable[0] ?? tracks[0];
+    const lib = firstWritable?.library_id ? store.getLibrary(firstWritable.library_id) : null;
+    const seq = items.length;
+    items.push({ trackId: null, path: target });
+    operations[String(seq)] = {
+      dataBase64: buffer.toString('base64'),
+      backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,
+    };
+    files += 1;
   }
 
-  // folder：写目录 cover.jpg（同卷备份，可撤销）
-  const dir = path.dirname(tracks[0].path);
-  const target = path.join(dir, 'cover.jpg');
-  const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
+  if (!items.length) {
+    return res.json({ ok: true, mode: 'db', modes, cover_url });
+  }
+
   const jobId = writeJobs.createJob({
-    type: 'cover-folder',
-    items: [{ trackId: null, path: target }],
+    type: wantEmbedded && wantFolder ? 'cover-mixed' : (wantEmbedded ? 'cover-embedded' : 'cover-folder'),
+    items,
     payload: {
-      operations: {
-        0: {
-          dataBase64: buffer.toString('base64'),
-          backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,
-        },
-      },
+      patches,
+      snapshots,
+      operations,
+      picture: { dataBase64: buffer.toString('base64'), mimeType: mime, description: 'front' },
     },
   });
   writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-  return res.status(202).json({ jobId, mode, target });
+  return res.status(202).json({
+    jobId,
+    mode: items.length > 1 || (wantEmbedded && wantFolder) ? 'mixed' : (wantEmbedded ? 'embedded' : 'folder'),
+    modes,
+    dbUpdated: wantDb,
+    files,
+    target,
+    cover_url,
+  });
 }));
 
-/** 移除封面：embedded 清空内嵌图；folder 删除 cover.jpg（需显式确认）；db 仅清库内引用 */
+/** 移除封面：按勾选移除——内嵌图清空 / 目录 cover.jpg 删除 / 库内记录清除，互不影响 */
 app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const album = store.getAlbumById(id);
@@ -1340,51 +1549,74 @@ app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   if (isScanning()) return res.status(409).json({ error: '扫描进行中，请稍后再试' });
   if (writeJobs.isWriting()) return res.status(409).json({ error: '已有写任务在进行中' });
 
-  const mode = ['embedded', 'folder', 'db'].includes(req.body?.mode) ? req.body.mode : 'db';
+  const requested = Array.isArray(req.body?.modes)
+    ? req.body.modes
+    : [req.body?.mode];
+  const modes = [...new Set(requested.filter((m) => ['embedded', 'folder', 'db'].includes(m)))];
+  if (!modes.length) return badRequest(res, '请至少勾选一种要移除的封面存放方式');
+  const wantEmbedded = modes.includes('embedded');
+  const wantFolder = modes.includes('folder');
+  const wantDb = modes.includes('db');
   const tracks = store.listAlbumTracks(id);
-  store.clearCover(id);
-  scheduleAssetBackup('cover-remove');
+  const writable = writableTracksFor(tracks);
 
-  if (mode === 'db' || !tracks.length) {
-    return res.json({ ok: true, mode: 'db', cleared: true });
+  if (wantEmbedded && !writable.length) {
+    return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），无法清除内嵌封面；如需清除库内显示请勾选「软件库记录」');
+  }
+  const folderDir = wantFolder ? coverDirectoryFor(album, tracks) : null;
+  if (wantFolder && !folderDir) {
+    return badRequest(res, '该发行来自压缩包，包内文件只读，不能删除目录封面；如需清除库内显示请勾选「软件库记录」');
   }
 
-  if (mode === 'embedded') {
-    const patches = {};
-    const snapshots = {};
-    for (const t of tracks) {
+  if (wantDb) {
+    store.clearCover(id);
+    scheduleAssetBackup('cover-remove');
+  }
+
+  const items = [];
+  const patches = {};
+  const snapshots = {};
+  const operations = {};
+  if (wantEmbedded) {
+    for (const t of writable) {
       patches[String(t.id)] = { picture: null };
       snapshots[String(t.id)] = { size: t.size, mtime: t.mtime };
+      items.push({ trackId: t.id, path: t.path });
     }
-    const jobId = writeJobs.createJob({
-      type: 'cover-embedded',
-      items: tracks.map((t) => ({ trackId: t.id, path: t.path })),
-      payload: { patches, snapshots },
-    });
-    writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-    return res.status(202).json({ jobId, mode, files: tracks.length });
   }
 
-  // folder：删除目录里的 cover.jpg（改名进备份目录，可撤销）
-  const dir = path.dirname(tracks[0].path);
-  const names = [];
-  for (const name of FOLDER_COVER_NAMES) {
-    if (fs.existsSync(path.join(dir, name))) names.push(name);
-  }
-  if (!names.length) return res.json({ ok: true, mode: 'folder', deleted: 0 });
-  const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
-  const jobId = writeJobs.createJob({
-    type: 'cover-folder',
-    items: names.map((name) => ({ trackId: null, path: path.join(dir, name) })),
-    payload: {
-      operations: Object.fromEntries(names.map((name, i) => [String(i), {
+  if (wantFolder) {
+    const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
+    // 只删目录封面那一个文件（大小写按磁盘上的写法）
+    const name = await folderCoverFile(folderDir);
+    if (name) {
+      const seq = items.length;
+      items.push({ trackId: null, path: path.join(folderDir, name) });
+      operations[String(seq)] = {
         kind: 'delete-file',
         backupRoot: lib?.path ? path.join(lib.path, '.lam-undo') : undefined,
-      }])),
-    },
+      };
+    }
+  }
+
+  if (!items.length) {
+    return res.json({ ok: true, mode: 'db', modes, deleted: 0, cleared: wantDb });
+  }
+
+  const jobId = writeJobs.createJob({
+    type: wantEmbedded && wantFolder ? 'cover-mixed' : (wantEmbedded ? 'cover-embedded' : 'cover-folder'),
+    items,
+    payload: { patches, snapshots, operations },
   });
   writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
-  return res.status(202).json({ jobId, mode, deleted: names.length });
+  return res.status(202).json({
+    jobId,
+    mode: (wantEmbedded && wantFolder) || items.length > 1 ? 'mixed' : (wantEmbedded ? 'embedded' : 'folder'),
+    modes,
+    dbCleared: wantDb,
+    files: items.length,
+    deleted: items.length,
+  });
 }));
 
 /* ------------------------------------------------------------ maintenance */
