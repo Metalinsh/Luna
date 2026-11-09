@@ -228,6 +228,57 @@ try {
     }
     const cleared = await parseFile(copy, { duration: false, skipCovers: false });
     ok('内嵌封面可移除', (cleared.common.picture?.length ?? 0) === 0);
+
+    // 三种存放位置互相独立：同时写入，再只移除其中一项，另外两项应保持不变
+    const waitJob = async (jobId) => {
+      for (let i = 0; i < 60; i += 1) {
+        const j = (await api(`/api/jobs/${jobId}`)).body.job;
+        if (j && ['done', 'failed', 'undone'].includes(j.status)) return j;
+        await sleep(300);
+      }
+      return null;
+    };
+
+    const mixedRes = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'POST', body: { imageBase64, modes: ['embedded', 'folder', 'db'] },
+    });
+    ok('多选封面写入请求被接受', mixedRes.status === 202 && mixedRes.body.jobId > 0,
+      `job #${mixedRes.body.jobId} · ${mixedRes.body.files} 个文件`);
+    await waitJob(mixedRes.body.jobId);
+    const mixedState = (await api(`/api/albums/${checkAlbum.id}/cover/state`)).body;
+    ok('内嵌 / 目录 / 库内三处同时生效', Boolean(mixedState.modes?.embedded
+      && mixedState.modes.folder && mixedState.modes.db), JSON.stringify(mixedState.modes));
+
+    // 不传图片、只勾库内记录：服务端应沿用专辑现有封面
+    const reuseRes = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'POST', body: { reuseCurrent: true, modes: ['db'] },
+    });
+    ok('未选图时沿用现有封面', reuseRes.status === 200 && Boolean(reuseRes.body.cover_url),
+      reuseRes.body.cover_url ?? reuseRes.body.error);
+
+    const rmEmbedded = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'DELETE', body: { modes: ['embedded'] },
+    });
+    await waitJob(rmEmbedded.body.jobId);
+    const afterEmbedded = (await api(`/api/albums/${checkAlbum.id}/cover/state`)).body;
+    ok('移除只作用于勾选项', !afterEmbedded.modes?.embedded
+      && afterEmbedded.modes.folder && afterEmbedded.modes.db,
+      JSON.stringify(afterEmbedded.modes));
+    const stillEmbedded = await parseFile(copy, { duration: false, skipCovers: false });
+    ok('被勾选的内嵌封面确已清空', (stillEmbedded.common.picture?.length ?? 0) === 0);
+
+    const rmRest = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'DELETE', body: { modes: ['folder', 'db'] },
+    });
+    if (rmRest.body.jobId) await waitJob(rmRest.body.jobId);
+    const finalState = (await api(`/api/albums/${checkAlbum.id}/cover/state`)).body;
+    ok('剩余勾选项移除完毕', !finalState.modes?.embedded && !finalState.modes.folder
+      && !finalState.modes.db, JSON.stringify(finalState.modes));
+    const noSourceRes = await api(`/api/albums/${checkAlbum.id}/cover`, {
+      method: 'POST', body: { reuseCurrent: true, modes: ['db'] },
+    });
+    ok('三处都空时无法沿用封面', noSourceRes.status === 400, noSourceRes.body.error);
+    fs.rmSync(folderFile, { force: true });
   } else {
     ok('封面写入测试（无可用封面素材，跳过）', true, 'skip');
   }

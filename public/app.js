@@ -2514,7 +2514,7 @@ const editState = {
   dirty: new Set(), cleared: new Set(), clearedValues: new Map(),
   trackCleared: new Set(), trackClearedValues: new Map(),
   pendingCover: null, confirmed: false, voice: false,
-  /** 用户勾选的封面写入方式；null = 用默认值 */
+  /** 封面三个位置的勾选状态（embedded/folder/db）；null = 服务端状态还没取到 */
   coverModes: null,
   /** 疑似乱码自动修复：key → { key, label, original, fixed, encoding, confidence } */
   autofixes: new Map(),
@@ -2570,10 +2570,11 @@ function autofixValue(key, fallback) {
 async function openEditDrawer(albumId) {
   const base = `/api/albums/${encodeURIComponent(albumId)}`;
   // 详情接口给的是展示数据；编辑需要逐文件曲目 + 乱码自检结果。
-  const [detail, editTracks, suggestionRes] = await Promise.all([
+  const [detail, editTracks, suggestionRes, coverStateRes] = await Promise.all([
     api(base),
     api(`${base}/edit-tracks`).catch(() => null),
     api(`${base}/edit-suggestions`).catch(() => ({ suggestions: [] })),
+    api(`${base}/cover/state`).catch(() => null),
   ]);
   const { album } = detail;
   const tracks = editTracks?.tracks ?? detail.tracks;
@@ -2588,7 +2589,10 @@ async function openEditDrawer(albumId) {
   editState.pendingCover = null;
   editState.confirmed = false;
   editState.voice = Boolean(album.is_voice);
-  editState.coverModes = null;
+  // 复选框反映当前状态：三种位置各自有没有封面；之后用户可以增删勾选
+  editState.coverModes = coverStateRes?.modes
+    ? Object.entries(coverStateRes.modes).filter(([, on]) => on).map(([m]) => m)
+    : null;
   editState.autofixes = new Map();
   const readonlyTrackIds = new Set(tracks
     .filter((t) => t.source_kind === 'archive_member' || t.archive_id != null)
@@ -2656,11 +2660,10 @@ function renderEditDrawer() {
   const pending = editState.pendingCover;
   const voice = editState.voice;
   const writableCount = tracks.filter((t) => t.source_kind !== 'archive_member' && t.archive_id == null).length;
-  const coverDefault = voice ? 'db' : 'embedded';
-  const coverModes = Array.isArray(editState.coverModes) && editState.coverModes.length
+  // 勾选框显示当前状态：打开抽屉时从 /cover/state 读取；读不到时退回默认勾选
+  const coverModes = Array.isArray(editState.coverModes)
     ? editState.coverModes
-    : [coverDefault];
-  const hasCover = Boolean(a.cover_url || pending);
+    : [voice ? 'db' : 'embedded'];
   const autofixCount = editState.autofixes.size;
 
   $('#editBody').innerHTML = `
@@ -2689,23 +2692,23 @@ function renderEditDrawer() {
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn" id="pickCoverBtn" style="padding:6px 10px">选择图片…</button>
             <button class="btn btn-primary" id="applyCoverBtn" style="padding:6px 10px"
-              ${pending ? '' : 'disabled'}>应用封面</button>
+              title="写入勾选位置的封面（未重新选图时沿用当前封面）">应用封面</button>
             <button class="btn btn-ghost" id="removeCoverBtn" style="padding:6px 10px"
-              title="按勾选的封面方式移除（「仅记录在软件内」= 只清库内）"
-              ${a.cover_url ? '' : 'hidden'}>移除封面</button>
+              title="移除勾选位置的封面">移除封面</button>
           </div>
-          <div class="cover-modes" id="coverModes" ${hasCover ? '' : 'hidden'}>
+          <div class="cover-modes" id="coverModes">
             <label><input type="checkbox" name="coverMode" value="embedded"
               ${coverModes.includes('embedded') ? 'checked' : ''} />
-              写入每首曲目的内嵌封面（跨软件可见，体积增加）</label>
+              文件内嵌封面（写进每个音频文件，跨软件可见）</label>
             <label><input type="checkbox" name="coverMode" value="folder"
               ${coverModes.includes('folder') ? 'checked' : ''} />
-              ${voice ? '只写发行根目录 cover.jpg（省空间，拷走单文件会丢）' : '只写目录 cover.jpg（省空间，拷走单文件会丢）'}</label>
+              ${voice ? '发行根目录 cover.jpg（文件体积不变）' : '专辑目录 cover.jpg（文件体积不变）'}</label>
             <label><input type="checkbox" name="coverMode" value="db"
               ${coverModes.includes('db') ? 'checked' : ''} />
-              仅记录在软件内（不写文件，重建索引会丢）</label>
+              软件库记录（本软件内的封面显示）</label>
           </div>
-          ${voice ? `<div class="set-note" id="coverWriteNote" ${hasCover ? '' : 'hidden'}>当前可写回 ${writableCount} 个磁盘曲目；
+          <div class="set-note">勾选框显示各位置当前有没有封面；「应用」写入勾选项（没重新选图时沿用现有封面），「移除」删除勾选项。</div>
+          ${voice ? `<div class="set-note" id="coverWriteNote">当前可写回 ${writableCount} 个磁盘曲目；
             ${tracks.length - writableCount} 个压缩包内曲目会跳过。</div>` : ''}
         </div>
       </div>
@@ -3069,52 +3072,53 @@ function restoreInputs(map) {
 
 /* ------------------------------------------------------------ 封面操作 */
 
+/** 把封面的预览 / 来源 / 勾选状态刷成服务端真实状态（选项始终可见，勾选=当前位置有没有封面） */
 async function refreshCoverStateInDrawer() {
   if (!editState.albumId) return;
   try {
-    const { album } = await api(`/api/albums/${encodeURIComponent(editState.albumId)}`);
-    editState.album.cover_url = album.cover_url;
-    editState.album.cover_source = album.cover_source;
+    const st = await api(`/api/albums/${encodeURIComponent(editState.albumId)}/cover/state`);
+    const modes = st?.modes;
+    editState.album.cover_url = st.cover_url;
+    editState.album.cover_source = st.cover_source;
     editState.pendingCover = null;
+    if (modes) editState.coverModes = Object.entries(modes).filter(([, on]) => on).map(([m]) => m);
     const preview = $('#coverPreview');
-    if (preview) preview.style.backgroundImage = album.cover_url ? `url('${album.cover_url}')` : '';
+    if (preview) preview.style.backgroundImage = st.cover_url ? `url('${st.cover_url}')` : '';
     const source = $('#coverSourceText');
-    if (source) source.textContent = `当前来源：${album.cover_source ?? '无'}`;
-    const modes = $('#coverModes');
-    if (modes) modes.hidden = !album.cover_url;
-    const note = $('#coverWriteNote');
-    if (note) note.hidden = !album.cover_url;
-    const remove = $('#removeCoverBtn');
-    if (remove) remove.hidden = !album.cover_url;
-    const apply = $('#applyCoverBtn');
-    if (apply) { apply.disabled = true; apply.textContent = '应用封面'; }
+    if (source) source.textContent = `当前来源：${st.cover_source ?? '无'}`;
+    $$('#editBody input[name="coverMode"]').forEach((i) => {
+      i.checked = Boolean(modes?.[i.value]);
+    });
   } catch { /* 刷新封面展示失败不影响已提交的任务 */ }
 }
 
 async function applyCover() {
-  if (!editState.pendingCover) return;
   const modes = $$('#editBody input[name="coverMode"]:checked').map((i) => i.value);
   if (!modes.length) {
-    toast('请选择封面写入方式', true);
+    toast('请至少勾选一种封面存放方式', true);
     return;
   }
+  // 没重新选图就沿用专辑现有的封面：勾哪些位置，就把封面写到哪些位置
+  const body = editState.pendingCover
+    ? { imageBase64: editState.pendingCover, modes }
+    : { reuseCurrent: true, modes };
   const btn = $('#applyCoverBtn');
   btn.disabled = true;
   btn.textContent = '写入中…';
   try {
-    const res = await api(`/api/albums/${editState.albumId}/cover`, {
-      method: 'POST',
-      body: { imageBase64: editState.pendingCover, modes },
-    });
-    await refreshCoverStateInDrawer();
+    const res = await api(`/api/albums/${editState.albumId}/cover`, { method: 'POST', body });
     if (res.jobId) {
+      // 文件任务还在跑：等 pollJob 收尾时再同步勾选状态，免得中途覆盖用户刚做的勾选
+      editState.pendingCover = null;
       toast(`已开始写入封面（${res.files} 个文件）`);
       pollJob(res.jobId);
     } else {
-      toast('封面已记录（仅存软件内）');
+      await refreshCoverStateInDrawer();
+      toast('封面已保存到软件库');
     }
   } catch (err) {
     toast(err.message, true);
+  } finally {
     btn.disabled = false;
     btn.textContent = '应用封面';
   }
@@ -3122,20 +3126,28 @@ async function applyCover() {
 
 async function removeCover() {
   const modes = $$('#editBody input[name="coverMode"]:checked').map((i) => i.value);
-  if (!modes.length) modes.push('db');
+  if (!modes.length) {
+    toast('请先勾选要移除的封面位置', true);
+    return;
+  }
+  const btn = $('#removeCoverBtn');
+  btn.disabled = true;
   try {
     const res = await api(`/api/albums/${editState.albumId}/cover`, {
       method: 'DELETE', body: { modes },
     });
-    await refreshCoverStateInDrawer();
     if (res.jobId) {
       toast(`已开始移除封面文件（${res.deleted ?? res.files} 个）`);
+      await refreshCoverStateInDrawer();
       pollJob(res.jobId);
     } else {
-      toast('已移除封面记录');
+      await refreshCoverStateInDrawer();
+      toast(res.cleared ? '已移除勾选的封面' : '勾选的位置没有可移除的封面');
     }
   } catch (err) {
     toast(err.message, true);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -3174,7 +3186,12 @@ async function pollJob(jobId) {
 
       clearInterval(jobTimer);
       jobTimer = null;
-      if (drawerOpen) $('#editSaveBtn').disabled = false;
+      if (drawerOpen) {
+        $('#editSaveBtn').disabled = false;
+        // 封面任务（含撤销）完成后重新读取三个位置的状态，勾选框跟着真实情况走
+        if (job.type === 'cover-embedded' || job.type === 'cover-folder'
+          || job.type === 'cover-mixed' || job.type === 'undo') await refreshCoverStateInDrawer();
+      }
       const undoable = job.items.some((i) => i.backup_file);
       $('#jobUndoBtn').hidden = !undoable;
       $('#jobUndoBtn').dataset.jobId = String(jobId);
@@ -3204,6 +3221,8 @@ async function undoJob(jobId) {
     toast(`已撤销：还原 ${res.restored} 个文件${res.failed ? `，${res.failed} 个失败` : ''}`);
     $('#jobBar').hidden = true;
     await refreshCurrent();
+    // 撤销的如果是封面任务，抽屉里的勾选状态要跟着回到撤销前的真实情况
+    if (!$('#editDrawer').hidden) await refreshCoverStateInDrawer();
   } catch (err) {
     toast(err.message, true);
   }
@@ -3664,14 +3683,9 @@ function bindEvents() {
   });
   $('#editBody').addEventListener('change', (e) => {
     if (!e.target.matches('input[name="coverMode"]')) return;
-    const all = $$('#editBody input[name="coverMode"]');
-    if (e.target.value === 'db' && e.target.checked) {
-      all.forEach((i) => { if (i !== e.target) i.checked = false; });
-    } else if (e.target.value !== 'db' && e.target.checked) {
-      const db = all.find((i) => i.value === 'db');
-      if (db) db.checked = false;
-    }
-    editState.coverModes = all.filter((i) => i.checked).map((i) => i.value);
+    // 三个位置互相独立，不互斥：勾选集合就是要应用 / 移除的范围
+    editState.coverModes = $$('#editBody input[name="coverMode"]')
+      .filter((i) => i.checked).map((i) => i.value);
   });
   $('#editBody').addEventListener('click', (e) => {
     const clearBtn = e.target.closest('[data-clear]');
@@ -3706,13 +3720,7 @@ function bindEvents() {
       editState.pendingCover = String(reader.result);
       const preview = $('#coverPreview');
       if (preview) preview.style.backgroundImage = `url('${editState.pendingCover}')`;
-      const btn = $('#applyCoverBtn');
-      if (btn) { btn.disabled = false; btn.textContent = '应用封面'; }
-      const modes = $('#coverModes');
-      if (modes) modes.hidden = false;
-      const note = $('#coverWriteNote');
-      if (note) note.hidden = false;
-      toast('已选择图片，点「应用封面」写入');
+      toast('已选择图片，点「应用封面」写入勾选的位置');
     };
     reader.readAsDataURL(file);
   });

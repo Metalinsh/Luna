@@ -27,6 +27,7 @@ const VIDEO_MIME = {
 };
 import * as writeJobs from './write-jobs.mjs';
 import * as writers from './writers.mjs';
+import { parseFile } from 'music-metadata';
 import { repairMojibake } from './mojibake.mjs';
 import {
   scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
@@ -1342,7 +1343,81 @@ app.get('/api/albums/:id/cover/candidates', asyncRoute(async (req, res) => {
   });
 }));
 
-/** 设置封面：embedded 写入每首曲目内嵌图；folder 写目录 cover.jpg；db 仅存库 */
+/** 封面当前落在哪些位置：内嵌图 / 目录 cover.jpg / 库内记录。编辑抽屉的复选框直接显示这份状态 */
+app.get('/api/albums/:id/cover/state', asyncRoute(async (req, res) => {
+  const id = parseId(req.params.id);
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+  const tracks = store.listAlbumTracks(id);
+  const writable = writableTracksFor(tracks);
+  const dir = coverDirectoryFor(album, tracks);
+  const folderCover = dir
+    ? FOLDER_COVER_NAMES.find((n) => fs.existsSync(path.join(dir, n))) ?? null
+    : null;
+  res.json({
+    modes: {
+      embedded: await embeddedCoverPresent(writable),
+      folder: Boolean(folderCover),
+      db: Boolean(album.cover_hash),
+    },
+    embeddedTracks: writable.filter((t) => t.has_cover).length,
+    writableCount: writable.length,
+    trackCount: tracks.length,
+    folderDir: dir,
+    folderCover,
+    cover_url: coverUrlFor(album),
+    cover_source: album.cover_source,
+  });
+}));
+
+/** 专辑里是否真的有内嵌封面：has_cover 优先，全为 0 时抽查第一个可写文件（clearCover 会把标记一起清零） */
+async function embeddedCoverPresent(writable) {
+  if (writable.some((t) => t.has_cover)) return true;
+  for (const t of writable.slice(0, 1)) {
+    try {
+      const meta = await parseFile(t.path, { duration: false, skipCovers: false });
+      if ((meta.common.picture?.length ?? 0) > 0) return true;
+    } catch { /* 读不到就按 has_cover 的结果 */ }
+  }
+  return false;
+}
+
+/** 沿用专辑现有的封面：库内文件 → 目录 cover.jpg → 曲目内嵌图；返回 null 表示无处可沿用 */
+async function existingCoverBuffer(album, tracks) {
+  if (album.cover_file) {
+    const file = path.join(COVER_DIR, path.basename(String(album.cover_file)));
+    try {
+      const buffer = await fsp.readFile(file);
+      return { buffer, mime: album.cover_mime ?? maintenance.detectImageMime(buffer) };
+    } catch { /* 库内文件缺失，继续找下一个来源 */ }
+  }
+  const dir = coverDirectoryFor(album, tracks);
+  if (dir) {
+    for (const name of FOLDER_COVER_NAMES) {
+      try {
+        const buffer = await fsp.readFile(path.join(dir, name));
+        const mime = maintenance.detectImageMime(buffer);
+        if (mime) return { buffer, mime };
+      } catch { /* 这个文件名不存在，试下一个 */ }
+    }
+  }
+  const writable = writableTracksFor(tracks);
+  // 优先看有标记的曲目；没有标记时（has_cover 被清过）再抽查前几个文件
+  const pool = writable.filter((t) => t.has_cover);
+  for (const t of (pool.length ? pool : writable.slice(0, 3))) {
+    try {
+      const meta = await parseFile(t.path, { duration: false, skipCovers: false });
+      const pic = meta.common.picture?.[0];
+      if (!pic?.data?.length) continue;
+      const buffer = Buffer.from(pic.data);
+      const mime = maintenance.detectImageMime(buffer) ?? pic.format ?? 'image/jpeg';
+      return { buffer, mime };
+    } catch { /* 换下一首 */ }
+  }
+  return null;
+}
+
+/** 设置封面：按勾选写入，内嵌 / 目录 cover.jpg / 库内记录 三项互不影响 */
 app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const album = store.getAlbumById(id);
@@ -1354,42 +1429,51 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
     ? req.body.modes
     : [req.body?.mode];
   const modes = [...new Set(requested.filter((m) => ['embedded', 'folder', 'db'].includes(m)))];
-  if (!modes.length) modes.push(album.kind === 'voice' ? 'db' : 'embedded');
-  // db 与文件写入不是并列关系：只要选了嵌入/目录，就一定会写库内记录。
-  const fileModes = modes.filter((m) => m !== 'db');
+  if (!modes.length) return badRequest(res, '请至少勾选一种封面存放方式');
+  // 三种方式互相独立、可同时生效；未勾选的那一种不会被改动。
+  const wantEmbedded = modes.includes('embedded');
+  const wantFolder = modes.includes('folder');
+  const wantDb = modes.includes('db');
+
+  const tracks = store.listAlbumTracks(id);
+  if (!tracks.length) return badRequest(res, '该专辑没有曲目');
+  const writable = writableTracksFor(tracks);
+  if (wantEmbedded && !writable.length) {
+    return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），请改选「软件库记录」');
+  }
+  const folderDir = wantFolder ? coverDirectoryFor(album, tracks) : null;
+  if (wantFolder && !folderDir) {
+    return badRequest(res, '该发行来自压缩包，包内文件只读，不能写目录封面；请改选「软件库记录」');
+  }
 
   let buffer = null;
+  let mime = null;
   if (req.body?.imageBase64) {
     buffer = Buffer.from(String(req.body.imageBase64).replace(/^data:[^;]+;base64,/, ''), 'base64');
   } else if (req.body?.sourcePath) {
     const src = path.resolve(String(req.body.sourcePath));
     try { buffer = await fsp.readFile(src); } catch { return badRequest(res, '图片路径不可读'); }
+  } else if (req.body?.reuseCurrent) {
+    // 没重新选图：沿用专辑现有封面，把同一张图补写到新勾选的位置
+    const found = await existingCoverBuffer(album, tracks);
+    if (!found) return badRequest(res, '这张专辑当前没有可沿用的封面，请先选择图片');
+    buffer = found.buffer;
+    mime = found.mime;
   }
   if (!buffer?.length) return badRequest(res, '缺少图片内容');
   if (buffer.length > MAX_COVER_BYTES) {
     return badRequest(res, `图片超过 ${MAX_COVER_BYTES / 1048576} MB，请先压缩`);
   }
 
-  const mime = maintenance.detectImageMime(buffer);
+  mime = maintenance.detectImageMime(buffer) ?? mime;
   if (!mime) return badRequest(res, '不是可识别的图片（支持 JPEG / PNG / WebP / GIF / BMP）');
 
-  const tracks = store.listAlbumTracks(id);
-  if (!tracks.length) return badRequest(res, '该专辑没有曲目');
-  const writable = writableTracksFor(tracks);
-  if (fileModes.includes('embedded') && !writable.length) {
-    return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），请选择「仅记录在软件内」');
-  }
-  const folderDir = fileModes.includes('folder') ? coverDirectoryFor(album, tracks) : null;
-  if (fileModes.includes('folder') && !folderDir) {
-    return badRequest(res, '该发行来自压缩包，包内文件只读，不能写入目录封面；请选择「仅记录在软件内」');
-  }
-
-  const stored = maintenance.persistCoverImage(buffer, mime, 'manual');
-  store.setManualCover(id, stored);
-  scheduleAssetBackup('cover-set');
-
-  if (!fileModes.length) {
-    return res.json({ ok: true, mode: 'db', modes: ['db'], cover_url: coverUrlFor(store.getAlbumById(id)) });
+  let cover_url = coverUrlFor(album);
+  if (wantDb) {
+    const stored = maintenance.persistCoverImage(buffer, mime, 'manual');
+    store.setManualCover(id, stored);
+    scheduleAssetBackup('cover-set');
+    cover_url = coverUrlFor(store.getAlbumById(id));
   }
 
   const items = [];
@@ -1397,7 +1481,7 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   const snapshots = {};
   const operations = {};
   let files = 0;
-  if (fileModes.includes('embedded')) {
+  if (wantEmbedded) {
     for (const t of writable) {
       patches[String(t.id)] = { picture: { useJobPicture: true } };
       snapshots[String(t.id)] = { size: t.size, mtime: t.mtime };
@@ -1406,7 +1490,7 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
     files += writable.length;
   }
   let target = null;
-  if (fileModes.includes('folder')) {
+  if (wantFolder) {
     // 音声发行写到「发行根」，不能拿第一条曲目的目录代替（它可能只是某个版本子目录）。
     target = path.join(folderDir, 'cover.jpg');
     const firstWritable = writable[0] ?? tracks[0];
@@ -1420,8 +1504,12 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
     files += 1;
   }
 
+  if (!items.length) {
+    return res.json({ ok: true, mode: 'db', modes, cover_url });
+  }
+
   const jobId = writeJobs.createJob({
-    type: fileModes.length > 1 ? 'cover-mixed' : (fileModes[0] === 'embedded' ? 'cover-embedded' : 'cover-folder'),
+    type: wantEmbedded && wantFolder ? 'cover-mixed' : (wantEmbedded ? 'cover-embedded' : 'cover-folder'),
     items,
     payload: {
       patches,
@@ -1433,14 +1521,16 @@ app.post('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
   return res.status(202).json({
     jobId,
-    mode: fileModes.length === 1 ? fileModes[0] : 'mixed',
-    modes: fileModes,
+    mode: items.length > 1 || (wantEmbedded && wantFolder) ? 'mixed' : (wantEmbedded ? 'embedded' : 'folder'),
+    modes,
+    dbUpdated: wantDb,
     files,
     target,
+    cover_url,
   });
 }));
 
-/** 移除封面：embedded 清空内嵌图；folder 删除 cover.jpg（需显式确认）；db 仅清库内引用 */
+/** 移除封面：按勾选移除——内嵌图清空 / 目录 cover.jpg 删除 / 库内记录清除，互不影响 */
 app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   const id = parseId(req.params.id);
   const album = store.getAlbumById(id);
@@ -1452,31 +1542,31 @@ app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
     ? req.body.modes
     : [req.body?.mode];
   const modes = [...new Set(requested.filter((m) => ['embedded', 'folder', 'db'].includes(m)))];
-  if (!modes.length) modes.push('db');
-  const fileModes = modes.filter((m) => m !== 'db');
+  if (!modes.length) return badRequest(res, '请至少勾选一种要移除的封面存放方式');
+  const wantEmbedded = modes.includes('embedded');
+  const wantFolder = modes.includes('folder');
+  const wantDb = modes.includes('db');
   const tracks = store.listAlbumTracks(id);
   const writable = writableTracksFor(tracks);
 
-  if (fileModes.includes('embedded') && !writable.length) {
-    return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），请选择「仅记录在软件内」');
+  if (wantEmbedded && !writable.length) {
+    return badRequest(res, '该专辑没有可写回的磁盘曲目（压缩包内文件只读），无法清除内嵌封面；如需清除库内显示请勾选「软件库记录」');
   }
-  const folderDir = fileModes.includes('folder') ? coverDirectoryFor(album, tracks) : null;
-  if (fileModes.includes('folder') && !folderDir) {
-    return badRequest(res, '该发行来自压缩包，包内文件只读，不能删除目录封面；请选择「仅记录在软件内」');
+  const folderDir = wantFolder ? coverDirectoryFor(album, tracks) : null;
+  if (wantFolder && !folderDir) {
+    return badRequest(res, '该发行来自压缩包，包内文件只读，不能删除目录封面；如需清除库内显示请勾选「软件库记录」');
   }
 
-  store.clearCover(id);
-  scheduleAssetBackup('cover-remove');
-
-  if (!fileModes.length || !tracks.length) {
-    return res.json({ ok: true, mode: 'db', modes: ['db'], cleared: true });
+  if (wantDb) {
+    store.clearCover(id);
+    scheduleAssetBackup('cover-remove');
   }
 
   const items = [];
   const patches = {};
   const snapshots = {};
   const operations = {};
-  if (fileModes.includes('embedded')) {
+  if (wantEmbedded) {
     for (const t of writable) {
       patches[String(t.id)] = { picture: null };
       snapshots[String(t.id)] = { size: t.size, mtime: t.mtime };
@@ -1484,7 +1574,7 @@ app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
     }
   }
 
-  if (fileModes.includes('folder')) {
+  if (wantFolder) {
     const lib = tracks[0].library_id ? store.getLibrary(tracks[0].library_id) : null;
     for (const name of FOLDER_COVER_NAMES) {
       const target = path.join(folderDir, name);
@@ -1499,19 +1589,20 @@ app.delete('/api/albums/:id/cover', asyncRoute(async (req, res) => {
   }
 
   if (!items.length) {
-    return res.json({ ok: true, mode: 'folder', modes: fileModes, deleted: 0, cleared: true });
+    return res.json({ ok: true, mode: 'db', modes, deleted: 0, cleared: wantDb });
   }
 
   const jobId = writeJobs.createJob({
-    type: fileModes.length > 1 ? 'cover-mixed' : (fileModes[0] === 'embedded' ? 'cover-embedded' : 'cover-folder'),
+    type: wantEmbedded && wantFolder ? 'cover-mixed' : (wantEmbedded ? 'cover-embedded' : 'cover-folder'),
     items,
     payload: { patches, snapshots, operations },
   });
   writeJobs.runJob(jobId).catch((err) => console.error('[cover job]', err.message));
   return res.status(202).json({
     jobId,
-    mode: fileModes.length === 1 ? fileModes[0] : 'mixed',
-    modes: fileModes,
+    mode: (wantEmbedded && wantFolder) || items.length > 1 ? 'mixed' : (wantEmbedded ? 'embedded' : 'folder'),
+    modes,
+    dbCleared: wantDb,
     files: items.length,
     deleted: items.length,
   });
