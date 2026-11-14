@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+﻿import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -306,7 +306,18 @@ app.post('/api/desktop-lyrics', (req, res) => {
     }
     if (action === 'lock') return res.json(desktopLyrics.setLocked(true));
     if (action === 'unlock') return res.json(desktopLyrics.setLocked(false));
-    if (action === 'settings') return res.json(desktopLyrics.updateSettings(req.body?.settings ?? {}));
+    if (action === 'focus-main') return res.json(desktopLyrics.focusMain());
+    if (action === 'context-menu') return res.json(desktopLyrics.openMenu());
+    if (action === 'close-menu') return res.json(desktopLyrics.closeMenu());
+    if (action === 'preview') return res.json(desktopLyrics.previewSettings(req.body?.settings ?? {}));
+    if (action === 'rebuild') return res.json(desktopLyrics.rebuild('手动修复'));
+    if (action === 'fix-size') return res.json(desktopLyrics.fixSize(req.body));
+    if (action === 'hover') return res.json(desktopLyrics.setHover(req.body?.inside === true));
+    if (action === 'settings') {
+      const out = desktopLyrics.updateSettings(req.body?.settings ?? {});
+      desktopLyrics.refreshPage();
+      return res.json(out);
+    }
     return badRequest(res, '未知操作');
   } catch (err) {
     return res.status(500).json({ error: `桌面歌词操作失败：${err.message}` });
