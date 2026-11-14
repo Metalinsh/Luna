@@ -124,6 +124,12 @@ export function open(serverUrl) {
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
+    /*
+     * 浮层不需要键盘焦点：一旦它拿到焦点又失焦，Windows 上的透明无边框窗
+     * 会「冒出」一条系统标题栏并一直留着（Electron #46882 / #47440）。
+     * 不聚焦就从根上避开 blur 分支；鼠标点击、拖动仍然正常。
+     */
+    focusable: false,
     title: 'Luna 桌面歌词',
     webPreferences: {
       contextIsolation: true,
@@ -139,6 +145,18 @@ export function open(serverUrl) {
   lyricsWindow.once('ready-to-show', () => lyricsWindow?.showInactive());
   lyricsWindow.on('moved', schedulePersistBounds);
   lyricsWindow.on('resized', schedulePersistBounds);
+  /*
+   * Electron #46882 的兜底：即使窗口以后又因为某种原因失焦，重新断言
+   * 「不可最大化」也能把 Windows 自动补上的那层标题栏收回去。
+   */
+  lyricsWindow.on('blur', () => {
+    if (!lyricsWindow || lyricsWindow.isDestroyed()) return;
+    lyricsWindow.setMaximizable(false);
+  });
+  lyricsWindow.on('focus', () => {
+    if (!lyricsWindow || lyricsWindow.isDestroyed()) return;
+    lyricsWindow.setMaximizable(false);
+  });
   lyricsWindow.on('closed', () => {
     lyricsWindow = null;
     locked = false;
@@ -171,6 +189,14 @@ export function setLocked(next) {
   locked = Boolean(next);
   // forward: true —— 锁定期间仍把鼠标移动事件转给窗口，悬停效果不至于完全卡死
   lyricsWindow.setIgnoreMouseEvents(locked, { forward: true });
+  /*
+   * 锁定会改变窗口的激活 / 样式状态，Windows 可能趁机给透明窗补一层系统标题栏。
+   * 这里把「可缩放 / 可最大化 / 可最小化」全部复位：图标化样式（WS_THICKFRAME 等）
+   * 一旦被挂上就可能显示标题；锁定后本来也无法拖动边框改变大小，关掉没有副作用。
+   */
+  lyricsWindow.setResizable(!locked);
+  lyricsWindow.setMaximizable(false);
+  lyricsWindow.setMinimizable(false);
   try { writeConfig({ desktopLyrics: { locked } }); } catch { /* 忽略 */ }
   return { ok: true, ...status() };
 }
