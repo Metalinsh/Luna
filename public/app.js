@@ -2094,8 +2094,32 @@ let lastTimeBroadcast = 0;
  * 只发「track」它可能没赶上。所以窗口加载后会发 hello，这里回一份完整现状。
  */
 lyricsChannel.onmessage = (event) => {
-  if (event.data?.type === 'hello') broadcastCurrentPlayback();
+  const msg = event.data;
+  if (msg?.type === 'hello') { broadcastCurrentPlayback(); return; }
+  if (msg?.type === 'cmd') runLyricCommand(msg.action, msg.value);
 };
+
+/**
+ * 桌面歌词工具条上的播放控制。
+ * 音频元素只在主窗口里，所以歌词窗把命令发过来、由这里执行。
+ */
+function runLyricCommand(action, value) {
+  if (action === 'toggle') {
+    if (audio.paused) audio.play().catch(() => {});
+    else audio.pause();
+    return;
+  }
+  if (action === 'next') { next(); return; }
+  if (action === 'prev') { prev(); return; }
+  if (action === 'seek') {
+    const delta = Number(value) || 0;
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    audio.currentTime = Math.min(Math.max(audio.currentTime + delta, 0), audio.duration);
+    $('#curTime').textContent = fmtTime(audio.currentTime);
+    syncLyrics(audio.currentTime * 1000);
+    broadcastTime(true);
+  }
+}
 
 function broadcastLyrics(message) {
   try { lyricsChannel.postMessage(message); } catch { /* 忽略 */ }
