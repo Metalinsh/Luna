@@ -28,6 +28,10 @@ const VIDEO_MIME = {
 import * as writeJobs from './write-jobs.mjs';
 import * as writers from './writers.mjs';
 import {
+  normalizeUserPath, decodePickedPath, checkDirectory,
+} from './user-path.mjs';
+import { nativeDialogAvailable, showNativeDialog } from './desktop-dialog.mjs';
+import {
   scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
   isUnderAsmrFolder,
 } from './scanner.mjs';
@@ -62,6 +66,54 @@ const parseId = (value) => {
   return Number.isInteger(id) && id > 0 ? id : null;
 };
 
+/* ---------------------------------------------------- PowerShell 系统对话框 */
+
+/**
+ * 运行一段 PowerShell 脚本，返回 stdout（已 trim）。
+ *
+ * 用 `-EncodedCommand`（UTF-16LE + Base64）传脚本，避免命令行里的中文被按
+ * 系统代码页转码；输出侧由调用方用 Base64 传输（见 user-path.decodePickedPath）。
+ * Windows PowerShell 不存在时回退 pwsh。
+ */
+function runPowerShell(script, { timeout = 180000 } = {}) {
+  const encoded = Buffer.from(String(script), 'utf16le').toString('base64');
+  const args = ['-NoProfile', '-STA', '-EncodedCommand', encoded];
+  const run = (exe) => new Promise((resolve, reject) => {
+    execFile(exe, args, { timeout, windowsHide: true, encoding: 'utf8' }, (err, stdout) => {
+      if (err) reject(err); else resolve(String(stdout ?? '').trim());
+    });
+  });
+  return run('powershell.exe').catch(() => run('pwsh.exe'));
+}
+
+/**
+ * 选目录脚本：选中后把路径按 UTF-8 编码成 Base64 写 stdout。
+ * 纯 ASCII 输出，不受 chcp / 系统语言影响（v1.2.7 乱码修复的关键）。
+ */
+const PICK_FOLDER_SCRIPT = [
+  'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+  '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
+  "$d.Description = '选择音乐目录'",
+  '$d.ShowNewFolderButton = $true',
+  'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+  '  $b = [System.Text.Encoding]::UTF8.GetBytes($d.SelectedPath)',
+  '  [Console]::Out.Write([Convert]::ToBase64String($b))',
+  '}',
+].join('; ');
+
+/** 选图片脚本：同上，路径同样走 Base64 */
+const PICK_IMAGE_SCRIPT = [
+  'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+  '$d = New-Object System.Windows.Forms.OpenFileDialog',
+  "$d.Title = '选择背景图片'",
+  "$d.Filter = '图片文件|*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp|所有文件|*.*'",
+  '$d.CheckFileExists = $true',
+  'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
+  '  $b = [System.Text.Encoding]::UTF8.GetBytes($d.FileName)',
+  '  [Console]::Out.Write([Convert]::ToBase64String($b))',
+  '}',
+].join('; ');
+
 /* ------------------------------------------------------------------- health */
 
 app.get('/api/health', (req, res) => {
@@ -73,6 +125,11 @@ app.get('/api/health', (req, res) => {
     dataDir: DATA_DIR,
     uptime: process.uptime(),
     migration: store.migrationReport,
+    // 桌面外壳信息：是否跑在 Electron 里、能不能用原生选择框（浏览器模式为 false）
+    desktop: {
+      electron: process.versions.electron ?? null,
+      nativeDialog: nativeDialogAvailable(),
+    },
     // DLsite 索引（音声社团 / 声优自动补齐的数据源）：找不到时如实说明路径
     dlsite: dlsite.indexInfo(),
   });
@@ -103,17 +160,17 @@ app.get('/api/libraries', (req, res) => {
 });
 
 app.post('/api/libraries', asyncRoute(async (req, res) => {
-  const raw = String(req.body?.path ?? '').trim().replace(/^"|"$/g, '');
-  if (!raw) return badRequest(res, '缺少目录路径');
+  /*
+   * 路径先规范化（去引号 / 零宽字符、展开 %VAR%、正斜杠转反斜杠、拒绝相对路径），
+   * 再做「存在 + 是目录 + 能列出」三连自检。网络盘失败时给可照做的提示，
+   * 而不是只回一个 ENOENT —— NAS 上「映射盘符不可见」和「路径乱码」都表现为 ENOENT。
+   */
+  const parsed = normalizeUserPath(req.body?.path);
+  if (!parsed.ok) return badRequest(res, parsed.error);
 
-  const target = path.resolve(raw);
-  let stat;
-  try {
-    stat = await fsp.stat(target);
-  } catch (err) {
-    return badRequest(res, `目录不存在或不可访问：${err.code ?? err.message}`);
-  }
-  if (!stat.isDirectory()) return badRequest(res, '路径不是目录');
+  const target = parsed.path;
+  const check = await checkDirectory(target);
+  if (!check.ok) return badRequest(res, check.message);
 
   const existing = store.findLibraryByPath(target);
   const lib = store.addLibrary(target, req.body?.displayName ?? null);
@@ -144,30 +201,42 @@ app.delete('/api/libraries/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * 选完之后的统一收尾：规范化 + 自检，路径不可用时把原因和路径一起返回。
+ * 原生对话框与 PowerShell 兜底共用这一段，避免两套行为漂移。
+ */
+async function finishFolderPick(res, picked) {
+  if (!picked) return res.json({ ok: false, cancelled: true });
+
+  const parsed = normalizeUserPath(picked);
+  if (!parsed.ok) return res.json({ ok: false, path: picked, error: parsed.error });
+
+  const check = await checkDirectory(parsed.path);
+  if (!check.ok) return res.json({ ok: false, path: parsed.path, check, error: check.message });
+  return res.json({ ok: true, path: parsed.path, check });
+}
+
 app.post('/api/dialog/folder', asyncRoute(async (req, res) => {
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
-    '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
-    "$d.Description = '选择目录'",
-    '$d.ShowNewFolderButton = $true',
-    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.SelectedPath) }",
-  ].join('; ');
-
-  const run = (exe) => new Promise((resolve, reject) => {
-    execFile(exe, ['-NoProfile', '-STA', '-Command', script], { timeout: 180000 }, (err, stdout) => {
-      if (err) reject(err); else resolve(String(stdout ?? '').trim());
-    });
-  });
-
   try {
+    /*
+     * 桌面版直接走 Electron 主进程的 dialog（服务就跑在主进程里，无需 preload / IPC）：
+     * 原生返回的路径不经过任何代码页，UNC / 网络位置 / 中文目录天然正确。
+     * 纯 Node / 浏览器模式 showNativeDialog() 返回 null，退回 PowerShell（Base64 传输）。
+     */
+    const native = await showNativeDialog({
+      title: '选择音乐目录',
+      properties: ['openDirectory'],
+      buttonLabel: '选择此目录',
+    }).catch(() => null);
+
     let picked;
-    try {
-      picked = await run('powershell.exe');
-    } catch {
-      picked = await run('pwsh.exe');
+    if (native) {
+      if (native.canceled) return res.json({ ok: false, cancelled: true });
+      picked = native.filePaths[0] ?? '';
+    } else {
+      picked = decodePickedPath(await runPowerShell(PICK_FOLDER_SCRIPT));
     }
-    if (!picked) return res.json({ ok: false, cancelled: true });
-    res.json({ ok: true, path: picked });
+    return await finishFolderPick(res, picked);
   } catch (err) {
     res.status(500).json({ ok: false, error: `无法打开目录选择框：${err.message}` });
   }
@@ -175,33 +244,32 @@ app.post('/api/dialog/folder', asyncRoute(async (req, res) => {
 
 /**
  * 选择图片文件（设置里的自定义背景图用）。
- * 与选目录分开：这里用 OpenFileDialog 并限定图片扩展名。
+ * 与选目录分开：这里限定图片扩展名。
  */
 app.post('/api/dialog/image', asyncRoute(async (req, res) => {
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
-    '$d = New-Object System.Windows.Forms.OpenFileDialog',
-    "$d.Title = '选择背景图片'",
-    "$d.Filter = '图片文件|*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp|所有文件|*.*'",
-    '$d.CheckFileExists = $true',
-    "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }",
-  ].join('; ');
-
-  const run = (exe) => new Promise((resolve, reject) => {
-    execFile(exe, ['-NoProfile', '-STA', '-Command', script], { timeout: 180000 }, (err, stdout) => {
-      if (err) reject(err); else resolve(String(stdout ?? '').trim());
-    });
-  });
-
   try {
+    // 桌面版走原生选图框；浏览器模式退回 PowerShell
+    const native = await showNativeDialog({
+      title: '选择背景图片',
+      properties: ['openFile'],
+      filters: [
+        { name: '图片文件', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+    }).catch(() => null);
+
     let picked;
-    try {
-      picked = await run('powershell.exe');
-    } catch {
-      picked = await run('pwsh.exe');
+    if (native) {
+      if (native.canceled) return res.json({ ok: false, cancelled: true });
+      picked = native.filePaths[0] ?? '';
+    } else {
+      picked = decodePickedPath(await runPowerShell(PICK_IMAGE_SCRIPT));
     }
     if (!picked) return res.json({ ok: false, cancelled: true });
-    res.json({ ok: true, path: picked });
+
+    const parsed = normalizeUserPath(picked);
+    if (!parsed.ok) return res.json({ ok: false, path: picked, error: parsed.error });
+    res.json({ ok: true, path: parsed.path });
   } catch (err) {
     res.status(500).json({ ok: false, error: `无法打开图片选择框：${err.message}` });
   }

@@ -3473,6 +3473,11 @@ function bindEvents() {
     }
   });
 
+  const showLibError = (message) => {
+    const box = $('#libError');
+    box.textContent = message;
+    box.hidden = false;
+  };
   $('#addLibraryBtn').addEventListener('click', () => {
     $('#libError').hidden = true;
     $('#libPathInput').value = '';
@@ -3487,7 +3492,11 @@ function bindEvents() {
     btn.textContent = '等待选择…';
     try {
       const res = await api('/api/dialog/folder', { method: 'POST', body: {} });
-      if (res.ok) $('#libPathInput').value = res.path;
+      if (res.cancelled) return;
+      // 服务端已做过规范化与自检：路径可用则回填，不可用则立刻报原因（含完整路径）
+      if (res.path) $('#libPathInput').value = res.path;
+      if (res.ok) $('#libError').hidden = true;
+      else showLibError(res.error ?? res.check?.message ?? '所选目录不可用');
     } catch (err) {
       toast(`无法打开目录选择框，请手动粘贴路径：${err.message}`, true);
     } finally {
@@ -3508,9 +3517,7 @@ function bindEvents() {
       await loadLibraries();
       pollScan();
     } catch (err) {
-      const box = $('#libError');
-      box.textContent = err.message;
-      box.hidden = false;
+      showLibError(err.message);
     }
   });
   $('#libPathInput').addEventListener('keydown', (e) => {
@@ -4427,8 +4434,9 @@ function bindSettingsBody() {
     try {
       const r = await api('/api/dialog/folder', { method: 'POST', body: {} });
       if (r.cancelled) return;
-      if (r.ok && r.path) $('#setCacheDir').value = r.path;
-      else toast(r.error ?? '未能选择目录', true);
+      // 路径不可用时仍回填，方便用户就地修改；错误原因同时用 toast 说明
+      if (r.path) $('#setCacheDir').value = r.path;
+      if (r.ok === false) toast(r.error ?? r.check?.message ?? '未能选择目录', true);
     } catch (err) {
       toast(`打开目录选择框失败：${err.message}`, true);
     }

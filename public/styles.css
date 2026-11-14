@@ -614,7 +614,12 @@ input[type="range"]::-webkit-slider-thumb {
 .dlg input[type="text"]:focus { border-color: rgba(125,108,245,.7); }
 .dlg-actions { display: flex; align-items: center; gap: 9px; }
 .dlg-actions .spacer { flex: 1; }
-.dlg-error { color: var(--danger); font-size: 12.5px; }
+.dlg-error {
+  color: var(--danger); font-size: 12.5px; line-height: 1.55;
+  /* 路径很长、提示可能有多句：允许换行、可选中复制、超高时自己滚动 */
+  white-space: pre-wrap; word-break: break-all; user-select: text;
+  max-height: 34vh; overflow: auto;
+}
 
 .toast {
   position: fixed; bottom: calc(var(--player-h) + 18px); left: 50%; transform: translateX(-50%);
