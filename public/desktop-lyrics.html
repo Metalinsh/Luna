@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -8,21 +8,24 @@
 </head>
 <body>
   <div class="dl" id="dl">
-    <div class="dl-body">
+    <div class="dl-body" id="dlBody">
       <div class="dl-current" id="dlCurrent"><span class="dl-current-text" id="dlCurrentText">未在播放</span></div>
       <div class="dl-trans" id="dlTrans" hidden></div>
-      <div class="dl-next" id="dlNext"></div>
     </div>
 
     <div class="dl-tools" id="dlTools">
-      <button type="button" data-act="fontDown" title="减小字号">A−</button>
-      <button type="button" data-act="fontUp" title="增大字号">A+</button>
-      <button type="button" data-act="bare" title="隐藏背景，只留文字（再点恢复）">透明</button>
-      <button type="button" data-act="lock" title="锁定后鼠标穿透（在主窗口解锁）">锁定</button>
+      <button type="button" data-act="main" title="打开主程序">♪</button>
+      <button type="button" data-act="prev" title="上一首">⏮</button>
+      <button type="button" data-act="toggle" id="dlPlayBtn" title="播放 / 暂停">▶</button>
+      <button type="button" data-act="next" title="下一首">⏭</button>
+      <button type="button" data-act="back10" title="后退 10 秒">−10s</button>
+      <button type="button" data-act="fwd10" title="前进 10 秒">+10s</button>
+      <button type="button" data-act="lock" title="锁定（鼠标穿透，Ctrl+Alt+L 解锁）"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="3.2" y="7" width="9.6" height="6.8" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 7V5.3a2.4 2.4 0 0 1 4.8 0V7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>
       <button type="button" data-act="close" title="关闭桌面歌词">✕</button>
     </div>
 
-    <div class="dl-locked" id="dlLocked" hidden>已锁定 · 在主窗口点「桌面歌词」解锁</div>
+    <!-- 右键菜单由主进程 Menu.popup 弹出，页面里不用画 -->
+    <div class="dl-locked" id="dlLocked" hidden>已锁定 · Ctrl+Alt+L 解锁 · Ctrl+Alt+R 修复白条</div>
   </div>
   <script type="module" src="/desktop-lyrics.js"></script>
 </body>
