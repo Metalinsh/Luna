@@ -185,6 +185,12 @@ const state = {
   galleryImages: [],
   selecting: false,
   selected: new Set(),
+  /**
+   * 已选专辑的轻量元信息（id → { isVoice }）。
+   * 「全选」会选中尚未加载到专辑墙的分页，所以不能用 state.albums 判断
+   * 选中的音声数量；这里按 id 缓存，手工点选与全选都往里记。
+   */
+  albumMeta: new Map(),
   libraryFilter: null,
   /** 收藏范围：null=不筛收藏；'asmr'=喜欢的ASMR；'album'=喜欢的专辑 */
   favScope: null,
@@ -661,13 +667,15 @@ function tagKindForView() {
   return currentLibraryKind();
 }
 
-function albumQuery(offset) {
+function albumQuery(offset, { limit = PAGE_SIZE, idsOnly = false } = {}) {
   const params = new URLSearchParams({
     q: state.query,
     sort: state.sort,
-    limit: String(PAGE_SIZE),
+    limit: String(limit),
     offset: String(offset),
   });
+  // 全选用：只回 id 与是否音声，跳过标签 / 完整度装配
+  if (idsOnly) params.set('idsOnly', '1');
   const filter = activeTagFilter();
   if (filter.size) {
     params.set('tags', [...filter].join(','));
@@ -691,6 +699,8 @@ async function loadAlbums({ append = false, reuse = false } = {}) {
     state.albumTotal = total;
     state.albumOffset = state.albums.length;
     state.hasMore = hasMore;
+    // 记住类别，供多选条判断「选中的 ASMR 张数」（全选可能包含未加载的分页）
+    for (const a of albums) state.albumMeta.set(Number(a.id), { isVoice: Boolean(a.is_voice) });
   }
   const total = state.albumTotal;
 
@@ -2070,6 +2080,119 @@ function buildShuffleOrder(startIndex = 0) {
   state.shuffleCursor = 0;
 }
 
+/* ---------------------------------------------------- 桌面歌词（状态广播） */
+
+/**
+ * 桌面歌词是**同源的第二个窗口**，用 BroadcastChannel 单向接收播放状态。
+ * 这里只广播，不关心窗口开没开（没开时 postMessage 无副作用）。
+ */
+const lyricsChannel = new BroadcastChannel('luna-playback');
+let lastTimeBroadcast = 0;
+
+/*
+ * 歌词窗口刚打开时，主窗口可能已经播到一半 —— BroadcastChannel 不保留历史消息，
+ * 只发「track」它可能没赶上。所以窗口加载后会发 hello，这里回一份完整现状。
+ */
+lyricsChannel.onmessage = (event) => {
+  if (event.data?.type === 'hello') broadcastCurrentPlayback();
+};
+
+function broadcastLyrics(message) {
+  try { lyricsChannel.postMessage(message); } catch { /* 忽略 */ }
+}
+
+function broadcastTime(force = false, time = null) {
+  const track = state.queue[state.index];
+  if (!track) return;
+  const now = performance.now();
+  if (!force && now - lastTimeBroadcast < 200) return;
+  lastTimeBroadcast = now;
+  broadcastLyrics({
+    type: 'time',
+    trackId: track.id,
+    time: time == null ? audio.currentTime : time,
+    playing: !audio.paused,
+  });
+}
+
+function broadcastTrack(track) {
+  if (!track) return;
+  const lyrics = state.lyricsTrackId === track.id ? state.lyrics : null;
+  broadcastLyrics({
+    type: 'track',
+    trackId: track.id,
+    title: track.title ?? '',
+    artist: track.artist ?? track.album_artist ?? '',
+    lines: lyrics?.lines ?? [],
+    synced: lyrics?.synced === true,
+  });
+  broadcastTime(true, 0);
+}
+
+/** 把「当前这一首 + 当前歌词 + 进度」整套推给刚好打开的歌词窗口 */
+function broadcastCurrentPlayback() {
+  const track = state.queue[state.index];
+  if (!track) {
+    broadcastLyrics({ type: 'idle' });
+    return;
+  }
+  broadcastTrack(track);
+  // 打开窗口时可能已经播到一半：track 消息里的 0 只是占位，这里补真实进度
+  broadcastTime(true);
+  broadcastLyrics({
+    type: 'lyrics',
+    trackId: track.id,
+    lines: state.lyrics?.lines ?? [],
+    synced: state.lyrics?.synced === true,
+  });
+}
+
+async function refreshDesktopLyricsButton() {
+  const btn = $('#desktopLyricsBtn');
+  if (!btn) return;
+  try {
+    const st = await api('/api/desktop-lyrics');
+    btn.classList.toggle('is-on', st.open === true);
+    btn.title = !st.available
+      ? '桌面歌词（仅桌面版支持）'
+      : st.open
+        ? (st.locked ? '桌面歌词已锁定（点击解锁）' : '桌面歌词（点击关闭）')
+        : '桌面歌词';
+  } catch { /* 状态取不到不影响主界面 */ }
+}
+
+async function toggleDesktopLyrics() {
+  try {
+    const st = await api('/api/desktop-lyrics');
+    if (!st.available) { toast('桌面歌词仅桌面版支持', true); return; }
+
+    if (st.open && st.locked) {
+      await api('/api/desktop-lyrics', { method: 'POST', body: { action: 'unlock' } });
+      toast('桌面歌词已解锁');
+    } else if (st.open) {
+      await api('/api/desktop-lyrics', { method: 'POST', body: { action: 'close' } });
+    } else {
+      const res = await api('/api/desktop-lyrics', { method: 'POST', body: { action: 'open' } });
+      if (res.ok === false) { toast(res.error ?? '无法打开桌面歌词', true); return; }
+      // 窗口刚创建，还没有任何播放事件：整份推一次，避免空白直到下一首歌
+      broadcastCurrentPlayback();
+    }
+    await refreshDesktopLyricsButton();
+  } catch (err) {
+    toast(`桌面歌词操作失败：${err.message}`, true);
+  }
+}
+
+/**
+ * 启动时只同步桌面歌词按钮的状态。
+ *
+ * 不自动重开窗口：启动瞬间弹一个置顶窗很容易打断用户，也会干扰界面自动化检查。
+ * 窗口的位置 / 字号 / 透明度仍然记忆，点一下按钮就回到上次的样子。
+ */
+async function restoreDesktopLyrics() {
+  await refreshDesktopLyricsButton();
+}
+
 function playQueue(tracks, startIndex, { cover = null, label = '' } = {}) {
   if (!tracks?.length) return;
   state.queue = tracks;
@@ -2097,6 +2220,7 @@ function playAt(index, { record = true } = {}) {
   audio.play().catch((err) => toast(`无法播放：${err.message}`, true));
   updateNowPlaying(track);
   loadLyricsFor(track);
+  broadcastTrack(track);
 }
 
 function updateNowPlaying(track) {
@@ -2187,9 +2311,16 @@ async function loadLyricsFor(track) {
     if (state.lyricsTrackId !== track.id) return;
     state.lyrics = data;
     renderLyrics();
+    broadcastLyrics({
+      type: 'lyrics',
+      trackId: track.id,
+      lines: data.lines ?? [],
+      synced: data.synced === true,
+    });
   } catch (err) {
     state.lyrics = null;
     $('#lyricsBody').innerHTML = `<div class="lyrics-empty">歌词读取失败：${esc(err.message)}</div>`;
+    broadcastLyrics({ type: 'lyrics', trackId: track.id, lines: [], synced: false });
   }
 }
 
@@ -2479,8 +2610,8 @@ function syncSelectionUi() {
   $('#bulkCount').textContent = `已选 ${n} 张`;
 
   // 批量填艺术家/社团只对音声发行可用：选中里没有音声专辑就隐藏这两个按钮
-  const voiceCount = state.albums
-    .filter((a) => state.selected.has(a.id) && a.is_voice).length;
+  const voiceCount = [...state.selected]
+    .filter((id) => state.albumMeta.get(id)?.isVoice).length;
   const showVoiceOps = voiceCount > 0;
   $('#bulkArtistBtn').hidden = !showVoiceOps;
   $('#bulkCircleBtn').hidden = !showVoiceOps;
@@ -2501,6 +2632,25 @@ function toggleSelect(id) {
   if (state.selected.has(id)) state.selected.delete(id);
   else state.selected.add(id);
   syncSelectionUi();
+}
+
+/**
+ * 取当前筛选下的全部专辑（id → { isVoice }），供「全选」使用。
+ *
+ * 不走专辑墙已有的分页：`idsOnly` 让服务端只回 id 与类别，不装配标签 / 完整度，
+ * 这样即使库里有几千张、墙上只加载了 60 张，全选也是真的「全」。
+ * 服务端单页上限 2000，超过就继续翻页。
+ */
+async function fetchAllMatchingAlbums() {
+  const out = new Map();
+  let offset = 0;
+  for (;;) {
+    const { albums, hasMore } = await api(albumQuery(offset, { limit: 2000, idsOnly: true }));
+    for (const a of albums) out.set(Number(a.id), { isVoice: Boolean(a.is_voice) });
+    if (!hasMore || !albums.length) break;
+    offset += albums.length;
+  }
+  return out;
 }
 
 /* ===================================================== V2.2 编辑抽屉 */
@@ -3151,6 +3301,39 @@ function bindEvents() {
     state.selected.clear();
     syncSelectionUi();
   });
+  /**
+   * 全选 / 取消全选：范围是**当前筛选下的全部专辑**，不只是已加载到墙上的那几页。
+   * 列表明细在请求期间可能被用户改掉（换库 / 搜索 / 退出多选），拿到结果后先核对。
+   */
+  $('#bulkSelectAllBtn').addEventListener('click', async () => {
+    const btn = $('#bulkSelectAllBtn');
+    if (btn.disabled) return;
+    const signature = albumQuery(0);
+    btn.disabled = true;
+    btn.textContent = '全选中…';
+    try {
+      const meta = await fetchAllMatchingAlbums();
+      if (!state.selecting || albumQuery(0) !== signature) return; // 期间退出了多选或换了筛选
+      if (!meta.size) { toast('当前筛选下没有可选的专辑', true); return; }
+
+      const allSelected = state.selected.size >= meta.size
+        && [...meta.keys()].every((id) => state.selected.has(id));
+      if (allSelected) {
+        state.selected.clear();
+        toast(`已取消全选（${meta.size} 张）`);
+      } else {
+        state.selected = new Set(meta.keys());
+        for (const [id, info] of meta) state.albumMeta.set(id, info);
+        toast(`已全选 ${meta.size} 张`);
+      }
+      syncSelectionUi();
+    } catch (err) {
+      toast(`全选失败：${err.message}`, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '全选';
+    }
+  });
   $('#bulkTagBtn').addEventListener('click', () => {
     if (!state.selected.size) { toast('请先选择专辑', true); return; }
     openTagDialog([...state.selected], [], { bulk: true });
@@ -3603,7 +3786,9 @@ function bindEvents() {
     setPlayMode(MODE_ORDER[(idx + 1) % MODE_ORDER.length]);
     toast(`播放模式：${MODE_META[state.playMode].label}`);
   });
-  $('#lyricsBtn').addEventListener('click', () => setNowPlaying($('#nowPlaying').hidden));
+  $('#desktopLyricsBtn').addEventListener('click', () => { void toggleDesktopLyrics(); });
+  // 歌词窗口被它自己的 ✕ 关掉时，主窗口按钮的高亮要跟着复位
+  window.addEventListener('focus', () => { void refreshDesktopLyricsButton(); });
   $('#npOpen').addEventListener('click', () => setNowPlaying($('#nowPlaying').hidden));
   // 单曲详情：左上角「返回」（取代原来的右上角 ✕）；返回后仍是进入前的那个视图
   $('#npBack').addEventListener('click', () => setNowPlaying(false));
@@ -3709,6 +3894,11 @@ function bindEvents() {
       $('#seek').value = String(Math.round((audio.currentTime / audio.duration) * 1000));
     }
     syncLyrics(audio.currentTime * 1000);
+    broadcastTime(false);
+  });
+  // 播放 / 暂停 / 跳转：立刻同步，不等下一次 timeupdate
+  ['play', 'pause', 'seeked'].forEach((name) => {
+    audio.addEventListener(name, () => broadcastTime(true));
   });
   $('#seek').addEventListener('input', (e) => {
     if (!Number.isFinite(audio.duration)) return;
@@ -4518,6 +4708,8 @@ function bindSettingsEvents() {
   // 设置：先绑事件再拉配置，保证外观在整个界面画出来之前就位（避免主题闪一下）
   bindSettingsEvents();
   await loadSettingsConfig();
+  // 桌面歌词：上次退出时是打开的，就恢复窗口（浏览器模式下自动跳过）
+  await restoreDesktopLyrics();
   // 缓存额度也要在启动时拿到：预读取询问框要显示「缓存上限/已用」
   await loadCacheStatus();
   setPlayMode(state.playMode);

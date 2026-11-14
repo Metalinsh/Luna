@@ -31,6 +31,7 @@ import {
   normalizeUserPath, decodePickedPath, checkDirectory,
 } from './user-path.mjs';
 import { nativeDialogAvailable, showNativeDialog } from './desktop-dialog.mjs';
+import * as desktopLyrics from './desktop-lyrics.mjs';
 import {
   scanState, startScan, cancelScan, isScanning, lastScanReport, resetExclusionCache,
   isUnderAsmrFolder,
@@ -38,6 +39,9 @@ import {
 
 ensureDirs();
 const config = readConfig();
+
+/** 本服务的对外地址（listen 后确定）：桌面歌词窗口需要用完整 URL 加载页面 */
+let selfUrl = null;
 
 const app = express();
 app.disable('x-powered-by');
@@ -275,6 +279,40 @@ app.post('/api/dialog/image', asyncRoute(async (req, res) => {
   }
 }));
 
+/* --------------------------------------------------------- 桌面歌词窗口 */
+
+/**
+ * 桌面歌词的开关与状态。
+ *
+ * 窗口本身由 server/desktop-lyrics.mjs 在 Electron 主进程里创建；纯 Node /
+ * 浏览器模式下 available=false，前端会提示「仅桌面版支持」。
+ */
+app.get('/api/desktop-lyrics', (req, res) => {
+  res.json(desktopLyrics.status());
+});
+
+app.post('/api/desktop-lyrics', (req, res) => {
+  if (!desktopLyrics.isAvailable()) {
+    return res.status(409).json({ ...desktopLyrics.status(), error: '桌面歌词仅桌面版支持' });
+  }
+  const action = String(req.body?.action ?? 'toggle');
+  try {
+    if (action === 'open') return res.json(desktopLyrics.open(selfUrl));
+    if (action === 'close') return res.json(desktopLyrics.close());
+    if (action === 'toggle') {
+      return res.json(desktopLyrics.status().open
+        ? desktopLyrics.close()
+        : desktopLyrics.open(selfUrl));
+    }
+    if (action === 'lock') return res.json(desktopLyrics.setLocked(true));
+    if (action === 'unlock') return res.json(desktopLyrics.setLocked(false));
+    if (action === 'settings') return res.json(desktopLyrics.updateSettings(req.body?.settings ?? {}));
+    return badRequest(res, '未知操作');
+  } catch (err) {
+    return res.status(500).json({ error: `桌面歌词操作失败：${err.message}` });
+  }
+});
+
 /**
  * 直接按绝对路径提供图片字节（设置里的自定义背景图）。
  *
@@ -350,6 +388,8 @@ app.get('/api/albums', (req, res) => {
     ? String(req.query.status) : null;
   const favoriteOnly = req.query.favorite === '1';
   const kind = ['voice', 'music'].includes(String(req.query.kind)) ? String(req.query.kind) : null;
+  // 专辑墙「全选」用：只要 id 与类别，跳过标签 / 完整度装配
+  const idsOnly = req.query.idsOnly === '1';
 
   const rows = store.listAlbums({
     q, sort, limit, offset, tagIds, tagMode, libraryId, status, favoriteOnly, kind,
@@ -357,6 +397,16 @@ app.get('/api/albums', (req, res) => {
   const total = store.countAlbumsFiltered({
     q, tagIds, tagMode, libraryId, favoriteOnly, kind,
   });
+
+  if (idsOnly) {
+    return res.json({
+      albums: rows.map((r) => ({ id: r.id, is_voice: Boolean(r.is_voice) })),
+      total,
+      limit,
+      offset,
+      hasMore: offset + rows.length < total,
+    });
+  }
 
   res.json({
     albums: decorateAlbums(rows),
@@ -1702,7 +1752,8 @@ const port = Number(process.env.PORT || config.port || 8787);
 const host = process.env.HOST || config.host || '127.0.0.1';
 
 const server = app.listen(port, host, () => {
-  console.log(`Luna v${APP_VERSION} 已启动： http://${host}:${port}`);
+  selfUrl = `http://${host}:${port}`;
+  console.log(`Luna v${APP_VERSION} 已启动： ${selfUrl}`);
   console.log(`数据目录： ${DATA_DIR}`);
   if (store.migrationReport.migrated) {
     console.log(`已从 V${store.migrationReport.from} 迁移到 V${store.SCHEMA_VERSION}，`

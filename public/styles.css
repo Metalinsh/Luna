@@ -307,6 +307,7 @@ input, select { font: inherit; }
 }
 .icon-btn:hover { background: rgba(var(--mix-fg),.07); color: var(--fg); }
 .icon-btn.is-on { color: var(--accent-2); }
+#desktopLyricsBtn.is-on { background: rgba(var(--mix-fg), .06); }
 
 .scan-status { display: flex; flex-direction: column; gap: 6px; padding: 2px 4px; }
 .scan-line { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--fg-dim); }
@@ -722,6 +723,41 @@ select.tag-cat { flex: none; padding: 3px 8px; border-radius: 8px; font-size: 12
   border-bottom: 1px solid rgba(125,108,245,.3);
 }
 .bulkbar span { color: #cdc6ff; font-size: 13px; margin-right: auto; }
+
+/*
+ * 多选工具条：所有按钮统一为**不透明实底**（与「批量打标签」同一套观感）。
+ * 之前「清空选择 / 退出多选」是透明 ghost、移除是半透明红，压在批量条的
+ * 半透明底色上会跟着背景图 / 深浅模式发灰。底色统一取实色 --bg-elev-2，
+ * 深色浅色由主题变量自动切换，不需要各写一套。
+ */
+.bulkbar .btn {
+  background: var(--bg-elev-2);
+  border-color: rgba(var(--mix-fg), .18);
+  color: var(--fg);
+}
+.bulkbar .btn:hover {
+  background: color-mix(in srgb, var(--bg-elev-2) 88%, var(--fg));
+  border-color: rgba(var(--mix-fg), .28);
+  color: var(--fg);
+}
+.bulkbar .btn-danger {
+  background: var(--bg-elev-2);
+  border-color: rgba(255, 77, 109, .45);
+  color: #ff8a9c;
+}
+.bulkbar .btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev-2));
+  border-color: rgba(255, 77, 109, .6);
+  color: #ffb3bf;
+}
+:root[data-mode="light"] .bulkbar .btn-danger {
+  border-color: rgba(192, 57, 43, .35);
+  color: var(--danger);
+}
+:root[data-mode="light"] .bulkbar .btn-danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-elev-2));
+  color: #a4262c;
+}
 
 /* 角标：右下角；单个标签内部不换行，放不下时在标签之间换行 */
 .badges {

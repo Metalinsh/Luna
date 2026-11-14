@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Luna 桌面歌词</title>
+<link rel="stylesheet" href="/desktop-lyrics.css" />
+</head>
+<body>
+  <div class="dl" id="dl">
+    <div class="dl-body">
+      <div class="dl-current" id="dlCurrent"><span class="dl-current-text" id="dlCurrentText">未在播放</span></div>
+      <div class="dl-trans" id="dlTrans" hidden></div>
+      <div class="dl-next" id="dlNext"></div>
+    </div>
+
+    <div class="dl-tools" id="dlTools">
+      <button type="button" data-act="fontDown" title="减小字号">A−</button>
+      <button type="button" data-act="fontUp" title="增大字号">A+</button>
+      <button type="button" data-act="bare" title="隐藏背景，只留文字（再点恢复）">透明</button>
+      <button type="button" data-act="lock" title="锁定后鼠标穿透（在主窗口解锁）">锁定</button>
+      <button type="button" data-act="close" title="关闭桌面歌词">✕</button>
+    </div>
+
+    <div class="dl-locked" id="dlLocked" hidden>已锁定 · 在主窗口点「桌面歌词」解锁</div>
+  </div>
+  <script type="module" src="/desktop-lyrics.js"></script>
+</body>
+</html>

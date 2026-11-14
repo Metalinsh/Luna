@@ -96,6 +96,98 @@ try {
   ok('批量操作条出现', active.bulkVisible === true);
   await shot('v9-select-button.png');
 
+  console.log('\n— 需求1c：多选工具条（全选入口 + 统一不透明按钮）—');
+  const bar = await ev(`(() => {
+    const bar = document.querySelector('#bulkBar');
+    const ids = [...bar.querySelectorAll('button')].map((b) => b.id);
+    const read = (sel) => {
+      const el = bar.querySelector(sel);
+      const cs = getComputedStyle(el);
+      return { bg: cs.backgroundColor, color: cs.color, border: cs.borderTopColor, text: el.textContent.trim() };
+    };
+    return {
+      ids,
+      tag: read('#bulkTagBtn'),
+      remove: read('#bulkRemoveBtn'),
+      selectAll: read('#bulkSelectAllBtn'),
+      clear: read('#bulkClearBtn'),
+      exit: read('#bulkExitBtn'),
+    };
+  })()`);
+  const alphaOf = (c) => {
+    const m = /rgba?\(([^)]+)\)/.exec(c);
+    if (!m) return null;
+    const parts = m[1].split(',').map((v) => parseFloat(v.trim()));
+    return parts.length === 4 ? parts[3] : 1;
+  };
+  const iRemove = bar.ids.indexOf('bulkRemoveBtn');
+  const iSelectAll = bar.ids.indexOf('bulkSelectAllBtn');
+  const iClear = bar.ids.indexOf('bulkClearBtn');
+  ok('有「全选」按钮且文案正确', bar.selectAll.text === '全选', bar.selectAll.text);
+  ok('「全选」位于「从库中移除」与「清空选择」之间',
+    iRemove >= 0 && iSelectAll === iRemove + 1 && iClear === iSelectAll + 1,
+    bar.ids.join(' → '));
+
+  const solid = [
+    ['批量打标签', bar.tag], ['从库中移除', bar.remove], ['全选', bar.selectAll],
+    ['清空选择', bar.clear], ['退出多选', bar.exit],
+  ].every(([, s]) => alphaOf(s.bg) === 1);
+  ok('批量条按钮统一为不透明实底（含全选 / 清空 / 退出 / 移除）', solid === true,
+    [bar.tag.bg, bar.remove.bg, bar.clear.bg].join(' | '));
+
+  const lightSolid = await ev(`(async () => {
+    const root = document.documentElement;
+    const prev = root.dataset.mode;
+    root.dataset.mode = 'light';
+    // .btn 带 background .15s 过渡：切主题后要等它跑完，否则读到的是过渡起点
+    await new Promise((z) => setTimeout(z, 300));
+    const read = (sel) => getComputedStyle(document.querySelector('#bulkBar ' + sel)).backgroundColor;
+    const out = {
+      mode: root.dataset.mode,
+      bgL2: getComputedStyle(root).getPropertyValue('--bg-l2').trim(),
+      selectAll: read('#bulkSelectAllBtn'),
+      remove: read('#bulkRemoveBtn'),
+      clear: read('#bulkClearBtn'),
+      exit: read('#bulkExitBtn'),
+    };
+    if (prev === undefined) root.removeAttribute('data-mode');
+    else root.dataset.mode = prev;
+    return out;
+  })()`);
+  const lightOk = ['selectAll', 'remove', 'clear', 'exit']
+    .every((k) => alphaOf(lightSolid[k]) === 1);
+  const lightRgb = /\d+/.exec(lightSolid.selectAll)?.[0];
+  ok('浅色主题下仍是不透明实底（不会透出背景）', lightOk === true, JSON.stringify(lightSolid));
+  ok('浅色主题下底色确实切到浅色', Number(lightRgb) > 200,
+    `${lightSolid.mode} / ${lightSolid.bgL2} / ${lightSolid.selectAll}`);
+
+  const libId = await ev(`Number(document.querySelector('.library-item.is-active')?.dataset.id || 0)`);
+  const wallTotal = (await j(`/api/albums?limit=1&libraryId=${libId}`)).total;
+  const selectedAll = await ev(`(async () => {
+    document.querySelector('#bulkSelectAllBtn').click();
+    await new Promise((z) => setTimeout(z, 1500));
+    return {
+      count: document.querySelector('#bulkCount').textContent.trim(),
+      cards: document.querySelectorAll('#albumGrid .album-card').length,
+      shownAllSelected: [...document.querySelectorAll('#albumGrid .album-card')]
+        .every((c) => c.classList.contains('is-selected')),
+      voiceBtnShown: document.querySelector('#bulkArtistBtn').hidden === false,
+    };
+  })()`);
+  const shownCount = /已选\s*(\d+)\s*张/.exec(selectedAll.count)?.[1];
+  ok('全选覆盖当前筛选下的全部专辑（不只已加载的分页）',
+    String(wallTotal) === shownCount, `${selectedAll.count} / 接口总数 ${wallTotal}`);
+  ok('墙上已加载的卡片同步进入选中态',
+    selectedAll.cards > 0 && selectedAll.shownAllSelected === true, `卡片 ${selectedAll.cards} 张`);
+  ok('全选后音声统计仍准确（批量填艺术家按钮可见）', selectedAll.voiceBtnShown === true);
+
+  const clearedAll = await ev(`(async () => {
+    document.querySelector('#bulkSelectAllBtn').click();
+    await new Promise((z) => setTimeout(z, 1200));
+    return document.querySelector('#bulkCount').textContent.trim();
+  })()`);
+  ok('再次点击「全选」取消全选', /已选\s*0\s*张/.test(clearedAll), clearedAll);
+
   console.log('\n— 需求2：批量填写（仅 ASMR 生效）—');
   const voice = (await j('/api/albums?limit=100&kind=voice')).albums;
   const music = (await j('/api/albums?limit=100&kind=music')).albums;

@@ -67,6 +67,22 @@ const DEFAULT_CONFIG = {
     /** 关闭窗口时最小化到托盘，而不是退出（默认关：保持「点 × 就退出」的直觉） */
     minimizeToTray: false,
   },
+  /**
+   * 桌面歌词（独立置顶小窗，见 server/desktop-lyrics.mjs）。
+   * x/y 为窗口左上角（DIP），null 表示还没摆过、由主进程放到主屏底部居中。
+   */
+  desktopLyrics: {
+    enabled: false,
+    locked: false,
+    x: null,
+    y: null,
+    width: 560,
+    height: 150,
+    /** 字号倍率：0.6–2.4 */
+    fontScale: 1,
+    /** 背景不透明度（%）：10–100 */
+    opacity: 90,
+  },
   /** 外观：配色方案、深浅模式、背景透明、自定义背景图 */
   appearance: {
     theme: 'midnight',
@@ -112,9 +128,25 @@ function sanitize(cfg) {
   const desktop = { ...d.desktop, ...(cfg.desktop ?? {}) };
   desktop.minimizeToTray = desktop.minimizeToTray === true;
 
+  const desktopLyrics = { ...d.desktopLyrics, ...(cfg.desktopLyrics ?? {}) };
+  desktopLyrics.enabled = desktopLyrics.enabled === true;
+  desktopLyrics.locked = desktopLyrics.locked === true;
+  desktopLyrics.width = Math.min(1600, Math.max(280, num(desktopLyrics.width, d.desktopLyrics.width)));
+  desktopLyrics.height = Math.min(600, Math.max(80, num(desktopLyrics.height, d.desktopLyrics.height)));
+  // 坐标允许为 null（还没摆过）；注意 Number(null) === 0，不能用 isFinite 直接判断
+  const coord = (v) => {
+    if (v === null || v === undefined || String(v).trim() === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  };
+  desktopLyrics.x = coord(desktopLyrics.x);
+  desktopLyrics.y = coord(desktopLyrics.y);
+  desktopLyrics.fontScale = Math.min(2.4, Math.max(0.6, num(desktopLyrics.fontScale, 1)));
+  desktopLyrics.opacity = Math.min(100, Math.max(0, num(desktopLyrics.opacity, 90)));
+
   return {
     ...d, ...cfg, search: { ...d.search, ...(cfg.search ?? {}) },
-    backup: { ...d.backup, ...(cfg.backup ?? {}) }, archive, appearance, desktop,
+    backup: { ...d.backup, ...(cfg.backup ?? {}) }, archive, appearance, desktop, desktopLyrics,
   };
 }
 
@@ -161,7 +193,7 @@ export function resolveCacheDir(cfg = readConfig()) {
 export function writeConfig(patch = {}) {
   const current = readConfig();
   const merged = { ...current, ...patch };
-  for (const key of ['search', 'backup', 'archive', 'appearance', 'desktop']) {
+  for (const key of ['search', 'backup', 'archive', 'appearance', 'desktop', 'desktopLyrics']) {
     if (patch[key] && typeof patch[key] === 'object') {
       merged[key] = { ...current[key], ...patch[key] };
     }

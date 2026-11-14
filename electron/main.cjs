@@ -285,7 +285,15 @@ async function createWindow() {
     return { action: 'allow' };
   });
 
-  if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' });
+  /*
+   * 开发期默认**不**自动打开 DevTools。
+   * 它是独立窗口，标题会带上当前页面的 <title>；桌面歌词透明时正好把它透出来，
+   * 看起来就像歌词窗自己冒出一条「Luna 桌面歌词」标题。
+   * 需要调试时用 `LAM_DEVTOOLS=1` 或 `--devtools` 启动。
+   */
+  if (isDev && (process.env.LAM_DEVTOOLS === '1' || process.argv.includes('--devtools'))) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 }
 
 // 单实例：重复启动时聚焦已有窗口

@@ -115,8 +115,10 @@
       <span class="bulk-hint" id="bulkVoiceHint" hidden>仅对 ASMR 音声发行生效</span>
       <button type="button" class="btn btn-danger" id="bulkRemoveBtn"
               title="只从索引里移除，不删除任何本地文件；以后扫描会自动忽略这些专辑">从库中移除</button>
-      <button type="button" class="btn btn-ghost" id="bulkClearBtn">清空选择</button>
-      <button type="button" class="btn btn-ghost" id="bulkExitBtn">退出多选</button>
+      <button type="button" class="btn" id="bulkSelectAllBtn"
+              title="全选当前筛选下的全部专辑（含未加载的分页）；再次点击取消全选">全选</button>
+      <button type="button" class="btn" id="bulkClearBtn">清空选择</button>
+      <button type="button" class="btn" id="bulkExitBtn">退出多选</button>
     </div>
 
     <section class="view" id="viewAlbums">
@@ -188,8 +190,8 @@
     <button class="icon-btn mode-btn" id="modeBtn" title="播放模式：列表循环">
       <span id="modeIcon">🔁</span>
     </button>
-    <button class="icon-btn" id="lyricsBtn" title="歌词 (L)">
-      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 11h10M4 16h13"/></svg>
+    <button class="icon-btn" id="desktopLyricsBtn" title="桌面歌词">
+      <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="11" rx="2"/><path d="M7 9h8M7 12h5"/><path d="M9 20h6"/></svg>
     </button>
     <div class="volume" id="volumeBox">
       <svg viewBox="0 0 24 24"><path d="M4 9h3l5-4v14l-5-4H4z"/><path d="M16 8.5a5 5 0 0 1 0 7"/></svg>

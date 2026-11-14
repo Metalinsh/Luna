@@ -51,7 +51,7 @@ export const AREAS = [
   {
     id: 'bulk',
     title: '多选、批量填写与从库中移除',
-    desc: '选择按钮样式、批量填艺术家/社团（仅 ASMR 生效）、多选后「从库中移除」（只删索引不碰文件 + 确认文案 + 设置里的恢复入口）',
+    desc: '选择按钮样式、全选 / 清空选择、批量填艺术家/社团（仅 ASMR 生效）、多选后「从库中移除」（只删索引不碰文件 + 确认文案 + 设置里的恢复入口）',
     unit: ['test/albums-tags.test.mjs'],
     ui: ['check/bulk.mjs'],
     app: true,
@@ -104,6 +104,19 @@ export const AREAS = [
     ui: ['check/player.mjs'],
     app: true,
     covers: ['public/app.js', 'public/styles.css', 'public/index.html'],
+  },
+  {
+    id: 'desktop-lyrics',
+    title: '桌面歌词',
+    desc: '独立置顶歌词窗口：开关、播放进度广播、锁定穿透、字号设置、关闭与配置回写',
+    unit: [],
+    ui: ['check/desktop-lyrics.mjs'],
+    app: true,
+    covers: [
+      'public/desktop-lyrics.html', 'public/desktop-lyrics.js', 'public/desktop-lyrics.css',
+      'server/desktop-lyrics.mjs', 'server/index.mjs', 'server/config.mjs',
+      'public/app.js', 'public/index.html', 'public/styles.css',
+    ],
   },
   {
     id: 'write',
