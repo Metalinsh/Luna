@@ -82,6 +82,10 @@ const DEFAULT_CONFIG = {
     fontScale: 1,
     /** 背景不透明度（%）：10–100 */
     opacity: 90,
+    /** 文字颜色（十六进制）。桌面歌词压在壁纸/窗口上，白色不一定最清楚 */
+    color: '#f4f4fa',
+    /** 描边强度：strong（四向硬边，花背景也清楚）| soft（阴影光晕）| off */
+    outline: 'strong',
   },
   /** 外观：配色方案、深浅模式、背景透明、自定义背景图 */
   appearance: {
@@ -143,6 +147,12 @@ function sanitize(cfg) {
   desktopLyrics.y = coord(desktopLyrics.y);
   desktopLyrics.fontScale = Math.min(2.4, Math.max(0.6, num(desktopLyrics.fontScale, 1)));
   desktopLyrics.opacity = Math.min(100, Math.max(0, num(desktopLyrics.opacity, 90)));
+  desktopLyrics.color = /^#[0-9a-f]{6}$/i.test(String(desktopLyrics.color ?? ''))
+    ? String(desktopLyrics.color)
+    : d.desktopLyrics.color;
+  desktopLyrics.outline = ['strong', 'soft', 'off'].includes(desktopLyrics.outline)
+    ? desktopLyrics.outline
+    : d.desktopLyrics.outline;
 
   return {
     ...d, ...cfg, search: { ...d.search, ...(cfg.search ?? {}) },

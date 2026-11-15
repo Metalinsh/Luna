@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>桌面歌词菜单</title>
+<style>
+  :root {
+    --bg: rgba(20, 21, 26, 0.96);
+    --fg: #f2f2f6;
+    --dim: rgba(255, 255, 255, 0.55);
+    --line: rgba(255, 255, 255, 0.12);
+    --hover: rgba(255, 255, 255, 0.12);
+    --on: rgba(255, 226, 122, 0.18);
+    --on-fg: #ffe27a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; }
+  body {
+    font: 12px/1.4 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    color: var(--fg);
+    padding: 4px;
+  }
+  .menu {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55);
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .item {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    text-align: left;
+    padding: 6px 9px;
+    border-radius: 6px;
+    cursor: default;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+  }
+  .item:hover, .item.is-on { background: var(--hover); }
+  .item.is-on { color: var(--on-fg); }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 9px;
+  }
+  .label { color: var(--dim); width: 34px; flex: none; font-size: 11px; }
+  .chip {
+    appearance: none;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--fg);
+    font: inherit;
+    font-size: 11px;
+    padding: 3px 7px;
+    border-radius: 5px;
+    cursor: default;
+  }
+  .chip:hover { background: rgba(255, 255, 255, 0.16); }
+  .chip.is-on { background: var(--on); border-color: rgba(255, 226, 122, 0.45); color: var(--on-fg); }
+  .swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    cursor: default;
+    padding: 0;
+  }
+  .swatch.is-on { outline: 2px solid var(--on-fg); outline-offset: 1px; }
+  .sep { height: 1px; background: var(--line); margin: 3px 6px; }
+</style>
+</head>
+<body>
+  <div class="menu" id="menu"></div>
+  <script type="module" src="/desktop-lyrics-menu.js"></script>
+</body>
+</html>

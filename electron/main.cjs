@@ -165,17 +165,75 @@ function ensureTray() {
   }
   log('托盘已创建，图标来源:', icon.from);
   tray.setToolTip('Luna · 本地音乐与音声库');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '显示主窗口', click: () => showMainWindow() },
-    { type: 'separator' },
-    {
-      label: '退出 Luna',
-      click: () => { isQuitting = true; app.quit(); },
-    },
-  ]));
+  // 右键时才去问一次实时状态（歌词开没开、锁没锁），再弹出菜单。
+  // 不能在启动时 setContextMenu：那样勾选状态会一直是旧的。
+  tray.on('right-click', showTrayMenu);
   // 左键单击托盘图标 → 回到窗口（Windows 上习惯用法）
   tray.on('click', () => showMainWindow());
   return tray;
+}
+
+/** 一次读取桌面歌词状态；服务没起来或出错时返回 null（菜单退化成只有主窗口/退出） */
+async function fetchDesktopLyricsStatus() {
+  if (!serverUrl) return null;
+  try {
+    const res = await fetch(`${serverUrl}/api/desktop-lyrics`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    log('读取桌面歌词状态失败:', err);
+    return null;
+  }
+}
+
+async function showTrayMenu() {
+  if (!tray) return;
+  const status = await fetchDesktopLyricsStatus();
+  tray.popUpContextMenu(buildTrayMenu(status));
+}
+
+/**
+ * 桌面歌词那几项要读实时状态，所以每次右键都重建。
+ * status 为 null 时（服务还没起来）只给主窗口和退出。
+ */
+function buildTrayMenu(status) {
+  const items = [
+    { label: '显示主窗口', click: () => showMainWindow() },
+    { type: 'separator' },
+  ];
+  if (serverUrl) {
+    const open = !!status?.open;
+    const locked = !!status?.locked;
+    items.push(
+      {
+        label: '桌面歌词',
+        type: 'checkbox',
+        checked: open,
+        click: () => desktopLyricsCall({ action: open ? 'close' : 'open' }),
+      },
+      {
+        // 标签直接写「下一步能做什么」，比灰不灰好认
+        label: locked ? '解锁歌词' : '锁定歌词',
+        enabled: open,
+        click: () => desktopLyricsCall({ action: locked ? 'unlock' : 'lock' }),
+      },
+      { type: 'separator' },
+      { label: '刷新歌词窗口（白条修复）', click: () => desktopLyricsCall({ action: 'rebuild' }) },
+      { type: 'separator' },
+    );
+  }
+  items.push({ label: '退出 Luna', click: () => { isQuitting = true; app.quit(); } });
+  return Menu.buildFromTemplate(items);
+}
+
+/** 托盘里点桌面歌词相关项：直接打本地接口，和页面走同一条路 */
+function desktopLyricsCall(body) {
+  if (!serverUrl) return;
+  fetch(`${serverUrl}/api/desktop-lyrics`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch((err) => log('托盘操作桌面歌词失败:', err));
 }
 
 /** 找一个可用端口 */
