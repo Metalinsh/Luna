@@ -1,12 +1,11 @@
 /**
  * 桌面歌词（v1.2.7）。
  *
- * 验证的是「窗口 + 数据链路 + 交互」，不真的播放音频：
- *   · 接口能在主进程里开出第二个窗口；
- *   · 歌词窗口能收到主窗口广播的当前行/下一行；
- *   · 锁定 = 鼠标穿透（窗口侧状态同步）；
- *   · 字号设置会落进配置；
- *   · 关闭后状态归零。
+ * 覆盖合并 PR 之后的新形态：
+ *   · 单行歌词：不再有「下一行预告」，长句改为**换行 + 逐级缩小字号**（fitCurrent）；
+ *   · 播放工具条：主窗口 / 上一首 / 播放暂停 / 下一首 / ±10 秒 / 锁定 / 关闭；
+ *   · 右键菜单独立小窗（本脚本只验证接口层，菜单 UI 由人工试）；
+ *   · 字号 / 颜色 / 描边 / 背景（透明）通过 settings 接口生效并刷新窗口。
  *
  * 运行器会先起好 Electron 开发实例（主窗口 8799 / CDP 9360）。
  */
@@ -89,10 +88,13 @@ try {
     opened.bounds && (opened.bounds.x !== 0 || opened.bounds.y !== 0),
     JSON.stringify(opened.bounds));
   ok('打开状态写入配置', opened.config?.enabled === true);
+  ok('配置包含文字颜色与描边', /^#[0-9a-f]{6}$/i.test(opened.config?.color ?? '')
+    && ['strong', 'soft', 'off'].includes(opened.config?.outline ?? ''), `${opened.config?.color} / ${opened.config?.outline}`);
 
   overlay = await connect((url) => url.includes('desktop-lyrics.html'));
   await sleep(800);
-  console.log('\n— 需求2：播放状态与歌词行 —');
+
+  console.log('\n— 需求2：单行歌词与时间轴 —');
   ok('歌词窗口初始显示「未在播放」',
     (await overlay.eval(`document.querySelector('#dlCurrent').textContent`)) === '未在播放');
 
@@ -105,24 +107,43 @@ try {
   await sleep(300);
   await mainPage.eval(`new BroadcastChannel('luna-playback').postMessage({ type: 'time', trackId: 1, time: 3.2, playing: false }); true`);
   await sleep(400);
-  ok('未到第一行时显示 ♪ 并预告下一行',
+  ok('未到第一行时只显示 ♪（单行模式没有下一行预告）',
     (await overlay.eval(`document.querySelector('#dlCurrent').textContent`)) === '♪'
-    && (await overlay.eval(`document.querySelector('#dlNext').textContent`)) === '第一行歌词');
+    && (await overlay.eval(`!!document.querySelector('#dlNext')`)) === false);
 
   await mainPage.eval(`new BroadcastChannel('luna-playback').postMessage({ type: 'time', trackId: 1, time: 12, playing: false }); true`);
   await sleep(400);
   ok('当前行按毫秒时间轴推进',
     (await overlay.eval(`document.querySelector('#dlCurrent').textContent`)) === '第二行歌词',
     await overlay.eval(`document.querySelector('#dlCurrent').textContent`));
-  ok('下一行留空（已是最后一行）',
-    (await overlay.eval(`document.querySelector('#dlNext').textContent`)) === '');
   ok('歌词窗口是半透明实底（不是全透明看不见）',
     /rgba?\(/.test(await overlay.eval(`getComputedStyle(document.querySelector('#dl')).backgroundColor`)),
     await overlay.eval(`getComputedStyle(document.querySelector('#dl')).backgroundColor`));
 
-  console.log('\n— 需求3：锁定 / 字号 / 关闭 —');
+  console.log('\n— 需求3：播放工具条 —');
+  const toolbar = await overlay.eval(`[...document.querySelectorAll('#dlTools button')].map((b) => b.dataset.act)`);
+  const need = ['main', 'prev', 'toggle', 'next', 'back10', 'fwd10', 'lock', 'close'];
+  ok('工具条包含主窗口/切歌/播放/快进/锁定/关闭',
+    need.every((a) => toolbar.includes(a)), toolbar.join(', '));
+  ok('播放键显示 ▶（当前未在播放）',
+    (await overlay.eval(`document.querySelector('#dlPlayBtn').textContent`)) === '▶');
+
+  // 工具条命令通过 BroadcastChannel 交回主窗口执行
+  await mainPage.eval(`(() => {
+    window.__dlCmds = [];
+    window.__dlCh = new BroadcastChannel('luna-playback');
+    window.__dlCh.onmessage = (e) => { if (e.data?.type === 'cmd') window.__dlCmds.push(e.data); };
+    return true;
+  })()`);
+  await overlay.eval(`document.querySelector('[data-act="toggle"]').click(); true`);
+  await sleep(400);
+  const cmds = await mainPage.eval(`window.__dlCmds`);
+  ok('点播放键 → 主窗口收到 toggle 命令',
+    Array.isArray(cmds) && cmds.some((c) => c.action === 'toggle'), JSON.stringify(cmds));
+
+  console.log('\n— 需求4：锁定 / 解锁 —');
   await overlay.eval(`document.querySelector('[data-act="lock"]').click(); true`);
-  await sleep(600);
+  await sleep(700);
   const locked = await j('/api/desktop-lyrics');
   ok('锁定状态同步到接口', locked.locked === true);
   ok('窗口进入锁定态（工具栏隐藏）',
@@ -133,7 +154,7 @@ try {
   ok('解锁后恢复交互', unlocked.locked === false);
   await sleep(1200); // 窗口每秒对一次锁定状态（主窗口解锁后要等它同步）
 
-  // 拖动：整个歌词面板都可拖（不再只有顶部一条），用 mousemove + window.moveTo 实现
+  // 拖动：整个歌词面板都可拖，用 mousemove + window.moveTo 实现
   const posBefore = await overlay.eval(`({ x: screenX, y: screenY })`);
   await overlay.eval(`(() => {
     const h = document.querySelector('#dlCurrent');
@@ -162,66 +183,75 @@ try {
     posAfterBtn.x === posAfter.x && posAfterBtn.y === posAfter.y,
     `${posAfter.x},${posAfter.y} → ${posAfterBtn.x},${posAfterBtn.y}`);
 
-  const scaleBefore = Number((await j('/api/config')).config?.desktopLyrics?.fontScale ?? 1);
-  await overlay.eval(`document.querySelector('[data-act="fontUp"]').click(); true`);
-  await sleep(500);
-  const scaleAfter = Number((await j('/api/config')).config?.desktopLyrics?.fontScale ?? 1);
-  ok('字号 + 会写进配置', Math.abs(scaleAfter - Math.min(2.4, scaleBefore + 0.1)) < 0.001,
-    `${scaleBefore} → ${scaleAfter}`);
+  console.log('\n— 需求5：字号 / 颜色 / 描边 / 透明 —');
+  const cfgBefore = (await j('/api/config')).config?.desktopLyrics ?? {};
+  const nextScale = Math.min(2.4, Math.round((Number(cfgBefore.fontScale) + 0.1) * 10) / 10);
+  await post('/api/desktop-lyrics', { action: 'settings', settings: { fontScale: nextScale } });
+  await sleep(700);
+  const cfgScale = (await j('/api/config')).config?.desktopLyrics ?? {};
+  ok('字号设置写进配置', Math.abs(Number(cfgScale.fontScale) - nextScale) < 0.001,
+    `${cfgBefore.fontScale} → ${cfgScale.fontScale}`);
   ok('窗口同步放大', Number(await overlay.eval(
-    `getComputedStyle(document.documentElement).getPropertyValue('--dl-scale').trim()`)) === scaleAfter);
+    `getComputedStyle(document.documentElement).getPropertyValue('--dl-scale').trim()`)) === nextScale);
 
-  console.log('\n— 需求4：长句横向滚动与完全透明 —');
-  const longLine = '这是一句非常长的歌词，用来测试桌面歌词窗口的自动横向匀速滚动，'
-    + '应该在整句念完之前平稳地滚到最右边，而不是被省略号截断。';
-  await mainPage.eval(`new BroadcastChannel('luna-playback').postMessage({
-    type: 'track', trackId: 2, title: '长句测试', artist: '',
-    lines: [{ time: 0, text: ${JSON.stringify(longLine)} }, { time: 10000, text: '下一句' }], synced: true,
-  }); true`);
-  await sleep(250);
+  await post('/api/desktop-lyrics', { action: 'settings', settings: { color: '#ffe27a', outline: 'soft' } });
+  await sleep(700);
+  const styleState = await overlay.eval(`({
+    color: getComputedStyle(document.documentElement).getPropertyValue('--dl-fg').trim(),
+    outline: document.querySelector('#dl').dataset.outline,
+  })`);
+  ok('文字颜色生效', styleState.color.toLowerCase() === '#ffe27a', styleState.color);
+  ok('描边档位生效', styleState.outline === 'soft', styleState.outline);
 
-  const readScroll = async (seconds) => {
-    await mainPage.eval(`new BroadcastChannel('luna-playback').postMessage({ type: 'time', trackId: 2, time: ${seconds}, playing: false }); true`);
-    await sleep(350);
-    return overlay.eval(`(() => {
-      const box = document.querySelector('#dlCurrent');
-      const text = document.querySelector('#dlCurrentText');
-      const m = getComputedStyle(text).transform;
-      return {
-        tx: m.startsWith('matrix') ? Number(m.split(',')[4]) : 0,
-        max: text.scrollWidth - box.clientWidth,
-      };
-    })()`);
-  };
-
-  const scroll1 = await readScroll(1);
-  const scroll2 = await readScroll(8.6);
-  ok('长句宽度超过窗口（才会触发滚动）', scroll1.max > 40, `超出 ${scroll1.max}px`);
-  ok('当前行向左匀速滚动', scroll2.tx < scroll1.tx - 20, `t=1s ${scroll1.tx}px → t=8.6s ${scroll2.tx}px`);
-  ok('本句结束前已滚到最右', Math.abs(scroll2.tx + scroll2.max) < 30,
-    `停在 ${scroll2.tx}px / 最右 -${scroll2.max}px`);
-
-  await overlay.eval(`document.querySelector('[data-act="bare"]').click(); true`);
-  await sleep(500);
+  await post('/api/desktop-lyrics', { action: 'settings', settings: { opacity: 0 } });
+  await sleep(700);
   const bareState = await overlay.eval(`({
     bg: getComputedStyle(document.querySelector('#dl')).backgroundColor,
     bare: document.querySelector('#dl').classList.contains('is-bare'),
   })`);
-  const bareConfig = (await j('/api/config')).config?.desktopLyrics ?? {};
-  ok('点「透明」后框体完全透明（只留文字）',
+  ok('背景设为 0 后框体完全透明（只留文字）',
     bareState.bare === true && /rgba\(0, 0, 0, 0\)|transparent/.test(bareState.bg), bareState.bg);
-  ok('透明度 0 写进配置', Number(bareConfig.opacity) === 0, String(bareConfig.opacity));
+  ok('透明度 0 写进配置',
+    Number((await j('/api/config')).config?.desktopLyrics?.opacity) === 0);
 
-  await overlay.eval(`document.querySelector('[data-act="bare"]').click(); true`);
-  await sleep(400);
-  ok('再点一次恢复背景',
+  await post('/api/desktop-lyrics', { action: 'settings', settings: { opacity: 90 } });
+  await sleep(500);
+  ok('恢复背景后框体重新可见',
     /rgba\(\d/.test(await overlay.eval(`getComputedStyle(document.querySelector('#dl')).backgroundColor`)));
+
+  console.log('\n— 需求6：长句适配（换行 + 缩字号，不再横向滚动） —');
+  const longLine = '这是一句非常长的歌词，用来测试桌面歌词窗口在单行模式下如何自动换行并逐级缩小字号，'
+    + '保证整句话能完整显示在窗口里，而不是被省略号截断，也不会横向滚出去。';
+  await mainPage.eval(`new BroadcastChannel('luna-playback').postMessage({
+    type: 'track', trackId: 2, title: '长句测试', artist: '',
+    lines: [{ time: 0, text: ${JSON.stringify(longLine)} }, { time: 10000, text: '下一句' }], synced: true,
+  }); true`);
+  await sleep(300);
+  await mainPage.eval(`new BroadcastChannel('luna-playback').postMessage({ type: 'time', trackId: 2, time: 1, playing: false }); true`);
+  await sleep(500);
+  const fit = await overlay.eval(`(() => {
+    const box = document.querySelector('#dlCurrent');
+    const text = document.querySelector('#dlCurrentText');
+    const scale = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dl-scale')) || 1;
+    return {
+      fontSize: Number.parseFloat(getComputedStyle(box).fontSize),
+      base: 26 * scale,
+      boxW: box.clientWidth, textW: text.scrollWidth,
+      boxH: box.clientHeight, textH: text.scrollHeight,
+      transform: getComputedStyle(text).transform,
+    };
+  })()`);
+  ok('长句触发字号缩小', fit.fontSize < fit.base - 0.5, `${fit.fontSize}px < ${fit.base}px`);
+  ok('不出现横向溢出（单行/多行都收在窗口内）', fit.textW <= fit.boxW + 1,
+    `${fit.textW}px / ${fit.boxW}px`);
+  ok('没有横向滚动位移', fit.transform === 'none' || fit.transform === 'matrix(1, 0, 0, 1, 0, 0)',
+    fit.transform);
 
   const closed = await post('/api/desktop-lyrics', { action: 'close' });
   ok('关闭后 open=false', closed.open === false);
   ok('关闭状态写回配置', closed.config?.enabled === false);
 } finally {
-  // 还原配置（坐标 / 字号 / 开关），别把检查过程留在用户设置里
+  // 还原配置（坐标 / 字号 / 颜色 / 透明度 / 开关），别把检查过程留在用户设置里
   try {
     await post('/api/desktop-lyrics', { action: 'close' });
     await post('/api/desktop-lyrics', { action: 'settings', settings: originalConfig ?? {} });

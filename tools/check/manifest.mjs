@@ -108,14 +108,15 @@ export const AREAS = [
   {
     id: 'desktop-lyrics',
     title: '桌面歌词',
-    desc: '独立置顶歌词窗口：开关、播放进度广播、锁定穿透、字号设置、关闭与配置回写',
+    desc: '独立置顶歌词窗口：开关、单行歌词与长句适配、播放工具条、锁定穿透、字号/颜色/描边/透明、拖动、关闭与配置回写',
     unit: [],
     ui: ['check/desktop-lyrics.mjs'],
     app: true,
     covers: [
       'public/desktop-lyrics.html', 'public/desktop-lyrics.js', 'public/desktop-lyrics.css',
+      'public/desktop-lyrics-menu.html', 'public/desktop-lyrics-menu.js',
       'server/desktop-lyrics.mjs', 'server/index.mjs', 'server/config.mjs',
-      'public/app.js', 'public/index.html', 'public/styles.css',
+      'public/app.js', 'public/index.html', 'public/styles.css', 'electron/main.cjs',
     ],
   },
   {
