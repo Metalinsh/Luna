@@ -287,9 +287,10 @@ export function fileVariantLabel(fileName, versionName, variantTokens = []) {
 /** R9：从文件名提取轨道序号 */
 export function extractTrackNo(fileName) {
   const base = stripExt(fileName);
-  let m = /^(\d{1,3})[._\-\s]/.exec(base);
+  // 分隔符放宽到全角冒号/顿号/括号：`track10: xxx`、`track0（序章）`、`01、xxx`
+  let m = /^(\d{1,3})(?:[._\-\s:：、]|[（(]|$)/.exec(base);
   if (m) return { no: Number(m[1]), prefix: m[0] };
-  m = /^track\s*(\d{1,3})[._\-\s]/i.exec(base);
+  m = /^(?:track|tr)\s*(\d{1,3})(?:[._\-\s:：、]|[（(]|$)/i.exec(base);
   if (m) return { no: Number(m[1]), prefix: m[0] };
   if (/^EP[._\-\s]/i.test(base)) return { no: 9999, prefix: base.slice(0, 3) };
   return { no: null, prefix: '' };

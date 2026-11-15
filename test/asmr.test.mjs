@@ -91,6 +91,17 @@ test('轨号提取：多种命名', () => {
   assert.equal(extractTrackNo('歌.mp3').no, null);
 });
 
+test('轨号提取：全角冒号/顿号/括号/TR 前缀', () => {
+  assert.equal(extractTrackNo('track10: 压扁巫女妈妈.mp3').no, 10);
+  assert.equal(extractTrackNo('track0（序章）：和巫女女儿的邂逅.wav').no, 0);
+  assert.equal(extractTrackNo('02、序章.mp3').no, 2);
+  assert.equal(extractTrackNo('tr00.mp3').no, 0);
+  assert.equal(extractTrackNo('TR12.wav').no, 12);
+  // 数字开头但不是轨号，不能被误判
+  assert.equal(extractTrackNo('12人の声.wav').no, null);
+  assert.equal(extractTrackNo('3D音效.wav').no, null);
+});
+
 test('差分标记词提取', () => {
   const t = variantTokensOf('02_nonSE（液体音無し）');
   assert.ok(t.includes('nonSE'));
