@@ -321,6 +321,33 @@ async function createWindow() {
   });
   mainWindow.loadURL(serverUrl);
 
+  /*
+   * 「后退」：鼠标侧键（X1）与 Alt+←。
+   *
+   * 单曲详情是页面内浮层（不在 history 里），关它必须由页面自己做，所以这里只负责
+   * **拦住系统级默认后退**，再转调渲染进程的 window.lunaBack（浮层开着就关浮层，
+   * 否则才真的退上一页，判定在 public/app.js 里，避免两处逻辑各写一套）。
+   * 渲染进程拦不住 Chromium/Electron 的系统级后退，因此必须在主进程这一层拦。
+   */
+  const forwardBack = () => {
+    try {
+      mainWindow?.webContents.executeJavaScript('window.lunaBack?.()', true).catch(() => {});
+    } catch { /* 窗口已销毁，忽略 */ }
+  };
+  // Windows 上鼠标侧键会变成 app-command: browser-backward
+  mainWindow.on('app-command', (event, command) => {
+    if (command !== 'browser-backward') return;
+    event?.preventDefault?.();
+    forwardBack();
+  });
+  // Alt+←：拦在 before-input-event，事件就不会再下发给页面（避免默认后退）
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (!input.alt || input.key !== 'ArrowLeft') return;
+    event.preventDefault();
+    forwardBack();
+  });
+
   /**
    * 关闭按钮的两种语义（设置项「关闭窗口时最小化到托盘」）：
    *   开 → 拦住关闭、只隐藏窗口，应用继续在托盘运行

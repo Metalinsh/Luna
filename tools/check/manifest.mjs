@@ -42,7 +42,7 @@ export const AREAS = [
   {
     id: 'wall',
     title: '专辑墙',
-    desc: '卡片与角标、标签筛选（风格/社团/CV 三栏）、三个收藏入口、收藏视图、从详情返回保留浏览进度',
+    desc: '卡片与角标、标签筛选（风格/社团/CV 三栏）、三个收藏入口、收藏视图、从详情返回保留浏览进度、排序（最近更新 / 收藏时间 / RJ号升降，收藏视图即时生效）',
     unit: [],
     ui: ['check/wall.mjs', 'check/favorites.mjs'],
     app: true,
@@ -63,7 +63,7 @@ export const AREAS = [
   {
     id: 'detail',
     title: '专辑详情',
-    desc: '曲目表布局、列宽拖动、双击名称播放、多艺术家显示、图片预览与看原图、点封面看原图',
+    desc: '曲目表布局、列宽拖动、双击名称播放、多艺术家显示、图片预览与看原图、点封面看原图、拖动行首调整播放顺序（含音声 / 恢复默认）',
     unit: [],
     ui: ['check/detail.mjs', 'check/gallery.mjs'],
     app: true,
@@ -99,7 +99,7 @@ export const AREAS = [
   {
     id: 'player',
     title: '播放器',
-    desc: '播放组件常驻、四种播放模式、单曲详情浮层与进度条',
+    desc: '播放组件常驻、四种播放模式、单曲详情浮层与进度条、键盘快捷键（空格 / ←→ 快进退 / ↑↓ 音量 / Ctrl+Alt+←→ 切曲 / Alt+← 与鼠标侧键后退）',
     unit: [],
     ui: ['check/player.mjs'],
     app: true,
@@ -144,7 +144,7 @@ export const AREAS = [
   {
     id: 'settings',
     title: '设置界面',
-    desc: '⚙ 位置与面板结构、压缩包预取与缓存设置、桌面（关闭窗口最小化到托盘）、三种配色与背景透明度、提醒文案',
+    desc: '⚙ 位置与面板结构、压缩包预取与缓存设置、桌面（关闭窗口最小化到托盘）、快捷键自定义（改键 / 冲突拒绝 / 恢复默认）、三种配色与背景透明度、提醒文案',
     unit: [],
     ui: ['check/settings.mjs'],
     app: true,

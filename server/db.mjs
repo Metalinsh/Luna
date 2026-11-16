@@ -15,7 +15,7 @@ import {
   DB_FILE, DATA_DIR, BACKUP_DIR, ensureDirs, albumKeyOf, normalizeText, PERSIST_SEP,
 } from './config.mjs';
 
-export const SCHEMA_VERSION = 12;
+export const SCHEMA_VERSION = 13;
 export const PLACEHOLDER_ALBUM = '(未知专辑)';
 export const PLACEHOLDER_ARTIST = '(未知艺术家)';
 
@@ -372,6 +372,17 @@ function addV8Columns() {
   }
 }
 
+/**
+ * V13：专辑的自定义音轨顺序（专辑详情页拖动调整播放顺序）。
+ * 存 JSON 数组，元素是"行键"：普通专辑 `tracks.id`，音声是 `row.key`（特典带 `bonus:` 前缀）。
+ * 空/NULL = 用扫描出来的自然顺序。
+ */
+function addV13Columns() {
+  if (!columnNames('albums').includes('track_order')) {
+    db.exec('ALTER TABLE albums ADD COLUMN track_order TEXT');
+  }
+}
+
 function addV6Columns() {
   const wanted = {
     tracks: [
@@ -706,6 +717,7 @@ function migrate() {
   createV7Tables();
   addV8Columns();
   createV10Tables();
+  addV13Columns();
 
   let version;
   if (hadMeta) {
@@ -727,15 +739,17 @@ function migrate() {
   } else if (version < SCHEMA_VERSION) {
     // v2..v11 → v12：只补新表、新列与两类数据改写（分隔符、标签分套），无需重建专辑
     migrationReport.migrated = true;
-    migrationReport.note = version >= 11
-      ? `v${version} → v${SCHEMA_VERSION}：标签拆分为「普通专辑 / ASMR」两套（详见下条）`
-      : version >= 10
-        ? `v${version} → v${SCHEMA_VERSION}：库内分隔符升级（详见下条）`
-        : version >= 9
-          ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
-          : version >= 8
-            ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
-            : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
+    migrationReport.note = version >= 12
+      ? `v${version} → v${SCHEMA_VERSION}：新增专辑自定义音轨顺序（专辑详情可拖动调整播放顺序）`
+      : version >= 11
+        ? `v${version} → v${SCHEMA_VERSION}：标签拆分为「普通专辑 / ASMR」两套（详见下条）`
+        : version >= 10
+          ? `v${version} → v${SCHEMA_VERSION}：库内分隔符升级（详见下条）`
+          : version >= 9
+            ? `v${version} → v${SCHEMA_VERSION}：新增「已移除的专辑」排除清单（移出音乐库的专辑在后续扫描中自动跳过）`
+            : version >= 8
+              ? `v${version} → v${SCHEMA_VERSION}：清理被误收录的图片轨道、新增「已移除的专辑」排除清单`
+              : `v${version} → v${SCHEMA_VERSION}：新增音声版本表、社团与喜欢字段、压缩包清单表、压缩包缓存登记表、标签分类（风格/社团/CV）、清理被误收录的图片轨道、新增「已移除的专辑」排除清单`;
   }
 
   if (version < 8) {
@@ -871,6 +885,50 @@ export function getAlbumByKeyOrFail(albumKey) {
 
 export function countAlbums() {
   return db.prepare('SELECT COUNT(*) AS n FROM albums').get().n;
+}
+
+/**
+ * 专辑的自定义音轨顺序（v13）：返回按位置排好的"行键"数组。
+ * 空数组 = 没有自定义顺序。坏数据（非数组 / 非字符串元素）一律当没有，不抛错。
+ */
+export function getAlbumTrackOrder(albumId) {
+  const row = db.prepare('SELECT track_order FROM albums WHERE id = ?').get(Number(albumId));
+  const raw = row?.track_order;
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((k) => String(k)).filter((k) => k.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 按保存的自定义顺序重排行（纯函数，供详情接口与单测共用）。
+ *
+ * 规则：在 order 里出现过的行按其在数组里的位置排；没出现过的（新扫描到的曲目）
+ * 保持原来的自然顺序排在后面；order 里已不存在的键自然被忽略。
+ * 用稳定排序（p 相同则比原始下标），所以自然顺序不会被破坏。
+ */
+export function applySavedOrder(rows, order, keyOf) {
+  if (!order?.length) return rows;
+  const pos = new Map(order.map((k, i) => [String(k), i]));
+  return rows
+    .map((row, i) => ({ row, i, p: pos.has(keyOf(row)) ? pos.get(keyOf(row)) : Number.MAX_SAFE_INTEGER }))
+    .sort((a, b) => a.p - b.p || a.i - b.i)
+    .map((x) => x.row);
+}
+
+/**
+ * 保存自定义音轨顺序。传空数组/NULL = 清除（恢复扫描顺序）。
+ * 去重并限制长度，避免异常输入把库写坏；返回实际保存的数组。
+ */
+export function setAlbumTrackOrder(albumId, keys = null) {
+  const arr = [...new Set((keys ?? []).map((k) => String(k)).filter(Boolean))].slice(0, 5000);
+  db.prepare('UPDATE albums SET track_order = ? WHERE id = ?')
+    .run(arr.length ? JSON.stringify(arr) : null, Number(albumId));
+  return arr;
 }
 
 function createAlbum(albumKey, patch = {}) {
@@ -1951,6 +2009,17 @@ export const SORT_OPTIONS = {
   'year-desc': `a.year DESC NULLS LAST, ${ALBUM_TITLE} COLLATE NOCASE ASC`,
   'year-asc': `a.year ASC NULLS LAST, ${ALBUM_TITLE} COLLATE NOCASE ASC`,
   'added-desc': 'added_max DESC',
+  // 最近更新：标签 / 元数据 / 封面 / 收藏等改动都会动 albums.updated_at
+  'updated-desc': 'a.updated_at DESC, album COLLATE NOCASE ASC',
+  // 收藏时间：只喜欢过的专辑有值，其余排最后（与年份排序的 NULLS LAST 口径一致）
+  'favorite-desc': 'a.favorite_at DESC NULLS LAST, album COLLATE NOCASE ASC',
+  // RJ 号：音声发行按 RJ 序号排列；没有 RJ 的（普通专辑 / 无号音声）统一排后面
+  'rj-asc': `(a.rj_code IS NULL OR TRIM(a.rj_code) = '') ASC,
+             a.rj_code COLLATE NOCASE ASC,
+             album COLLATE NOCASE ASC`,
+  'rj-desc': `(a.rj_code IS NULL OR TRIM(a.rj_code) = '') ASC,
+              a.rj_code COLLATE NOCASE DESC,
+              album COLLATE NOCASE ASC`,
   'tracks-desc': 'track_count DESC, album COLLATE NOCASE ASC',
   'duration-desc': 'duration_sum DESC',
   'tags-desc': 'tag_count DESC, album COLLATE NOCASE ASC',

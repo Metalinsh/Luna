@@ -43,6 +43,22 @@ const shot = async (f) => {
   fs.writeFileSync(path.join(SHOTS, f), Buffer.from(r.data, 'base64'));
 };
 
+/** 通过 CDP 发一次键盘按键（keydown + keyup），走真实的事件路径而不是合成 Event */
+const key = async ({ key: k, code, vk, modifiers = 0, text = '' }) => {
+  const base = { key: k, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', ...base, text });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base, text: '' });
+};
+/** 鼠标侧键「后退」（button = back，buttons 位掩码 8） */
+const mouseBack = async () => {
+  await send('Input.dispatchMouseEvent', {
+    type: 'mousePressed', x: 320, y: 320, button: 'back', buttons: 8, clickCount: 1,
+  });
+  await send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased', x: 320, y: 320, button: 'back', buttons: 0, clickCount: 1,
+  });
+};
+
 await send('Page.enable'); await send('Runtime.enable');
 await send('Page.reload', { ignoreCache: true });
 await sleep(4000);
@@ -247,6 +263,197 @@ try {
     `${vol.at150.label} boost=${vol.at150.boost}`);
   ok('放大由 Web Audio 承担（元素音量恒为 1，避免两处叠加）',
     vol.at50.elementVolume === 1, `at50 elementVolume=${vol.at50.elementVolume}`);
+
+  console.log('\n— 需求5：键盘快捷键（→ / ← / 空格 / ↑ / ↓） —');
+  // 准备：回到有完整曲目的音声专辑并开播（暂停状态验证更精准，不受播放推进干扰）
+  const prep = await ev(`(async () => {
+    const a = (await fetch('/api/albums?limit=100&kind=voice').then(x => x.json())).albums
+      .find(x => x.rj_code === 'RJ01113481');
+    location.hash = '#/album/' + a.id;
+    await new Promise(z => setTimeout(z, 2200));
+    document.querySelector('#playAlbumBtn').click();
+    await new Promise(z => setTimeout(z, 2500));
+    const audio = document.querySelector('audio');
+    audio.pause();
+    audio.currentTime = 20;
+    await new Promise(z => setTimeout(z, 400));
+    return { dur: Math.round(audio.duration * 10) / 10, paused: audio.paused, t: audio.currentTime };
+  })()`);
+  ok('准备：媒体已加载且可定位', prep.dur > 25 && prep.paused === true, `时长 ${prep.dur}s`);
+
+  await key({ key: 'ArrowRight', code: 'ArrowRight', vk: 39 });
+  await sleep(500);
+  const fwd = await ev(`Math.round(document.querySelector('audio').currentTime * 10) / 10`);
+  ok('→ 快进 5 秒', fwd >= 24.5 && fwd <= 25.5, `20s → ${fwd}s`);
+
+  await key({ key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 });
+  await sleep(500);
+  const back = await ev(`Math.round(document.querySelector('audio').currentTime * 10) / 10`);
+  ok('← 快退 5 秒', back >= 19.5 && back <= 20.5, `${fwd}s → ${back}s`);
+
+  // 输入框里不能抢方向键（搜索框内按 → 应移动光标而不是跳播放进度）
+  const typingGuard = await ev(`(async () => {
+    const input = document.querySelector('#searchInput');
+    input.focus();
+    const t0 = document.querySelector('audio').currentTime;
+    return { t0 };
+  })()`);
+  await key({ key: 'ArrowRight', code: 'ArrowRight', vk: 39 });
+  await sleep(400);
+  const typingAfter = await ev(`(() => {
+    const t = document.querySelector('audio').currentTime;
+    document.querySelector('#searchInput').blur();
+    return Math.round(t * 10) / 10;
+  })()`);
+  ok('输入框内不劫持方向键', Math.abs(typingAfter - typingGuard.t0) < 0.4,
+    `${Math.round(typingGuard.t0 * 10) / 10}s → ${typingAfter}s`);
+
+  const space1 = await ev(`document.querySelector('audio').paused`);
+  await key({ key: ' ', code: 'Space', vk: 32, text: ' ' });
+  await sleep(700);
+  const space2 = await ev(`document.querySelector('audio').paused`);
+  await key({ key: ' ', code: 'Space', vk: 32, text: ' ' });
+  await sleep(700);
+  const space3 = await ev(`document.querySelector('audio').paused`);
+  ok('空格切换播放 / 暂停', space1 === true && space2 === false && space3 === true,
+    `paused ${space1} → ${space2} → ${space3}`);
+
+  const volBefore = await ev(`document.querySelector('#volume').value`);
+  await key({ key: 'ArrowUp', code: 'ArrowUp', vk: 38 });
+  await sleep(400);
+  const volUp = await ev(`({ v: document.querySelector('#volume').value, label: document.querySelector('#volumeVal').textContent })`);
+  await key({ key: 'ArrowDown', code: 'ArrowDown', vk: 40 });
+  await sleep(400);
+  const volDown = await ev(`({ v: document.querySelector('#volume').value, label: document.querySelector('#volumeVal').textContent })`);
+  ok('↑ 音量 +5%', Number(volUp.v) === Number(volBefore) + 5 && volUp.label === `${volUp.v}%`,
+    `${volBefore}% → ${volUp.label}`);
+  ok('↓ 音量 -5%', Number(volDown.v) === Number(volBefore), `${volUp.v}% → ${volDown.label}`);
+
+  console.log('\n— 需求5b：Ctrl+Alt+← / → 上一首 / 下一首 —');
+  // prev() 在 currentTime > 3s 时是「回到本曲开头」，先把进度归零才能验证真正的切曲
+  const startTitle = await ev(`(async () => {
+    const audio = document.querySelector('audio');
+    audio.pause();
+    audio.currentTime = 0;
+    await new Promise(z => setTimeout(z, 300));
+    return document.querySelector('#npTitle').textContent.trim();
+  })()`);
+  await key({ key: 'ArrowRight', code: 'ArrowRight', vk: 39, modifiers: 3 }); // Ctrl(2) + Alt(1)
+  await sleep(1400);
+  const nextTitle = await ev(`document.querySelector('#npTitle').textContent.trim()`);
+  ok('Ctrl+Alt+→ 切到下一首', Boolean(nextTitle) && nextTitle !== startTitle,
+    `${startTitle} → ${nextTitle}`);
+
+  await ev(`(() => { const a = document.querySelector('audio'); a.pause(); a.currentTime = 0; })()`);
+  await sleep(300);
+  await key({ key: 'ArrowLeft', code: 'ArrowLeft', vk: 37, modifiers: 3 });
+  await sleep(1400);
+  const prevTitle = await ev(`document.querySelector('#npTitle').textContent.trim()`);
+  ok('Ctrl+Alt+← 切回上一首', prevTitle === startTitle, `${nextTitle} → ${prevTitle}`);
+
+  await ev(`document.querySelector('audio').pause(); true`);
+
+  console.log('\n— 需求6：单曲详情页的后退键（Alt+← / 鼠标侧键） —');
+  await ev(`document.querySelector('#npOpen').click(); true`);
+  await sleep(700);
+  const npOpen = await ev(`!document.querySelector('#nowPlaying').hidden`);
+  const hashBefore = await ev(`location.hash`);
+  await key({ key: 'ArrowLeft', code: 'ArrowLeft', vk: 37, modifiers: 1 }); // modifiers 1 = Alt
+  await sleep(600);
+  const altBack = await ev(`({
+    npHidden: document.querySelector('#nowPlaying').hidden,
+    hash: location.hash,
+    albumView: !document.querySelector('#viewAlbumDetail').hidden,
+  })`);
+  ok('Alt+← 关闭单曲详情（等同返回按钮）',
+    npOpen === true && altBack.npHidden === true && altBack.albumView === true,
+    `浮层 ${npOpen} → ${altBack.npHidden} · 仍在专辑详情=${altBack.albumView}`);
+  ok('后退不改动当前页面地址（不是浏览器后退）', altBack.hash === hashBefore, `${hashBefore} → ${altBack.hash}`);
+
+  await ev(`document.querySelector('#npOpen').click(); true`);
+  await sleep(700);
+  const npOpen2 = await ev(`!document.querySelector('#nowPlaying').hidden`);
+  await mouseBack();
+  await sleep(600);
+  const mouseBackState = await ev(`({
+    npHidden: document.querySelector('#nowPlaying').hidden,
+    albumView: !document.querySelector('#viewAlbumDetail').hidden,
+  })`);
+  ok('鼠标侧键后退关闭单曲详情', npOpen2 === true && mouseBackState.npHidden === true,
+    `浮层 ${npOpen2} → ${mouseBackState.npHidden}`);
+  ok('关闭后仍停在进入前的页面', mouseBackState.albumView === true,
+    `专辑详情可见=${mouseBackState.albumView}`);
+
+  console.log('\n— 需求7：视频版的同一套快捷键（空格 / → / ↑） —');
+  const videoPrep = await ev(`(async () => {
+    // 挑一张「视频版是本地文件」的发行：压缩包里的视频要先预读，不适合作为快捷键用例
+    const albums = (await fetch('/api/albums?limit=200&kind=voice').then(x => x.json()))
+      .albums.filter(x => x.has_video);
+    let picked = null;
+    for (const a of albums) {
+      const d = await fetch('/api/albums/' + a.id).then(x => x.json());
+      const local = [...(d.tracks ?? []), ...(d.bonus_tracks ?? [])]
+        .some(t => (t.variants ?? []).some(v => v.file_kind === 'video' && v.source_kind === 'file'));
+      if (local) { picked = a; break; }
+    }
+    if (!picked) return { ok: false, reason: '库里没有本地视频版的发行' };
+    location.hash = '#/album/' + picked.id;
+    await new Promise(z => setTimeout(z, 2500));
+    const chip = document.querySelector('.ver-chip.is-video');
+    if (!chip) return { ok: false, reason: '详情页没有视频 chip' };
+    chip.click();
+    await new Promise(z => setTimeout(z, 1500));
+    const v = document.querySelector('#videoModal video');
+    for (let i = 0; i < 80 && v && v.readyState < 1; i += 1) await new Promise(z => setTimeout(z, 100));
+    if (!v || v.readyState < 1) return { ok: false, ready: v?.readyState ?? -1, album: picked.album };
+    v.pause();
+    v.currentTime = 5;
+    await new Promise(z => setTimeout(z, 600));
+    return { ok: true, album: picked.album, dur: Math.round(v.duration * 10) / 10, t: v.currentTime, volume: v.volume };
+  })()`);
+  ok('视频版弹窗可播放（原生 <video>）', videoPrep.ok === true,
+    videoPrep.ok ? `${String(videoPrep.album).slice(0, 20)} · 时长 ${videoPrep.dur}s`
+      : `${videoPrep.reason ?? ''} readyState=${videoPrep.ready}`);
+
+  if (videoPrep.ok) {
+    await key({ key: 'ArrowRight', code: 'ArrowRight', vk: 39 });
+    await sleep(500);
+    const vFwd = await ev(`Math.round(document.querySelector('#videoModal video').currentTime * 10) / 10`);
+    ok('视频 → 快进 5 秒', vFwd >= 9.5 && vFwd <= 10.5, `5s → ${vFwd}s`);
+
+    await key({ key: ' ', code: 'Space', vk: 32, text: ' ' });
+    await sleep(800);
+    const vSpace = await ev(`document.querySelector('#videoModal video').paused`);
+    await key({ key: ' ', code: 'Space', vk: 32, text: ' ' });
+    await sleep(600);
+    const vSpace2 = await ev(`document.querySelector('#videoModal video').paused`);
+    ok('视频空格切换播放 / 暂停', vSpace === false && vSpace2 === true,
+      `paused ${vSpace} → ${vSpace2}`);
+
+    // 固定到 85% 再测，避免受前面用例残留值影响
+    await ev(`(() => {
+      const i = document.querySelector('#volume');
+      i.value = '85';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await sleep(300);
+    const vVol = await ev(`document.querySelector('#videoModal video').volume`);
+    await key({ key: 'ArrowUp', code: 'ArrowUp', vk: 38 });
+    await sleep(400);
+    const vVolUp = await ev(`document.querySelector('#videoModal video').volume`);
+    ok('视频 ↑ 跟随主音量（+5%）', Math.abs(vVolUp - Math.min(1, vVol + 0.05)) < 0.02,
+      `${vVol.toFixed(2)} → ${vVolUp.toFixed(2)}`);
+
+    await ev(`document.querySelector('#videoModal video')?.pause(); document.querySelector('#videoModal')?.remove(); true`);
+    // 收尾：音量回到常用值 85%，别把测试值留给下一次
+    await ev(`(() => {
+      const i = document.querySelector('#volume');
+      i.value = '85';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+  }
+  await shot('v129-keyboard-shortcuts.png');
+
 } catch (err) {
   console.error('验证异常：', err.message);
   fail += 1;

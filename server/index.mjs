@@ -70,6 +70,11 @@ const parseId = (value) => {
   return Number.isInteger(id) && id > 0 ? id : null;
 };
 
+/**
+ * 按专辑保存的自定义顺序重排行（v13）：实现放在 db.mjs（纯函数，单测直接覆盖）。
+ */
+const applySavedOrder = store.applySavedOrder;
+
 /* ---------------------------------------------------- PowerShell 系统对话框 */
 
 /**
@@ -435,6 +440,7 @@ app.get('/api/albums/:id', (req, res) => {
   if (!album) return res.status(404).json({ error: '专辑不存在' });
 
   const tracks = store.listAlbumTracks(id);
+  const savedOrder = store.getAlbumTrackOrder(id);
   const totalDuration = tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0);
   // 详情页与专辑墙使用同一套艺术家显示规则，避免两处不一致
   const displayArtist = store.computeDisplayArtist(
@@ -469,13 +475,16 @@ app.get('/api/albums/:id', (req, res) => {
     completeness: completeness.completenessForAlbum(id),
     /** 压缩包只读挂载（P1）：该发行是否有曲目仍在包内 */
     archive: store.albumArchiveInfo(id),
+    /** v13：是否设置过自定义音轨顺序（详情页据此显示「恢复默认顺序」） */
+    custom_order: savedOrder.length > 0,
   };
 
   // 普通音乐专辑：维持原有平铺列表
   if (!album.is_voice) {
+    const ordered = applySavedOrder(tracks, savedOrder, (t) => String(t.id));
     return res.json({
       album: base,
-      tracks: tracks.map((t) => ({ ...t, stream_url: `/api/stream/${t.id}` })),
+      tracks: ordered.map((t) => ({ ...t, stream_url: `/api/stream/${t.id}` })),
     });
   }
 
@@ -549,6 +558,8 @@ app.get('/api/albums/:id', (req, res) => {
   const list = [...rows.values()].sort((a, b) => (a.is_bonus === b.is_bonus
     ? (a.track_no ?? 9999) - (b.track_no ?? 9999)
     : (a.is_bonus ? 1 : -1)));
+  // v13：自定义顺序按行键应用（正片与特典各自保持相对次序）
+  const orderedList = applySavedOrder(list, savedOrder, (r) => r.key);
 
   const decisions = store.getMergeDecisions(id);
   res.json({
@@ -563,13 +574,37 @@ app.get('/api/albums/:id', (req, res) => {
       total_bytes: v.total_bytes,
       track_count: v.track_count,
     })),
-    tracks: list.filter((r) => !r.is_bonus),
-    bonus_tracks: list.filter((r) => r.is_bonus),
+    tracks: orderedList.filter((r) => !r.is_bonus),
+    bonus_tracks: orderedList.filter((r) => r.is_bonus),
     merge_decisions: {
       merge: decisions.merge.length,
       separate: decisions.separate.length,
     },
   });
+});
+
+/**
+ * 保存专辑的播放顺序（v13，专辑详情拖动排序）。
+ * 只接受属于该专辑的"行键"，顺序里的无关键会被丢掉并回报数量；
+ * 传空数组 = 恢复默认（扫描顺序）。
+ */
+app.post('/api/albums/:id/track-order', (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return badRequest(res, '无效的专辑 ID');
+  const album = store.getAlbumById(id);
+  if (!album) return res.status(404).json({ error: '专辑不存在' });
+
+  let allowed;
+  if (!album.is_voice) {
+    allowed = new Set(store.listAlbumTracks(id).map((t) => String(t.id)));
+  } else {
+    // 与 GET /api/albums/:id 的行键口径保持一致
+    allowed = new Set(store.listVoiceTracks(id).map((t) => `${t.is_bonus ? 'bonus:' : ''}${t.track_key}`));
+  }
+  const raw = Array.isArray(req.body?.order) ? req.body.order : [];
+  const keys = raw.map((k) => String(k)).filter((k) => allowed.has(k));
+  const saved = store.setAlbumTrackOrder(id, keys);
+  res.json({ ok: true, count: saved.length, ignored: raw.length - saved.length });
 });
 
 /** 文字宽松归一：全角转半角、去空白、小写，用于「文件夹名里含社团名」这类匹配 */
@@ -1568,6 +1603,14 @@ app.post('/api/config', (req, res) => {
     const next = {};
     if (d.minimizeToTray !== undefined) next.minimizeToTray = d.minimizeToTray === true;
     if (Object.keys(next).length) patch.desktop = next;
+  }
+  // 播放器快捷键：{ 动作: 组合键字符串 }，格式校验与默认回退在 config.sanitize 里
+  if (req.body?.shortcuts && typeof req.body.shortcuts === 'object') {
+    const next = {};
+    for (const [id, combo] of Object.entries(req.body.shortcuts)) {
+      if (combo != null) next[id] = String(combo);
+    }
+    if (Object.keys(next).length) patch.shortcuts = next;
   }
   res.json({ config: writeConfig(patch) });
 });

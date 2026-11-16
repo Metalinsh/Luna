@@ -68,6 +68,19 @@ let overlay = null;
 try {
   // 注意排除桌面歌词页：它的 URL 同样以 http://127.0.0.1:8799 开头
   mainPage = await connect((url) => url.startsWith('http://127.0.0.1:8799') && !url.includes('desktop-lyrics'));
+  /*
+   * 前面的区域可能留下播放队列 / 正在播放状态：歌词窗加载时会发 hello，
+   * 主窗口会把「当前曲目 + 进度」回给新窗口，初始文案就变成 ♪ 而不是「未在播放」。
+   * 先重载主窗口把状态归零，保证本区域单独跑与全量顺序跑结果一致。
+   */
+  await mainPage.eval('location.reload(), true');
+  await sleep(4500);
+  await mainPage.eval(`(() => {
+    const a = document.querySelector('audio');
+    if (a) { a.pause(); a.currentTime = 0; }
+    return true;
+  })()`);
+  await sleep(400);
   ok('主界面已去掉「歌词」按钮（歌词改由桌面歌词承担）',
     (await mainPage.eval(`!!document.querySelector('#lyricsBtn')`)) === false);
   ok('桌面歌词按钮仍在播放条上',
@@ -95,8 +108,13 @@ try {
   await sleep(800);
 
   console.log('\n— 需求2：单行歌词与时间轴 —');
-  ok('歌词窗口初始显示「未在播放」',
-    (await overlay.eval(`document.querySelector('#dlCurrent').textContent`)) === '未在播放');
+  let initialText = '';
+  for (let i = 0; i < 10; i += 1) {
+    initialText = await overlay.eval(`document.querySelector('#dlCurrent')?.textContent ?? ''`);
+    if (initialText === '未在播放') break;
+    await sleep(200);
+  }
+  ok('歌词窗口初始显示「未在播放」', initialText === '未在播放', initialText);
 
   // 主窗口广播（模拟播放器事件），歌词窗口应立刻更新
   // 注意时间轴单位与主窗口一致是**毫秒**：用真实量级的 7.4s / 11.5s 才能测出单位错误

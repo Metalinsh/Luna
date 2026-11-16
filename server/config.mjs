@@ -97,11 +97,52 @@ const DEFAULT_CONFIG = {
     /** 自定义背景图（绝对路径或 data URL），null 表示无 */
     bgImage: null,
   },
+  /**
+   * 播放器快捷键（v1.2.9）。值是规范化的组合键字符串：`Ctrl+Alt+Shift+Meta+<code>`，
+   * 其中 `<code>` 用 KeyboardEvent.code（ArrowLeft / Space / KeyL …），与键盘布局无关。
+   * 前端解析并匹配；桌面歌词的 Ctrl+Alt+L / R 是主进程 globalShortcut，不在这里。
+   */
+  shortcuts: {
+    playPause: 'Space',
+    seekBackward: 'ArrowLeft',
+    seekForward: 'ArrowRight',
+    volumeDown: 'ArrowDown',
+    volumeUp: 'ArrowUp',
+    prevTrack: 'Ctrl+Alt+ArrowLeft',
+    nextTrack: 'Ctrl+Alt+ArrowRight',
+    back: 'Alt+ArrowLeft',
+  },
 };
 
 const PREFETCH_MODES = new Set(['off', 'next', 'album']);
 const THEMES = new Set(['midnight', 'nebula', 'graphite']);
 const MODES = new Set(['dark', 'light']);
+
+/** 组合键修饰键的规范顺序；前端生成的字符串也按这个顺序 */
+const SHORTCUT_MODS = ['Ctrl', 'Alt', 'Shift', 'Meta'];
+/** KeyboardEvent.code 只由字母数字组成（ArrowLeft / Space / KeyL / Numpad1 / F5 …） */
+const SHORTCUT_KEY_RE = /^[A-Za-z][A-Za-z0-9]{0,23}$/;
+
+/**
+ * 校验并规范化一个组合键字符串。
+ * 非法（空、修饰键重复/未知、缺主键、多余字符）返回 null，由调用方回退默认值。
+ */
+export function normalizeShortcut(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw || raw.length > 80) return null;
+  const parts = raw.split('+').map((s) => s.trim());
+  // 空段（`Ctrl+`、`Ctrl++P`）一律视为非法，不能靠过滤空串糊过去
+  if (parts.some((p) => !p)) return null;
+  if (parts.length < 1 || parts.length > SHORTCUT_MODS.length + 1) return null;
+  const key = parts.pop();
+  if (!SHORTCUT_KEY_RE.test(key)) return null;
+  const mods = parts;
+  if (new Set(mods).size !== mods.length) return null;
+  if (mods.some((m) => !SHORTCUT_MODS.includes(m))) return null;
+  // 统一成「按 Ctrl → Alt → Shift → Meta 排序」，避免同一个键位存成两种写法
+  const ordered = SHORTCUT_MODS.filter((m) => mods.includes(m));
+  return [...ordered, key].join('+');
+}
 
 /** 配置值归一化：越界或非法的输入一律退回默认，避免坏配置把界面弄坏 */
 function sanitize(cfg) {
@@ -154,9 +195,22 @@ function sanitize(cfg) {
     ? desktopLyrics.outline
     : d.desktopLyrics.outline;
 
+  // 快捷键：只认默认表里存在的动作；非法/重复的键位一律回退默认，未知动作直接丢弃
+  const rawShortcuts = cfg.shortcuts && typeof cfg.shortcuts === 'object' ? cfg.shortcuts : {};
+  const shortcuts = {};
+  const usedCombos = new Set();
+  for (const [id, def] of Object.entries(d.shortcuts)) {
+    let combo = normalizeShortcut(rawShortcuts[id]) ?? def;
+    // 两个动作绑同一个键位时，后出现的那个回退默认（否则前者永远收不到）
+    if (usedCombos.has(combo) && !usedCombos.has(def)) combo = def;
+    usedCombos.add(combo);
+    shortcuts[id] = combo;
+  }
+
   return {
     ...d, ...cfg, search: { ...d.search, ...(cfg.search ?? {}) },
     backup: { ...d.backup, ...(cfg.backup ?? {}) }, archive, appearance, desktop, desktopLyrics,
+    shortcuts,
   };
 }
 
@@ -203,7 +257,7 @@ export function resolveCacheDir(cfg = readConfig()) {
 export function writeConfig(patch = {}) {
   const current = readConfig();
   const merged = { ...current, ...patch };
-  for (const key of ['search', 'backup', 'archive', 'appearance', 'desktop', 'desktopLyrics']) {
+  for (const key of ['search', 'backup', 'archive', 'appearance', 'desktop', 'desktopLyrics', 'shortcuts']) {
     if (patch[key] && typeof patch[key] === 'object') {
       merged[key] = { ...current[key], ...patch[key] };
     }

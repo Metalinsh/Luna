@@ -336,6 +336,68 @@ try {
   ok('收起后恢复折叠态',
     tagbar.collapsed?.isExpandedClass === false && tagbar.collapsed?.targetHasMore === true);
 
+  console.log('\n— 排序 —');
+  const sortOptions = await cdp.eval(`(async () => {
+    location.hash = '#/';
+    await new Promise(z => setTimeout(z, 1200));
+    const r = await fetch('/api/libraries').then(x => x.json());
+    const voice = r.libraries.find(l => l.kind === 'voice') ?? r.libraries[0];
+    document.querySelector('.library-item[data-id="' + voice.id + '"]')?.click();
+    await new Promise(z => setTimeout(z, 2200));
+    const sel = document.querySelector('#sortSelect');
+    return { options: [...sel.options].map(o => o.textContent.trim()), value: sel.value, cards: document.querySelectorAll('#albumGrid .album-card').length };
+  })()`);
+  ok('排序下拉含 收藏时间 / 最近更新 / RJ号（升·降）',
+    ['收藏时间', '最近更新', 'RJ号 小→大', 'RJ号 大→小'].every((t) => sortOptions.options.includes(t)),
+    sortOptions.options.join(' | '));
+
+  const rjOrders = await cdp.eval(`(async () => {
+    const read = async (sort) => {
+      const sel = document.querySelector('#sortSelect');
+      sel.value = sort;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(z => setTimeout(z, 2200));
+      const libId = localStorage.getItem('libraryId');
+      const api = await fetch('/api/albums?sort=' + sort + '&libraryId=' + libId + '&limit=24').then(x => x.json());
+      const dom = [...document.querySelectorAll('#albumGrid .album-card .album-name')].map(e => e.textContent.trim());
+      return {
+        api: api.albums.map(a => a.album),
+        dom,
+        rjs: api.albums.map(a => a.rj_code ?? null),
+        selected: sel.value,
+      };
+    };
+    return { asc: await read('rj-asc'), desc: await read('rj-desc') };
+  })()`);
+  const orderMatches = (o) => o.dom.length > 0 && o.dom.every((name, i) => name === o.api[i]);
+  ok('RJ号 小→大：卡片顺序与接口一致', rjOrders.asc.selected === 'rj-asc' && orderMatches(rjOrders.asc),
+    `${rjOrders.asc.selected} · 卡片 ${rjOrders.asc.dom.length} 张 · 首个 RJ=${rjOrders.asc.rjs[0]}`);
+  ok('RJ号 大→小：卡片顺序与接口一致', rjOrders.desc.selected === 'rj-desc' && orderMatches(rjOrders.desc),
+    `${rjOrders.desc.selected} · 卡片 ${rjOrders.desc.dom.length} 张 · 首个 RJ=${rjOrders.desc.rjs[0]}`);
+
+  const favSort = await cdp.eval(`(async () => {
+    const orig = window.fetch;
+    window.__sortReqs = [];
+    window.fetch = (u, ...rest) => {
+      const s = String(u);
+      if (s.includes('/api/albums?')) window.__sortReqs.push(s);
+      return orig(u, ...rest);
+    };
+    location.hash = '#/favasmr';
+    await new Promise(z => setTimeout(z, 2200));
+    window.__sortReqs = [];
+    const sel = document.querySelector('#sortSelect');
+    sel.value = 'album-desc';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(z => setTimeout(z, 2000));
+    const reqs = window.__sortReqs.slice();
+    window.fetch = orig;
+    return { hash: location.hash, reqs };
+  })()`);
+  ok('收藏视图里换排序会立即重载（不再要点一下别处才生效）',
+    favSort.reqs.some((u) => /sort=album-desc/.test(u) && /favorite=1/.test(u)),
+    `${favSort.hash} · 请求 ${favSort.reqs.length} 次`);
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 } catch (err) {
   console.error('验证脚本异常：', err.message);

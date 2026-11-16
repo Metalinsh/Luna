@@ -47,6 +47,30 @@ const shot = async (f) => {
   const r = await send('Page.captureScreenshot', { format: 'png' });
   fs.writeFileSync(path.join(SHOTS, f), Buffer.from(r.data, 'base64'));
 };
+/** 鼠标拖拽（Pointer Events 由鼠标事件合成，和真实拖动走同一条路径） */
+const mouseAt = async (type, x, y) => {
+  await send('Input.dispatchMouseEvent', {
+    type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1,
+  });
+};
+/** 把第 from 行拖到第 to 行附近（frac 0.75 = 落在该行下半部） */
+const dragRow = async (tableSel, from, to, frac = 0.75) => {
+  const geo = await ev(`(() => {
+    const rows = [...document.querySelectorAll('${tableSel} .track-row:not(.is-head)')];
+    const h = rows[${from}].querySelector('.drag-handle').getBoundingClientRect();
+    const t = rows[${to}].getBoundingClientRect();
+    return { hx: h.x + h.width / 2, hy: h.y + h.height / 2, ty: t.top + t.height * ${frac} };
+  })()`);
+  await mouseAt('mouseMoved', geo.hx, geo.hy);
+  await mouseAt('mousePressed', geo.hx, geo.hy);
+  await sleep(120);
+  await mouseAt('mouseMoved', geo.hx, (geo.hy + geo.ty) / 2);
+  await sleep(120);
+  await mouseAt('mouseMoved', geo.hx, geo.ty);
+  await sleep(150);
+  await mouseAt('mouseReleased', geo.hx, geo.ty);
+};
+const rowTitles = (sel) => ev(`[...document.querySelectorAll('${sel} .track-row:not(.is-head) .t-title span')].map(e => e.textContent.trim())`);
 
 await send('Page.enable'); await send('Runtime.enable');
 await send('Page.reload', { ignoreCache: true });
@@ -169,6 +193,138 @@ try {
   ok('专辑墙也显示完整艺术家',
     /KOTONOHOUSE/.test(multi.cardCredit) && /Neko Hacker/.test(multi.cardCredit), multi.cardCredit);
   await shot('v7-multi-artist.png');
+
+  console.log('\n— 需求5：拖动调整播放顺序（v13） —');
+  const musicOrder = await ev(`(async () => {
+    const r = await fetch('/api/albums?limit=200&kind=music').then(x => x.json());
+    for (const a of r.albums) {
+      const d = await fetch('/api/albums/' + a.id).then(x => x.json());
+      const list = d.tracks ?? [];
+      if (list.length >= 3 && list.every(t => (t.source_kind ?? 'file') === 'file')) {
+        location.hash = '#/album/' + a.id;
+        await new Promise(z => setTimeout(z, 2400));
+        return { id: a.id, titles: list.map(t => t.title) };
+      }
+    }
+    return null;
+  })()`);
+  if (!musicOrder) {
+    ok('找到可拖动排序的普通专辑', false, '库里没有 3 首以上本地曲目');
+  } else {
+    const ui = await ev(`({
+      handles: document.querySelectorAll('#albumDetail .drag-handle').length,
+      rows: document.querySelectorAll('#albumDetail .track-row:not(.is-head)').length,
+      bar: Boolean(document.querySelector('.track-order-bar')),
+    })`);
+    ok('每个曲目行都有拖动手柄，初始没有「自定义顺序」提示条',
+      ui.handles === ui.rows && ui.rows === musicOrder.titles.length && ui.bar === false,
+      `${ui.handles}/${ui.rows} 个手柄 · bar=${ui.bar}`);
+
+    await dragRow('#albumDetail .track-table', 0, 2);
+    await sleep(1800);
+    const moved = await ev(`(async () => {
+      const d = await fetch('/api/albums/${musicOrder.id}').then(x => x.json());
+      const dom = [...document.querySelectorAll('#albumDetail .track-row:not(.is-head) .t-title span')].map(e => e.textContent.trim());
+      return {
+        dom,
+        api: (d.tracks ?? []).map(t => t.title),
+        custom: d.album.custom_order,
+        bar: Boolean(document.querySelector('.track-order-bar')),
+        nums: [...document.querySelectorAll('#albumDetail .t-num-val')].slice(0, 3).map(e => e.textContent.trim()),
+      };
+    })()`);
+    ok('拖动后 DOM 顺序变化（第 1 行落到第 3 行前）',
+      moved.dom[0] === musicOrder.titles[1] && moved.dom[2] === musicOrder.titles[0],
+      moved.dom.slice(0, 3).join(' | '));
+    ok('新顺序已写入接口，且 album.custom_order=true',
+      JSON.stringify(moved.dom) === JSON.stringify(moved.api) && moved.custom === true,
+      `custom=${moved.custom}`);
+    ok('行号改为播放位次（1,2,3…）', moved.nums.join(',') === '1,2,3', moved.nums.join(','));
+    ok('出现「已自定义播放顺序」提示条', moved.bar === true);
+
+    await ev(`document.querySelector('#playAlbumBtn')?.click()`);
+    await sleep(1200);
+    const nowPlaying = await ev(`document.querySelector('#npTitle')?.textContent?.trim() ?? ''`);
+    ok('播放专辑从新的第一首开始（队列跟着新顺序）', nowPlaying === moved.dom[0],
+      `${nowPlaying} vs ${moved.dom[0]}`);
+    await ev(`document.querySelector('audio')?.pause(); true`);
+
+    await ev(`(async () => {
+      location.hash = '#/';
+      await new Promise(z => setTimeout(z, 900));
+      location.hash = '#/album/${musicOrder.id}';
+      await new Promise(z => setTimeout(z, 2400));
+      return true;
+    })()`);
+    const persisted = await rowTitles('#albumDetail');
+    ok('重新打开详情页顺序保持', JSON.stringify(persisted) === JSON.stringify(moved.dom),
+      persisted.slice(0, 3).join(' | '));
+
+    await ev(`document.querySelector('[data-reset-order]')?.click()`);
+    await sleep(2000);
+    const resetState = await ev(`(async () => {
+      const d = await fetch('/api/albums/${musicOrder.id}').then(x => x.json());
+      return {
+        titles: [...document.querySelectorAll('#albumDetail .track-row:not(.is-head) .t-title span')].map(e => e.textContent.trim()),
+        custom: d.album.custom_order,
+        bar: Boolean(document.querySelector('.track-order-bar')),
+      };
+    })()`);
+    ok('「恢复默认顺序」回到扫描顺序',
+      JSON.stringify(resetState.titles) === JSON.stringify(musicOrder.titles)
+      && resetState.custom === false && resetState.bar === false,
+      `custom=${resetState.custom} bar=${resetState.bar}`);
+  }
+
+  const voiceOrder = await ev(`(async () => {
+    const r = await fetch('/api/albums?limit=200&kind=voice').then(x => x.json());
+    for (const a of r.albums) {
+      const d = await fetch('/api/albums/' + a.id).then(x => x.json());
+      const list = d.tracks ?? [];
+      if (list.length >= 3 && list.every(t => (t.variants ?? []).every(v => v.source_kind === 'file'))) {
+        location.hash = '#/album/' + a.id;
+        await new Promise(z => setTimeout(z, 2600));
+        return { id: a.id, titles: list.map(t => t.title), bonus: (d.bonus_tracks ?? []).length };
+      }
+    }
+    return null;
+  })()`);
+  if (!voiceOrder) {
+    ok('找到可拖动排序的音声发行', false, '库里没有 3 行以上本地音声');
+  } else {
+    await ev(`document.querySelector('#voiceTrackTable .track-row:not(.is-head)')?.scrollIntoView({ block: 'center' }); true`);
+    await sleep(700);
+    const vui = await ev(`({
+      handles: document.querySelectorAll('#voiceTrackTable .drag-handle').length,
+      rows: document.querySelectorAll('#voiceTrackTable .track-row:not(.is-head)').length,
+      bonusHandles: document.querySelectorAll('.bonus-box .drag-handle').length,
+    })`);
+    ok('音声轨道行也有拖动手柄',
+      vui.handles === vui.rows && vui.rows === voiceOrder.titles.length,
+      `${vui.handles}/${vui.rows} · 特典手柄 ${vui.bonusHandles}`);
+
+    await dragRow('#voiceTrackTable', 0, 2);
+    await sleep(1800);
+    const vmoved = await ev(`(async () => {
+      const d = await fetch('/api/albums/${voiceOrder.id}').then(x => x.json());
+      const dom = [...document.querySelectorAll('#voiceTrackTable .track-row:not(.is-head) .t-title')]
+        .map(el => el.firstChild?.textContent?.trim() ?? '');
+      return { dom, api: (d.tracks ?? []).map(t => t.title), custom: d.album.custom_order, bar: Boolean(document.querySelector('.track-order-bar')) };
+    })()`);
+    ok('音声发行拖动后顺序变化并落库',
+      vmoved.dom[0] === voiceOrder.titles[1] && vmoved.dom[2] === voiceOrder.titles[0]
+      && JSON.stringify(vmoved.dom) === JSON.stringify(vmoved.api) && vmoved.custom === true,
+      `${vmoved.dom.slice(0, 3).join(' | ')} · custom=${vmoved.custom}`);
+
+    await ev(`document.querySelector('[data-reset-order]')?.click()`);
+    await sleep(2000);
+    const vreset = await ev(`(async () => {
+      const d = await fetch('/api/albums/${voiceOrder.id}').then(x => x.json());
+      return { custom: d.album.custom_order, bar: Boolean(document.querySelector('.track-order-bar')) };
+    })()`);
+    ok('音声发行也能恢复默认顺序', vreset.custom === false && vreset.bar === false,
+      `custom=${vreset.custom} bar=${vreset.bar}`);
+  }
 } catch (err) {
   console.error('验证异常：', err.message);
   fail += 1;

@@ -295,6 +295,9 @@ function applyVolume(raw, { persist = true, gesture = false } = {}) {
   const label = $('#volumeVal');
   if (label) label.textContent = `${value}%`;
   $('#volumeBox')?.classList.toggle('is-boost', value > 100);
+  // 视频版弹窗是原生 <video>，不走音频图；音量按同一数值对齐（>100% 的放大对它只能到 100%）
+  const video = document.querySelector('#videoModal video');
+  if (video) video.volume = Math.min(1, ratio);
   if (persist) localStorage.setItem('volume', String(value));
 }
 
@@ -1222,6 +1225,14 @@ async function openAlbum(id, { push = true } = {}) {
   });
   bindDetailCacheActions(album);
 
+  // 曲目顺序 = 播放顺序：允许拖动重排（v13）；有自定义顺序时编号显示为播放位次
+  const orderTable = $('#albumDetail .track-table');
+  if (tracks.length > 1 && orderTable) {
+    enableTrackOrdering(album.id, [{ table: orderTable, rows: tracks, keyOf: (t) => t.id }],
+      { customOrder: album.custom_order === true });
+    if (album.custom_order) ensureOrderBar(album.id, orderTable);
+  }
+
   showView('albumDetail');
   if (push) history.pushState({ id }, '', `#/album/${id}`);
   highlightPlayingRow();
@@ -1447,6 +1458,23 @@ async function openVoiceAlbum(data, { push = true, gallery = null } = {}) {
     startPlayback();
   }));
 
+  // v13：正片与特典各自可拖动排序（两组的相对次序互不影响）
+  const mainTable = $('#voiceTrackTable');
+  const bonusRows = data.bonus_tracks ?? [];
+  const bonusTable = $('#albumDetail .bonus-box .track-table');
+  const orderGroups = [];
+  if (mainTable && (data.tracks ?? []).length) {
+    orderGroups.push({ table: mainTable, rows: data.tracks, keyOf: (r) => r.key });
+  }
+  if (bonusTable && bonusRows.length) {
+    orderGroups.push({ table: bonusTable, rows: bonusRows, keyOf: (r) => r.key });
+  }
+  const orderCount = (data.tracks?.length ?? 0) + bonusRows.length;
+  if (orderCount > 1 && mainTable) {
+    enableTrackOrdering(album.id, orderGroups, { customOrder: album.custom_order === true });
+    if (album.custom_order) ensureOrderBar(album.id, mainTable);
+  }
+
   showView('albumDetail');
   if (push) history.pushState({ id: album.id }, '', `#/album/${album.id}`);
   highlightPlayingRow();
@@ -1467,6 +1495,9 @@ function openVideoModal(trackId, title, label) {
       <video src="/api/stream/${trackId}" controls autoplay playsinline></video>
     </div>`;
   document.body.appendChild(el);
+  // 视频音量跟主音量一致（>100% 的软件放大只作用于音频链路，这里封顶 100%）
+  const video = el.querySelector('video');
+  if (video) video.volume = Math.min(1, volumeState.value / 100);
   const close = () => el.remove();
   $('#videoClose', el).addEventListener('click', close);
   el.addEventListener('click', (e) => { if (e.target === el) close(); });
@@ -1658,6 +1689,165 @@ function trackRowMarkup(track, index, { showAlbum = true } = {}) {
         </button>
       </div>
     </div>`;
+}
+
+/* ==================================== 专辑详情：拖动调整播放顺序（schema v13） */
+
+/**
+ * 专辑详情的曲目顺序 = 播放顺序。这里给每一行加「拖动柄」，允许用户按自己的习惯重排，
+ * 顺序存进 albums.track_order（键：普通专辑 tracks.id / 音声行键），扫描后仍然有效。
+ *
+ * 刻意没有用 HTML5 drag&drop：Pointer Events 在桌面、触屏和 CDP 自动化里行为一致，
+ * 也不需要为拖拽再造一套数据传递（拖动结束后直接改 DOM，再回写数组）。
+ */
+
+/** 把行号抽成独立 span，并在前面插入拖动柄（只在详情页调用） */
+function prepareOrderRow(rowEl) {
+  const num = rowEl.querySelector('.t-num');
+  if (!num || num.querySelector('.drag-handle')) return;
+  const val = document.createElement('span');
+  val.className = 't-num-val';
+  val.textContent = num.textContent.trim();
+  const handle = document.createElement('button');
+  handle.type = 'button';
+  handle.className = 'drag-handle';
+  handle.title = '按住拖动，调整播放顺序';
+  handle.setAttribute('aria-label', '拖动调整播放顺序');
+  handle.textContent = '⠿';
+  num.textContent = '';
+  num.append(handle, val);
+}
+
+/** 「已自定义顺序」提示条 + 恢复默认入口（只插一次） */
+function ensureOrderBar(albumId, table) {
+  if (!table?.parentNode) return null;
+  const prev = table.previousElementSibling;
+  if (prev?.classList?.contains('track-order-bar')) return prev;
+  const bar = document.createElement('div');
+  bar.className = 'track-order-bar';
+  bar.innerHTML = `<span>已自定义播放顺序 · 拖动行首 <b>⠿</b> 继续调整</span>
+    <button type="button" class="btn btn-mini" data-reset-order>恢复默认顺序</button>`;
+  bar.querySelector('[data-reset-order]').addEventListener('click', async () => {
+    try {
+      await api(`/api/albums/${albumId}/track-order`, { method: 'POST', body: { order: [] } });
+      toast('已恢复默认顺序');
+      await openAlbum(albumId, { push: false });
+    } catch (err) {
+      toast(`恢复默认顺序失败：${err.message}`, true);
+    }
+  });
+  table.parentNode.insertBefore(bar, table);
+  return bar;
+}
+
+/**
+ * 开启一张专辑详情的拖动排序。
+ * @param {number} albumId
+ * @param {Array<{table: HTMLElement, rows: object[], keyOf: (row: object) => string}>} groups
+ *   音声是「正片 + 特典」两组（两组各自保持相对顺序），普通专辑只有一组。
+ *   rows 会被**原地重排**，所以「播放专辑 / 播放本版本」立即按新顺序走。
+ * @param {{customOrder?: boolean}} [opts]
+ */
+function enableTrackOrdering(albumId, groups, { customOrder = false } = {}) {
+  const list = (groups ?? []).filter((g) => g?.table && Array.isArray(g.rows) && g.rows.length);
+  if (!list.length) return;
+  const rowsOf = (g) => [...g.table.querySelectorAll(':scope > .track-row:not(.is-head)')];
+
+  const renumber = () => {
+    for (const g of list) {
+      rowsOf(g).forEach((el, i) => {
+        const val = el.querySelector('.t-num-val');
+        if (val) val.textContent = String(i + 1);
+        if (el.dataset.trackIndex !== undefined) el.dataset.trackIndex = String(i);
+      });
+    }
+  };
+
+  /** DOM 顺序写回数据数组（对不上就放弃，避免把播放队列搅乱） */
+  const syncRows = (g) => {
+    const byKey = new Map(g.rows.map((r) => [String(g.keyOf(r)), r]));
+    const ordered = rowsOf(g).map((el) => byKey.get(el.dataset.orderKey)).filter(Boolean);
+    if (ordered.length !== g.rows.length) return;
+    g.rows.length = 0;
+    g.rows.push(...ordered);
+  };
+
+  const persist = async () => {
+    const order = list.flatMap((g) => rowsOf(g).map((el) => el.dataset.orderKey));
+    try {
+      await api(`/api/albums/${albumId}/track-order`, { method: 'POST', body: { order } });
+      ensureOrderBar(albumId, list[0].table);
+      toast('播放顺序已保存');
+    } catch (err) {
+      toast(`保存播放顺序失败：${err.message}`, true);
+      await openAlbum(albumId, { push: false });   // 回滚到服务端的顺序
+    }
+  };
+
+  const startDrag = (e, g, rowEl) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const table = g.table;
+    const rows = rowsOf(g);
+    const from = rows.indexOf(rowEl);
+    if (from < 0) return;
+
+    rowEl.classList.add('is-dragging');
+    document.body.classList.add('is-track-dragging');
+    const line = document.createElement('div');
+    line.className = 'track-drop-line';
+    table.appendChild(line);
+    let at = from + 1;
+
+    const place = () => {
+      const tableRect = table.getBoundingClientRect();
+      const ref = rows[at];
+      const y = ref ? ref.getBoundingClientRect().top : (rows[rows.length - 1]?.getBoundingClientRect().bottom ?? tableRect.top);
+      line.style.top = `${Math.round(y - tableRect.top)}px`;
+    };
+    place();
+
+    const onMove = (ev) => {
+      let idx = rows.findIndex((r) => {
+        const rect = r.getBoundingClientRect();
+        return ev.clientY < rect.top + rect.height / 2;
+      });
+      if (idx < 0) idx = rows.length;
+      at = idx;
+      place();
+    };
+
+    const finish = async () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      line.remove();
+      rowEl.classList.remove('is-dragging');
+      document.body.classList.remove('is-track-dragging');
+      const insert = at > from ? at - 1 : at;
+      if (insert !== from) {
+        const others = rowsOf(g).filter((r) => r !== rowEl);
+        table.insertBefore(rowEl, others[insert] ?? null);
+        syncRows(g);
+        renumber();
+        await persist();
+      }
+    };
+    const onUp = (ev) => { ev.preventDefault(); void finish(); };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  };
+
+  for (const g of list) {
+    rowsOf(g).forEach((el, i) => {
+      const row = g.rows[i];
+      if (!row) return;
+      el.dataset.orderKey = String(g.keyOf(row));
+      prepareOrderRow(el);
+      el.querySelector('.drag-handle')?.addEventListener('pointerdown', (e) => startDrag(e, g, el));
+    });
+  }
+  if (customOrder) renumber();
 }
 
 /* ========================================================== 视图：全部曲目 */
@@ -3200,6 +3390,86 @@ async function updateFavoriteBadges() {
   set('#favTrackBadge', s.tracks ?? 0);
 }
 
+/* ==================================================================== 快捷键 */
+
+/**
+ * 播放器快捷键（v1.2.9 起可在设置里改）。
+ *
+ * 键位字符串的格式与 `server/config.mjs` 完全一致：`Ctrl+Alt+<KeyboardEvent.code>`。
+ * 这里列出的 `def` 就是默认值，也是「恢复默认」写回的值 —— 两端各存一份，
+ * 但服务端 sanitize 会以自己那份为准校验，前端这份只负责展示与默认回填。
+ */
+const SHORTCUT_ACTIONS = [
+  { id: 'playPause', label: '播放 / 暂停', def: 'Space' },
+  { id: 'seekBackward', label: '快退 5 秒', def: 'ArrowLeft' },
+  { id: 'seekForward', label: '快进 5 秒', def: 'ArrowRight' },
+  { id: 'volumeDown', label: '音量 −', def: 'ArrowDown' },
+  { id: 'volumeUp', label: '音量 ＋', def: 'ArrowUp' },
+  { id: 'prevTrack', label: '上一首', def: 'Ctrl+Alt+ArrowLeft' },
+  { id: 'nextTrack', label: '下一首', def: 'Ctrl+Alt+ArrowRight' },
+  { id: 'back', label: '返回（单曲详情）', def: 'Alt+ArrowLeft' },
+];
+const SHORTCUT_DEFAULTS = Object.fromEntries(SHORTCUT_ACTIONS.map((a) => [a.id, a.def]));
+/** 当前生效的键位（启动时先按默认，拿到 /api/config 后覆盖） */
+const shortcutState = { bindings: { ...SHORTCUT_DEFAULTS }, capturing: null };
+
+const MODIFIER_CODES = new Set([
+  'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
+  'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight',
+]);
+/** 这些键在应用里已有固定含义，不允许被播放器快捷键占用 */
+const SHORTCUT_RESERVED = new Map([
+  ['Escape', 'ESC（关闭 / 取消）'],
+  ['Tab', 'Tab（切换焦点）'],
+  ['Enter', '回车'],
+  ['Slash', '/（搜索）'],
+  ['KeyL', 'L（歌词页）'],
+  ['KeyE', 'E（编辑）'],
+  ['Digit1', '1（列表循环）'],
+  ['Digit2', '2（单曲循环）'],
+  ['Digit3', '3（随机播放）'],
+  ['Ctrl+Alt+KeyL', '桌面歌词锁定（全局快捷键）'],
+  ['Ctrl+Alt+KeyR', '刷新歌词窗（全局快捷键）'],
+]);
+
+/** 从键盘事件得出规范组合键；纯修饰键返回 null */
+function comboOf(e) {
+  const code = e.code || '';
+  if (!code || MODIFIER_CODES.has(code)) return null;
+  const mods = [];
+  if (e.ctrlKey) mods.push('Ctrl');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (e.metaKey) mods.push('Meta');
+  return [...mods, code].join('+');
+}
+
+const SHORTCUT_KEY_LABELS = {
+  Space: '空格', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓',
+  Slash: '/', Backquote: '`', Minus: '-', Equal: '=', Comma: ',', Period: '.',
+  Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']', Backslash: '\\',
+};
+
+/** 组合键 → 给人看的短标签（Ctrl+Alt+← / 空格 / P …） */
+function shortcutLabel(combo) {
+  if (!combo) return '未设置';
+  const parts = String(combo).split('+').map((s) => s.trim()).filter(Boolean);
+  const key = parts.pop() ?? '';
+  const label = SHORTCUT_KEY_LABELS[key]
+    ?? (/^Key[A-Z]$/.test(key) ? key.slice(3)
+      : /^Digit[0-9]$/.test(key) ? key.slice(5)
+        : /^Numpad/.test(key) ? `小键盘${key.slice(6)}`
+          : key);
+  return [...parts, label].join('+');
+}
+
+/** 这个键盘事件命中了哪个动作（没有则 null） */
+function shortcutActionOf(e) {
+  const combo = comboOf(e);
+  if (!combo) return null;
+  return Object.keys(shortcutState.bindings).find((id) => shortcutState.bindings[id] === combo) ?? null;
+}
+
 function bindEvents() {
   $$('.nav-item').forEach((btn) => btn.addEventListener('click', () => {
     const view = btn.dataset.view;
@@ -3241,7 +3511,9 @@ function bindEvents() {
   $('#sortSelect').addEventListener('change', (e) => {
     state.sort = e.target.value;
     localStorage.setItem('sort', state.sort);
-    if (state.view === 'albums') loadAlbums();
+    // 三个专辑墙视图（专辑墙 / 喜欢的ASMR / 喜欢的专辑）都吃同一个 sort 参数，
+    // 之前只在 view==='albums' 时重载，收藏视图里换排序看起来「没反应」
+    if (ALBUM_WALL_VIEWS.includes(state.view)) loadAlbums();
   });
 
   $('#tagModeSelect').value = state.tagMode;
@@ -3796,12 +4068,48 @@ function bindEvents() {
   });
   $('#prevBtn').addEventListener('click', prev);
   $('#nextBtn').addEventListener('click', next);
+  /**
+   * 当前真正在播的媒体元素：视频版是弹窗里的 <video>（原生控件），其余都是常驻 <audio>。
+   * 键盘快捷键（→ / ← / 空格 / ↑ / ↓）一律作用在这个元素上，音频视频共用一套键位。
+   */
+  const activeMedia = () => document.querySelector('#videoModal video') ?? audio;
   // 快进 / 倒退 5 秒（到边界自动夹住，不越界）
   const nudge = (seconds) => {
-    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
-    audio.currentTime = Math.min(Math.max(audio.currentTime + seconds, 0), audio.duration);
-    $('#curTime').textContent = fmtTime(audio.currentTime);
-    syncLyrics(audio.currentTime * 1000);
+    const media = activeMedia();
+    if (!Number.isFinite(media.duration) || media.duration <= 0) return;
+    media.currentTime = Math.min(Math.max(media.currentTime + seconds, 0), media.duration);
+    if (media === audio) {
+      $('#curTime').textContent = fmtTime(audio.currentTime);
+      syncLyrics(audio.currentTime * 1000);
+    }
+  };
+  /** 空格：音频走主播放键（图标/按钮态都在那里），视频弹窗直接控原生 <video> */
+  const togglePlay = () => {
+    const video = document.querySelector('#videoModal video');
+    if (!video) { $('#playBtn').click(); return; }
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  };
+  /** ↑ / ↓：步长 5%，与音量滑杆共用 applyVolume（含 >100% 的软件放大判定与持久化） */
+  const stepVolume = (delta) => {
+    const next = Math.max(0, Math.min(VOLUME_MAX, volumeState.value + delta));
+    if (next === volumeState.value) {
+      toast(`音量已是${delta > 0 ? '最大' : '最小'}（${next}%）`);
+      return;
+    }
+    applyVolume(next, { gesture: true });
+    toast(`音量 ${next}%`);
+  };
+  /** 执行一个可在设置里配置的动作（键位 → 动作见 shortcutState） */
+  const runShortcutAction = (id) => {
+    if (id === 'playPause') togglePlay();
+    else if (id === 'seekForward') nudge(5);
+    else if (id === 'seekBackward') nudge(-5);
+    else if (id === 'volumeUp') stepVolume(5);
+    else if (id === 'volumeDown') stepVolume(-5);
+    else if (id === 'prevTrack') prev();
+    else if (id === 'nextTrack') next();
+    else if (id === 'back') handleBack();
   };
   $('#back5Btn').addEventListener('click', () => nudge(-5));
   $('#fwd5Btn').addEventListener('click', () => nudge(5));
@@ -3939,15 +4247,47 @@ function bindEvents() {
     if (e.key === 'Escape' && !$('#nowPlaying').hidden) { setNowPlaying(false); return; }
     const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
     if (typing) return;
-    if (e.code === 'Space') { e.preventDefault(); $('#playBtn').click(); }
-    else if (e.code === 'ArrowRight' && e.shiftKey) next();
-    else if (e.code === 'ArrowLeft' && e.shiftKey) prev();
+    // 可配置的播放器快捷键（默认：空格 / ←→ / ↑↓ / Ctrl+Alt+←→ / Alt+←，见设置面板）
+    const actionId = shortcutActionOf(e);
+    if (actionId) { e.preventDefault(); runShortcutAction(actionId); return; }
+    // Shift+← / Shift+→ 保留为「上一首 / 下一首」的固定键位（不可配置，避免和快进冲突）
+    if (e.code === 'ArrowRight' && e.shiftKey) { e.preventDefault(); next(); }
+    else if (e.code === 'ArrowLeft' && e.shiftKey) { e.preventDefault(); prev(); }
     else if (e.key === '/') { e.preventDefault(); $('#searchInput').focus(); }
     else if (e.key === 'l' || e.key === 'L') setNowPlaying($('#nowPlaying').hidden);
     else if (e.key === '1') setPlayMode('list');
     else if (e.key === '2') setPlayMode('one');
     else if (e.key === '3') setPlayMode('shuffle');
   });
+
+  /* ---------- 「后退」：鼠标侧键（X1）与 Alt+← ---------- */
+  /**
+   * 单曲详情（#nowPlaying）是页面内浮层，不在 history 里，所以「后退」不能直接交给浏览器：
+   * 浮层开着时先关它（与左上角返回按钮完全同一条路径，回到进入前的视图）；
+   * 浮层没开时才退回上一页，保持原有的后退语义。
+   *
+   * Electron 里系统级后退由主进程拦下再转调 window.lunaBack（见 electron/main.cjs），
+   * 浏览器模式下渲染进程自己监听。两条路可能同时到，用 250ms 时间窗去重，
+   * 免得一次按键既关浮层又退一页。
+   */
+  let lastBackAt = 0;
+  const handleBack = () => {
+    const now = Date.now();
+    if (now - lastBackAt < 250) return;
+    lastBackAt = now;
+    if (!$('#nowPlaying').hidden) { setNowPlaying(false); return; }
+    history.back();
+  };
+  // 主进程 executeJavaScript 的入口（首帧前也不至于报错）
+  window.lunaBack = handleBack;
+  for (const name of ['mousedown', 'mouseup', 'auxclick']) {
+    document.addEventListener(name, (e) => {
+      if (e.button !== 3) return;           // 3 = 后退侧键（4 是前进，不接管）
+      e.preventDefault();
+      e.stopPropagation();
+      if (name === 'mousedown') handleBack();
+    }, true);
+  }
 
   /* ------------------------------------------------- 图片预览：点缩略图看原图 */
 
@@ -4261,6 +4601,8 @@ async function loadSettingsConfig() {
     const { config } = await api('/api/config');
     settingsState.config = config;
     applyAppearance(config.appearance);
+    // 快捷键：服务端已校验并回填默认，这里只做前端生效
+    shortcutState.bindings = { ...SHORTCUT_DEFAULTS, ...(config.shortcuts ?? {}) };
   } catch { /* 取不到配置不阻塞启动，外观保持默认 */ }
   return settingsState.config;
 }
@@ -4434,6 +4776,34 @@ function settingsMarkup() {
     </section>
 
     <section class="set-sec">
+      <h4>快捷键 <span class="set-sec-tag">播放器</span></h4>
+      <div class="set-row">
+        <div class="set-label">键位</div>
+        <div class="set-control">
+          <div class="shortcut-list">
+            ${SHORTCUT_ACTIONS.map((a) => {
+    const combo = shortcutState.bindings[a.id] ?? a.def;
+    const changed = combo !== a.def;
+    return `
+              <div class="shortcut-row">
+                <span class="shortcut-name">${esc(a.label)}</span>
+                <button type="button" class="shortcut-key${changed ? ' is-changed' : ''}"
+                        data-shortcut="${a.id}" title="点击后按下新的组合键；ESC 取消">${esc(shortcutLabel(combo))}</button>
+                <button type="button" class="btn btn-ghost btn-mini" data-shortcut-reset="${a.id}"
+                        title="恢复默认：${esc(shortcutLabel(a.def))}"${changed ? '' : ' disabled'}>恢复默认</button>
+              </div>`;
+  }).join('')}
+          </div>
+          <div class="set-note">
+            点键位按钮后直接按下新的组合键（可带 Ctrl / Alt / Shift），ESC 取消；选中后立即生效并保存到
+            <code>data/config.json</code>。鼠标侧键「后退」固定可用，不在设置范围内。
+          </div>
+          <div class="set-note">方向键 / 空格 / Alt+← 等默认键位若与输入框冲突，输入框内始终不抢键。</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="set-sec">
       <h4>已移除的专辑</h4>
       ${excludedSectionMarkup(exclusions)}
     </section>
@@ -4503,6 +4873,8 @@ function openSettings() {
 }
 
 function closeSettings() {
+  // 取消还在等待按键的录制，避免关闭后键盘监听继续存在
+  shortcutState.capturing?.cancel?.();
   $('#settingsDrawer').hidden = true;
   $('#settingsBackdrop').hidden = true;
   $('#settingsBtn')?.classList.remove('is-active');
@@ -4548,8 +4920,88 @@ async function saveDesktopSetting(minimizeToTray) {
   }
 }
 
+/** 保存快捷键（整张表一起提交，避免并发改动互相覆盖；服务端会再校验一次） */
+async function saveShortcuts(patch = {}) {
+  const next = { ...shortcutState.bindings, ...patch };
+  const { config } = await api('/api/config', { method: 'POST', body: { shortcuts: next } });
+  settingsState.config = config;
+  shortcutState.bindings = { ...SHORTCUT_DEFAULTS, ...(config.shortcuts ?? {}) };
+  return config;
+}
+
+/**
+ * 捕获新键位：点按钮后在 document 捕获阶段接管键盘，期间按键不再传给播放器；
+ * ESC 取消；与保留键或其它动作冲突时提示并继续等待；成功则立即保存并重绘。
+ */
+function captureShortcut(btn) {
+  if (shortcutState.capturing) return;
+  const action = SHORTCUT_ACTIONS.find((a) => a.id === btn.dataset.shortcut);
+  if (!action) return;
+  const prevText = btn.textContent;
+  shortcutState.capturing = { id: action.id, btn };
+  btn.classList.add('is-capturing');
+  btn.textContent = '按下新键…';
+
+  const finish = () => {
+    document.removeEventListener('keydown', onKey, true);
+    btn.classList.remove('is-capturing');
+    btn.textContent = prevText;
+    shortcutState.capturing = null;
+  };
+  // 关闭设置抽屉时要能取消录制，否则监听会留在页面上继续吃掉按键
+  if (shortcutState.capturing) shortcutState.capturing.cancel = finish;
+
+  const onKey = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    if (e.key === 'Escape') { finish(); return; }
+    const combo = comboOf(e);
+    if (!combo) return;                                   // 还只按着修饰键，等主键
+    if (SHORTCUT_RESERVED.has(combo)) {
+      toast(`「${shortcutLabel(combo)}」已被 ${SHORTCUT_RESERVED.get(combo)} 占用，换一个吧`, true);
+      return;
+    }
+    const conflict = SHORTCUT_ACTIONS.find((a) => a.id !== action.id
+      && shortcutState.bindings[a.id] === combo);
+    if (conflict) {
+      toast(`「${shortcutLabel(combo)}」已用于「${conflict.label}」，换一个吧`, true);
+      return;
+    }
+    finish();
+    if (combo === shortcutState.bindings[action.id]) return;
+    try {
+      await saveShortcuts({ [action.id]: combo });
+      toast(`「${action.label}」已改为 ${shortcutLabel(combo)}`);
+    } catch (err) {
+      toast(`保存快捷键失败：${err.message}`, true);
+    }
+    renderSettings();
+  };
+
+  document.addEventListener('keydown', onKey, true);
+}
+
 /** 设置抽屉内控件的事件（每次重绘都要重新绑） */
 function bindSettingsBody() {
+  // 快捷键：点键位按钮 → 捕获新组合键
+  $$('#settingsBody [data-shortcut]').forEach((btn) => {
+    btn.addEventListener('click', () => captureShortcut(btn));
+  });
+  // 快捷键：单个动作恢复默认
+  $$('#settingsBody [data-shortcut-reset]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const action = SHORTCUT_ACTIONS.find((a) => a.id === btn.dataset.shortcutReset);
+      if (!action) return;
+      try {
+        await saveShortcuts({ [action.id]: action.def });
+        toast(`「${action.label}」已恢复默认：${shortcutLabel(action.def)}`);
+        renderSettings();
+      } catch (err) {
+        toast(`恢复默认失败：${err.message}`, true);
+      }
+    });
+  });
   // 「已移除的专辑」：逐条恢复 / 全部恢复（恢复后需重新扫描才会回墙）
   $$('#settingsBody [data-restore]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -4705,10 +5157,12 @@ function bindSettingsEvents() {
           appearance: {
             theme: 'midnight', mode: 'dark', bgOpacity: 100, bgImage: null,
           },
+          shortcuts: SHORTCUT_DEFAULTS,
         },
       });
       settingsState.config = config;
       applyAppearance(config.appearance);
+      shortcutState.bindings = { ...SHORTCUT_DEFAULTS, ...(config.shortcuts ?? {}) };
       toast('已恢复默认设置');
     } catch (err) {
       toast(`恢复默认失败：${err.message}`, true);

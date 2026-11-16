@@ -272,10 +272,22 @@ export function applyAlbumTags(albumIds, { add = [], remove = [], source = 'manu
     return tag.id;
   };
 
+  // 标签有增减的专辑顺带算一次「更新」，专辑墙按最近更新排序要用
+  const touch = db.prepare('UPDATE albums SET updated_at = ? WHERE id = ?');
   for (const albumId of ids) {
     const kind = kindOf.get(albumId) ?? DEFAULT_TAG_KIND;
-    for (const spec of specs) added += insert.run(albumId, resolveTagId(spec, kind), source, t).changes;
-    for (const tagId of removeIds) removed += del.run(albumId, tagId).changes;
+    let touched = 0;
+    for (const spec of specs) {
+      const n = insert.run(albumId, resolveTagId(spec, kind), source, t).changes;
+      added += n;
+      touched += n;
+    }
+    for (const tagId of removeIds) {
+      const n = del.run(albumId, tagId).changes;
+      removed += n;
+      touched += n;
+    }
+    if (touched) touch.run(t, albumId);
   }
   return { added, removed, created };
 }

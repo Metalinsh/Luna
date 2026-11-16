@@ -28,7 +28,9 @@ const dbFile = path.join(dataDir, 'library.db');
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       album_key TEXT NOT NULL UNIQUE,
       title TEXT, album_artist TEXT, year INTEGER,
-      kind TEXT NOT NULL DEFAULT 'music'
+      kind TEXT NOT NULL DEFAULT 'music',
+      -- v11 起就有；打标会顺带刷新它（专辑墙按「最近更新」排序）
+      updated_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

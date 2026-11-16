@@ -97,6 +97,10 @@
         <option value="year-desc">年份 新→旧</option>
         <option value="year-asc">年份 旧→新</option>
         <option value="added-desc">最近入库</option>
+        <option value="updated-desc">最近更新</option>
+        <option value="favorite-desc">收藏时间</option>
+        <option value="rj-asc">RJ号 小→大</option>
+        <option value="rj-desc">RJ号 大→小</option>
         <option value="tracks-desc">曲目数</option>
         <option value="duration-desc">总时长</option>
         <option value="tags-desc">标签数</option>
@@ -164,19 +168,19 @@
   </div>
   <div class="player-center">
     <div class="controls">
-      <button class="icon-btn" id="prevBtn" title="上一首">
+      <button class="icon-btn" id="prevBtn" title="上一首 (Ctrl+Alt+← / Shift+←)">
         <svg viewBox="0 0 24 24"><path d="M19 5v14L8 12zM5 5v14"/></svg>
       </button>
       <button class="icon-btn" id="back5Btn" title="倒退 5 秒 (←)">
         <svg viewBox="0 0 24 24"><path d="M11 5V2L6 6l5 4V7a5 5 0 1 1-5 5H4a7 7 0 1 0 7-7z"/><text x="8" y="17" font-size="7" fill="currentColor" stroke="none">5</text></svg>
       </button>
-      <button class="play-btn" id="playBtn" title="播放 / 暂停">
+      <button class="play-btn" id="playBtn" title="播放 / 暂停 (空格)">
         <svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4l13 8-13 8z"/></svg>
       </button>
       <button class="icon-btn" id="fwd5Btn" title="快进 5 秒 (→)">
         <svg viewBox="0 0 24 24"><path d="M13 5V2l5 4-5 4V7a5 5 0 1 0 5 5h2a7 7 0 1 1-7-7z"/><text x="8" y="17" font-size="7" fill="currentColor" stroke="none">5</text></svg>
       </button>
-      <button class="icon-btn" id="nextBtn" title="下一首">
+      <button class="icon-btn" id="nextBtn" title="下一首 (Ctrl+Alt+→ / Shift+→)">
         <svg viewBox="0 0 24 24"><path d="M5 5v14l11-7zM19 5v14"/></svg>
       </button>
     </div>
@@ -195,7 +199,7 @@
     </button>
     <div class="volume" id="volumeBox">
       <svg viewBox="0 0 24 24"><path d="M4 9h3l5-4v14l-5-4H4z"/><path d="M16 8.5a5 5 0 0 1 0 7"/></svg>
-      <div class="volume-track" title="0–100% 为原始音量；100% 以上是软件放大，可能失真（已自动限幅）">
+      <div class="volume-track" title="0–100% 为原始音量；100% 以上是软件放大，可能失真（已自动限幅）；↑ / ↓ 每次 ±5%">
         <input type="range" id="volume" min="0" max="200" value="85"
                aria-label="音量（100% 以上为软件放大）" />
         <i class="volume-mark" aria-hidden="true"></i>
@@ -208,7 +212,7 @@
 <div class="nowplaying" id="nowPlaying" hidden>
   <!-- 左上角「返回」：取代原来右上角的 ✕（用户要求），返回即回到进入本页前的那个视图 -->
   <div class="np-topbar">
-    <button class="np-back" id="npBack" title="返回 (ESC)">
+    <button class="np-back" id="npBack" title="返回 (ESC / Alt+← / 鼠标后退键)">
       <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
       返回
     </button>

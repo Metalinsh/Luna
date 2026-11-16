@@ -154,7 +154,7 @@ try {
    * 分段随版本增加：压缩包（P2）+ 外观 + 桌面 + 已移除的专辑（v1.2.2 新增）。
    * 这里断言"必需的几段都在"，而不是死等某个总数 —— 加分段不该让这条失败。
    */
-  const needSections = ['压缩包', '外观', '桌面', '已移除的专辑'];
+  const needSections = ['压缩包', '外观', '桌面', '快捷键', '已移除的专辑'];
   const missing = needSections.filter((n) => !panel.sections.some((s) => String(s).includes(n)));
   ok(`设置分段包含 ${needSections.join(' + ')}`, missing.length === 0,
     missing.length ? `缺少 ${missing.join('/')}；实际 ${panel.sections.join(' / ')}` : panel.sections.join(' / '));
@@ -178,6 +178,75 @@ try {
   ok('背景图可设置也可移除', panel.hasBgPick && panel.hasBgClear);
   ok('有保存与恢复默认', panel.hasSave && panel.hasReset);
   await cdp.shot('v11-settings-panel.png');
+
+  console.log('\n— 快捷键设置 —');
+  const shortcutUi = await cdp.eval(`(() => ({
+    rows: [...document.querySelectorAll('#settingsBody [data-shortcut]')].map((b) => [b.dataset.shortcut, b.textContent.trim()]),
+    hasReset: document.querySelector('[data-shortcut-reset="playPause"]') !== null,
+  }))()`);
+  ok('快捷键分段列出 8 个动作', shortcutUi.rows.length === 8, shortcutUi.rows.map((r) => r[0]).join(','));
+  const defaults = ['空格', '←', '→', '↓', '↑', 'Ctrl+Alt+←', 'Ctrl+Alt+→', 'Alt+←'];
+  ok('默认键位与当前实现一致',
+    shortcutUi.rows.map((r) => r[1]).join('|') === defaults.join('|'),
+    shortcutUi.rows.map((r) => r[1]).join(' | '));
+  ok('每个动作都能单独恢复默认', shortcutUi.hasReset === true);
+
+  // 改成 KeyP：点按钮 → 按下 P
+  await cdp.eval(`document.querySelector('[data-shortcut="playPause"]').click()`);
+  await sleep(300);
+  const capturing = await cdp.eval(`({
+    text: document.querySelector('[data-shortcut="playPause"]').textContent.trim(),
+    cls: document.querySelector('[data-shortcut="playPause"]').className,
+  })`);
+  ok('点键位后进入「按下新键」状态', capturing.text === '按下新键…' && /is-capturing/.test(capturing.cls),
+    capturing.text);
+  await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', code: 'KeyP', bubbles: true, cancelable: true }))`);
+  await sleep(900);
+  const cfgKey = (await (await fetch(`${BASE}/api/config`)).json()).config;
+  const changedUi = await cdp.eval(`({
+    text: document.querySelector('[data-shortcut="playPause"]').textContent.trim(),
+    changed: document.querySelector('[data-shortcut="playPause"]').classList.contains('is-changed'),
+    resetEnabled: !document.querySelector('[data-shortcut-reset="playPause"]').disabled,
+  })`);
+  ok('改键后立即写入 config.json', cfgKey.shortcuts?.playPause === 'KeyP', String(cfgKey.shortcuts?.playPause));
+  ok('界面显示新键位并标记为已修改', changedUi.text === 'P' && changedUi.changed === true,
+    `${changedUi.text} changed=${changedUi.changed}`);
+
+  // 冲突：把「快进」也设成 P → 应被拒绝且仍停在等待状态
+  await cdp.eval(`document.querySelector('[data-shortcut="seekForward"]').click()`);
+  await sleep(250);
+  await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', code: 'KeyP', bubbles: true, cancelable: true }))`);
+  await sleep(500);
+  const conflict = await cdp.eval(`({
+    text: document.querySelector('[data-shortcut="seekForward"]').textContent.trim(),
+    toast: document.querySelector('#toast')?.textContent?.trim() ?? '',
+  })`);
+  const cfgConflict = (await (await fetch(`${BASE}/api/config`)).json()).config;
+  ok('与已有动作撞键时拒绝并提示', conflict.text === '按下新键…' && /已用于/.test(conflict.toast),
+    conflict.toast);
+  ok('冲突键位没有被写进配置', cfgConflict.shortcuts?.seekForward === 'ArrowRight',
+    String(cfgConflict.shortcuts?.seekForward));
+  await cdp.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }))`);
+  await sleep(300);
+
+  // 单个动作恢复默认
+  await cdp.eval(`document.querySelector('[data-shortcut-reset="playPause"]').click()`);
+  await sleep(900);
+  const cfgReset = (await (await fetch(`${BASE}/api/config`)).json()).config;
+  const resetUi = await cdp.eval(`document.querySelector('[data-shortcut="playPause"]').textContent.trim()`);
+  ok('恢复默认把键位写回 Space', cfgReset.shortcuts?.playPause === 'Space' && resetUi === '空格',
+    `${cfgReset.shortcuts?.playPause} / ${resetUi}`);
+
+  // 录制中关闭设置：必须自动取消，不能把键盘监听留在页面上
+  await cdp.eval(`document.querySelector('[data-shortcut="volumeUp"]').click()`);
+  await sleep(250);
+  await cdp.eval(`document.querySelector('#settingsBackdrop').click()`);
+  await sleep(500);
+  const closedWhileCapturing = await cdp.eval(`document.querySelector('#settingsDrawer').hidden`);
+  await cdp.eval(`document.querySelector('#settingsBtn').click()`);
+  await sleep(900);
+  const afterReopen = await cdp.eval(`document.querySelector('[data-shortcut="volumeUp"]').textContent.trim()`);
+  ok('录制中关闭设置会自动取消录制', closedWhileCapturing === true && afterReopen === '↑', afterReopen);
 
   console.log('\n— 配色即时生效 —');
   const accent0 = await cdp.eval(`getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()`);
