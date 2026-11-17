@@ -106,9 +106,13 @@ export function locateRelease(filePath) {
 
   const first = codes[0];
   // 发行根 = 从头到「最外层 RJ 所在段」的完整路径；压缩包边界原样保留。
-  const releaseRoot = first.layer === 'archive'
+  // 前导分隔符必须留住：pathLayers() 切段时会 filter(Boolean) 掉空段，UNC 的 `\\`、
+  // POSIX 根的 `/` 恰好在那一步丢掉；丢掉之后 Windows 会把 `\\NAS\share\…` 当相对
+  // 路径 `NAS\share\…`（盘符根同理），发行根再也拼不回落盘位置 → 整库扫不进一首。
+  const rootLead = (String(filePath).match(/^[\\/]+/) || [''])[0];
+  const releaseRoot = rootLead + (first.layer === 'archive'
     ? archiveSegs.slice(0, first.index + 1).join(path.sep)
-    : `${archiveSegs.join(path.sep)}${isVirtual ? PERSIST_SEP : ''}${members.slice(0, first.index + 1).join(path.sep)}`;
+    : `${archiveSegs.join(path.sep)}${isVirtual ? PERSIST_SEP : ''}${members.slice(0, first.index + 1).join(path.sep)}`);
 
   return {
     rjCode: first.code,

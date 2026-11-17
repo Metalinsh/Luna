@@ -53,6 +53,41 @@ test('RJ 号定位：取路径中最靠外的一个', () => {
   assert.deepEqual(r.nestedRjCodes, ['RJ01187370']);
 });
 
+test('RJ 号定位：发行根保留绝对路径前缀（盘符 / UNC / POSIX 根）', () => {
+  // 盘符根：`E:` 与分隔符都不能丢
+  const drive = locateRelease('E:\\Music\\[RJ01182623]专辑\\a.mp3');
+  assert.equal(drive.releaseRoot, 'E:\\Music\\[RJ01182623]专辑');
+
+  // UNC 根：丢掉前导 `\\` 之后 Windows 会把它当相对路径 `NAS\share\…`
+  const unc = locateRelease('\\\\NAS\\share\\asmr\\【RJ432872】某作品\\#10_おまけ.wav');
+  assert.equal(unc.rjCode, 'RJ432872');
+  assert.equal(unc.releaseRoot, '\\\\NAS\\share\\asmr\\【RJ432872】某作品');
+
+  // POSIX 根：前导 `/` 同样要留住
+  const posix = locateRelease('/mnt/asmr/RJ432872/01.mp3');
+  assert.equal(posix.releaseRoot[0], '/');
+  assert.ok(posix.releaseRoot.endsWith(`${path.sep}RJ432872`));
+});
+
+test('RJ 号定位：压缩包虚拟路径的前导分隔符与包内层级不受影响', () => {
+  const sep = '\u0001'; // PERSIST_SEP：压缩包路径与包内成员之间的边界（见 config.mjs）
+  // 本地盘上的压缩包：RJ 在压缩包名上 → 发行根就是压缩包本身，且不能凭空多出前导分隔符
+  const localZip = 'D:\\zips\\[RJ01182623]合集.zip';
+  const local = locateRelease(`${localZip}${sep}[RJ01182623]本篇${path.sep}08_通常.wav`);
+  assert.equal(local.releaseRoot, localZip);
+
+  // NAS 上的压缩包：压缩包自身的 UNC 前缀要留住
+  const uncZip = '\\\\NAS\\share\\zips\\[RJ01182623]合集.zip';
+  const unc = locateRelease(`${uncZip}${sep}本篇${path.sep}08_通常.wav`);
+  assert.equal(unc.releaseRoot, uncZip);
+
+  // NAS 上、RJ 只在包内成员里：`<压缩包绝对路径><0x01><发行根>`
+  const plainZip = '\\\\NAS\\share\\zips\\合集.zip';
+  const member = locateRelease(`${plainZip}${sep}[RJ432872]特典${path.sep}01.wav`);
+  assert.equal(member.rjCode, 'RJ432872');
+  assert.equal(member.releaseRoot, `${plainZip}${sep}[RJ432872]特典`);
+});
+
 test('标题候选：去掉 [RJxxxxxxxx] 前缀', () => {
   assert.equal(titleFromFolder('[RJ01113481]新婚妻子'), '新婚妻子');
   assert.equal(titleFromFolder('RJ01182623 某作品'), '某作品');
